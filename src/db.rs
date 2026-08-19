@@ -88,10 +88,7 @@ pub fn remove_root(db_path: &Path, root: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn existing_file_state(
-    conn: &Connection,
-    path: &Path,
-) -> Result<Option<(u64, i64, bool)>> {
+pub fn existing_file_state(conn: &Connection, path: &Path) -> Result<Option<(u64, i64, bool)>> {
     let path_text = path.to_string_lossy().to_string();
     let state = conn
         .query_row(

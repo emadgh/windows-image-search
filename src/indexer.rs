@@ -225,7 +225,11 @@ pub fn spawn_similarity_search(
     });
 }
 
-fn similarity_search(db_path: &Path, model_cache: &Path, query_path: &Path) -> Result<Vec<ImageRecord>> {
+fn similarity_search(
+    db_path: &Path,
+    model_cache: &Path,
+    query_path: &Path,
+) -> Result<Vec<ImageRecord>> {
     let options = ImageInitOptions::new(ImageEmbeddingModel::ClipVitB32)
         .with_cache_dir(model_cache.to_path_buf())
         .with_show_download_progress(true)
