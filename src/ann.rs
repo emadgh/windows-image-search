@@ -145,7 +145,9 @@ fn load_manifest(index_dir: &Path) -> Result<Manifest> {
     }
     Ok(Manifest {
         signature: signature.context("ANN manifest has no signature")?,
-        basename: basename.filter(|value| !value.is_empty()).context("ANN manifest has no basename")?,
+        basename: basename
+            .filter(|value| !value.is_empty())
+            .context("ANN manifest has no basename")?,
         count: count.context("ANN manifest has no count")?,
     })
 }

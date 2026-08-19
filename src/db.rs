@@ -1,10 +1,12 @@
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, params_from_iter, Connection};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
 pub struct ImageRecord {
+    pub rowid: usize,
     pub path: PathBuf,
     pub root: PathBuf,
     pub file_name: String,
@@ -739,7 +741,7 @@ pub fn load_images(db_path: &Path) -> Result<Vec<ImageRecord>> {
         SELECT path, root, file_name, extension, size, modified, width, height,
                description, keywords, dominant_r, dominant_g, dominant_b,
                visual_hash, color_histogram, color_histogram_dim,
-               embedding, embedding_dim, embedding_normalized
+               embedding, embedding_dim, embedding_normalized, rowid
         FROM images
         ORDER BY file_name COLLATE NOCASE
         "#,
@@ -759,6 +761,7 @@ pub fn load_images(db_path: &Path) -> Result<Vec<ImageRecord>> {
         let visual_hash_signed: Option<i64> = row.get(13)?;
         let embedding_normalized = row.get::<_, bool>(18)?;
         Ok(ImageRecord {
+            rowid: row.get::<_, i64>(19)?.max(0) as usize,
             path: PathBuf::from(row.get::<_, String>(0)?),
             root: PathBuf::from(row.get::<_, String>(1)?),
             file_name: row.get(2)?,
@@ -783,6 +786,156 @@ pub fn load_images(db_path: &Path) -> Result<Vec<ImageRecord>> {
     })?;
 
     Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+#[derive(Clone, Debug)]
+pub struct AnnEmbedding {
+    pub rowid: usize,
+    pub embedding: Vec<f32>,
+}
+
+pub fn load_search_images(db_path: &Path) -> Result<Vec<ImageRecord>> {
+    let conn = open(db_path)?;
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT path, root, file_name, extension, size, modified, width, height,
+               description, keywords, dominant_r, dominant_g, dominant_b,
+               visual_hash, color_histogram, color_histogram_dim,
+               embedding_normalized, rowid
+        FROM images
+        ORDER BY file_name COLLATE NOCASE
+        "#,
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        let histogram_blob: Option<Vec<u8>> = row.get(14)?;
+        let histogram_dim: Option<i64> = row.get(15)?;
+        let color_histogram = histogram_blob
+            .and_then(|bytes| decode_f32_vec(&bytes, histogram_dim.unwrap_or(0) as usize));
+        let visual_hash_signed: Option<i64> = row.get(13)?;
+        Ok(ImageRecord {
+            rowid: row.get::<_, i64>(17)?.max(0) as usize,
+            path: PathBuf::from(row.get::<_, String>(0)?),
+            root: PathBuf::from(row.get::<_, String>(1)?),
+            file_name: row.get(2)?,
+            extension: row.get(3)?,
+            size: row.get::<_, i64>(4)?.max(0) as u64,
+            modified: row.get(5)?,
+            width: row.get::<_, i64>(6)?.max(0) as u32,
+            height: row.get::<_, i64>(7)?.max(0) as u32,
+            description: row.get(8)?,
+            keywords: row.get(9)?,
+            dominant: [
+                row.get::<_, i64>(10)?.clamp(0, 255) as u8,
+                row.get::<_, i64>(11)?.clamp(0, 255) as u8,
+                row.get::<_, i64>(12)?.clamp(0, 255) as u8,
+            ],
+            visual_hash: visual_hash_signed.map(|value| value as u64),
+            color_histogram,
+            embedding: None,
+            embedding_normalized: row.get::<_, bool>(16)?,
+            score: None,
+        })
+    })?;
+    Ok(rows.filter_map(|row| row.ok()).collect())
+}
+
+pub fn load_embeddings_for_rowids(
+    db_path: &Path,
+    rowids: &HashSet<usize>,
+) -> Result<HashMap<usize, (Vec<f32>, bool)>> {
+    if rowids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let conn = open(db_path)?;
+    let mut output = HashMap::with_capacity(rowids.len());
+    let mut ids: Vec<usize> = rowids.iter().copied().collect();
+    ids.sort_unstable();
+
+    for chunk in ids.chunks(500) {
+        let placeholders = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT rowid, embedding, embedding_dim, embedding_normalized FROM images WHERE rowid IN ({placeholders}) AND embedding IS NOT NULL"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let params = chunk.iter().map(|id| *id as i64);
+        let rows = stmt.query_map(params_from_iter(params), |row| {
+            let rowid = row.get::<_, i64>(0)?.max(0) as usize;
+            let bytes: Vec<u8> = row.get(1)?;
+            let dim = row.get::<_, i64>(2)?.max(0) as usize;
+            let normalized = row.get::<_, bool>(3)?;
+            Ok((rowid, bytes, dim, normalized))
+        })?;
+        for row in rows {
+            let (rowid, bytes, dim, normalized) = row?;
+            if let Some(values) = decode_f32_vec(&bytes, dim) {
+                output.insert(rowid, (values, normalized));
+            }
+        }
+    }
+    Ok(output)
+}
+
+pub fn load_ann_embeddings(db_path: &Path) -> Result<Vec<AnnEmbedding>> {
+    let conn = open(db_path)?;
+    let mut stmt = conn.prepare(
+        "SELECT rowid, embedding, embedding_dim, embedding_normalized FROM images WHERE embedding IS NOT NULL ORDER BY rowid",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let rowid = row.get::<_, i64>(0)?.max(0) as usize;
+        let bytes: Vec<u8> = row.get(1)?;
+        let dim = row.get::<_, i64>(2)?.max(0) as usize;
+        let normalized = row.get::<_, bool>(3)?;
+        Ok((rowid, bytes, dim, normalized))
+    })?;
+
+    let mut output = Vec::new();
+    for row in rows {
+        let (rowid, bytes, dim, normalized) = row?;
+        let Some(values) = decode_f32_vec(&bytes, dim) else {
+            continue;
+        };
+        output.push(AnnEmbedding {
+            rowid,
+            embedding: if normalized {
+                values
+            } else {
+                normalized_f32_vec(&values)
+            },
+        });
+    }
+    Ok(output)
+}
+
+pub fn ann_index_signature(db_path: &Path) -> Result<u64> {
+    let conn = open(db_path)?;
+    let mut stmt = conn.prepare(
+        "SELECT rowid, path, size, modified, COALESCE(embedding_dim, 0), embedding_normalized FROM images WHERE embedding IS NOT NULL ORDER BY rowid",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, bool>(5)?,
+        ))
+    })?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    1_u32.hash(&mut hasher); // bump when embedding/index semantics change.
+    for row in rows {
+        let (rowid, path, size, modified, dim, normalized) = row?;
+        rowid.hash(&mut hasher);
+        path.hash(&mut hasher);
+        size.hash(&mut hasher);
+        modified.hash(&mut hasher);
+        dim.hash(&mut hasher);
+        normalized.hash(&mut hasher);
+    }
+    Ok(hasher.finish())
 }
 
 fn normalized_f32_vec(values: &[f32]) -> Vec<f32> {

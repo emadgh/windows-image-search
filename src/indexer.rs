@@ -1,3 +1,4 @@
+use crate::ann;
 use crate::db::{self, ImageRecord, ImageSummary};
 use crate::embedding::EmbeddingService;
 use crate::metadata;
@@ -890,33 +891,71 @@ fn similarity_search(
     let query_image = decode_image(query_path)?;
     let (query_dominant, query_hash, query_histogram) = visual_descriptor(&query_image);
 
-    let query_embedding = match query_clip_embedding(
-        embedding_service,
-        query_path,
-        indexing_settings.clip_threads,
-    ) {
-        Ok((embedding, model_reloaded)) => {
-            let _ = tx.send(WorkerMessage::Status(if model_reloaded {
-                "CLIP model initialized for this query; future searches will reuse it".to_owned()
-            } else {
-                "Reusing loaded CLIP model for query".to_owned()
-            }));
-            Some(embedding)
+    let query_embedding = if settings.clip_weight > 0.0 {
+        match query_clip_embedding(
+            embedding_service,
+            query_path,
+            indexing_settings.clip_threads,
+        ) {
+            Ok((embedding, model_reloaded)) => {
+                let _ = tx.send(WorkerMessage::Status(if model_reloaded {
+                    "CLIP model initialized for this query; future searches will reuse it"
+                        .to_owned()
+                } else {
+                    "Reusing loaded CLIP model for query".to_owned()
+                }));
+                Some(embedding)
+            }
+            Err(err) => {
+                let _ = tx.send(WorkerMessage::Status(format!(
+                    "CLIP unavailable; using texture/color similarity only ({err})"
+                )));
+                None
+            }
         }
-        Err(err) => {
-            let _ = tx.send(WorkerMessage::Status(format!(
-                "CLIP unavailable; using texture/color similarity only ({err})"
-            )));
-            None
-        }
+    } else {
+        None
     };
 
     let query_key = normalized_path_key(query_path);
-    let records = db::load_images(db_path)?;
+    let mut records = db::load_search_images(db_path)?;
     let compute_hash = settings.texture_weight > 0.0;
     let compute_histogram =
         settings.color_distribution_weight > 0.0 || settings.strict_color_rejection;
     let compute_clip = settings.clip_weight > 0.0 && query_embedding.is_some();
+    let large_ann_search = compute_clip && records.len() > CANDIDATE_PIPELINE_MIN_RECORDS;
+    let ann_scores = if large_ann_search {
+        let limit = component_candidate_limit(records.len());
+        match ann::search_candidates(db_path, query_embedding.as_deref().unwrap_or(&[]), limit) {
+            Ok(scores) if !scores.is_empty() => {
+                let _ = tx.send(WorkerMessage::Status(format!(
+                    "HNSW semantic retrieval: {} approximate CLIP candidates from {} indexed records",
+                    scores.len(), records.len()
+                )));
+                Some(scores)
+            }
+            Ok(_) => None,
+            Err(err) => {
+                let _ = tx.send(WorkerMessage::Status(format!(
+                    "HNSW unavailable; falling back to brute-force CLIP candidates ({err:#})"
+                )));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let all_rowids: HashSet<usize> = if compute_clip && ann_scores.is_none() {
+        records.iter().map(|record| record.rowid).collect()
+    } else {
+        HashSet::new()
+    };
+    let fallback_embeddings = if all_rowids.is_empty() {
+        HashMap::new()
+    } else {
+        db::load_embeddings_for_rowids(db_path, &all_rowids)?
+    };
     let mut metrics = Vec::<SimilarityMetrics>::with_capacity(records.len());
 
     for (index, record) in records.iter().enumerate() {
@@ -952,19 +991,21 @@ fn similarity_search(
         let dominant_similarity = rgb_similarity(query_dominant, record.dominant);
         let passes_gate = passes_color_gate(histogram_similarity, dominant_similarity, settings);
 
-        // CLIP is the expensive brute-force component. Never touch its vector
-        // when its slider is zero, and keep the strict color gate in front of it.
+        // For large indexes an HNSW lookup supplies the initial semantic pool.
+        // Small indexes and ANN failures preserve the exact brute-force path.
         let clip_similarity = if passes_gate && compute_clip {
-            query_embedding.as_ref().and_then(|query| {
-                record.embedding.as_deref().map(|embedding| {
-                    clip_similarity_with_normalized_query(
-                        query,
-                        embedding,
-                        record.embedding_normalized,
-                    )
-                    .clamp(0.0, 1.0)
+            if let Some(scores) = &ann_scores {
+                scores.get(&record.rowid).copied()
+            } else {
+                query_embedding.as_ref().and_then(|query| {
+                    fallback_embeddings
+                        .get(&record.rowid)
+                        .map(|(embedding, normalized)| {
+                            clip_similarity_with_normalized_query(query, embedding, *normalized)
+                                .clamp(0.0, 1.0)
+                        })
                 })
-            })
+            }
         } else {
             None
         };
@@ -981,10 +1022,37 @@ fn similarity_search(
     }
 
     let candidate_indices = choose_candidate_indices(&metrics, settings, query_embedding.is_some());
+
+    // ANN provides approximate semantic candidate generation only. The final
+    // hybrid rerank always uses exact CLIP cosine values for every union member,
+    // including candidates introduced by color/texture components.
+    if compute_clip && ann_scores.is_some() {
+        let candidate_rowids: HashSet<usize> = candidate_indices
+            .iter()
+            .map(|index| records[*index].rowid)
+            .collect();
+        let exact_embeddings = db::load_embeddings_for_rowids(db_path, &candidate_rowids)?;
+        if let Some(query) = &query_embedding {
+            for index in &candidate_indices {
+                if metrics[*index].is_exact {
+                    metrics[*index].clip_similarity = Some(1.0);
+                    continue;
+                }
+                metrics[*index].clip_similarity =
+                    exact_embeddings
+                        .get(&records[*index].rowid)
+                        .map(|(embedding, normalized)| {
+                            clip_similarity_with_normalized_query(query, embedding, *normalized)
+                                .clamp(0.0, 1.0)
+                        });
+            }
+        }
+    }
+
     if records.len() > CANDIDATE_PIPELINE_MIN_RECORDS {
         let limit = component_candidate_limit(records.len());
         let _ = tx.send(WorkerMessage::Status(format!(
-            "Two-stage similarity: {} indexed records → {} hybrid candidates (up to {limit} per enabled component)",
+            "Two-stage similarity: {} indexed records → {} exact hybrid rerank candidates (up to {limit} per enabled component)",
             records.len(),
             candidate_indices.len()
         )));
