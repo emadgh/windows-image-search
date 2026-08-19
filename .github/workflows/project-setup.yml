@@ -1,0 +1,33 @@
+name: Project setup
+
+on:
+  push:
+    branches: [feat/v0.1.0-mvp]
+    paths:
+      - .github/workflows/project-setup.yml
+
+permissions:
+  issues: write
+
+jobs:
+  milestone:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create v0.1.0 milestone and attach issues
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          milestone="$(gh api "repos/$repo/milestones?state=all&per_page=100" --jq '.[] | select(.title == "v0.1.0 MVP") | .number' | head -n 1)"
+          if [ -z "$milestone" ]; then
+            milestone="$(gh api --method POST "repos/$repo/milestones" \
+              -f title='v0.1.0 MVP' \
+              -f description='First usable Windows build: indexing, rescan, CLIP similarity, color search, metadata search, grid/details UI and CI artifact.' \
+              --jq '.number')"
+          fi
+          for issue in 1 2 3 4 5 6 7; do
+            gh api --method PATCH "repos/$repo/issues/$issue" -F milestone="$milestone" >/dev/null
+          done
+          echo "Milestone #$milestone configured."
