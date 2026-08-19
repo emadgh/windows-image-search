@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, params_from_iter, Connection};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -122,8 +122,112 @@ pub fn open(db_path: &Path) -> Result<Connection> {
         "CREATE INDEX IF NOT EXISTS idx_images_root_scan ON images(root, last_seen_scan)",
         [],
     )?;
+    ensure_text_search_index(&conn)?;
 
     Ok(conn)
+}
+
+fn ensure_text_search_index(conn: &Connection) -> Result<()> {
+    let existed: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'images_fts')",
+        [],
+        |row| row.get(0),
+    )?;
+
+    conn.execute_batch(
+        r#"
+        CREATE VIRTUAL TABLE IF NOT EXISTS images_fts USING fts5(
+            file_name,
+            path,
+            description,
+            keywords,
+            content='images',
+            content_rowid='rowid',
+            tokenize='trigram'
+        );
+
+        CREATE TRIGGER IF NOT EXISTS images_fts_ai AFTER INSERT ON images BEGIN
+            INSERT INTO images_fts(rowid, file_name, path, description, keywords)
+            VALUES (new.rowid, new.file_name, new.path, new.description, new.keywords);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS images_fts_ad AFTER DELETE ON images BEGIN
+            INSERT INTO images_fts(images_fts, rowid, file_name, path, description, keywords)
+            VALUES ('delete', old.rowid, old.file_name, old.path, old.description, old.keywords);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS images_fts_au
+        AFTER UPDATE OF file_name, path, description, keywords ON images BEGIN
+            INSERT INTO images_fts(images_fts, rowid, file_name, path, description, keywords)
+            VALUES ('delete', old.rowid, old.file_name, old.path, old.description, old.keywords);
+            INSERT INTO images_fts(rowid, file_name, path, description, keywords)
+            VALUES (new.rowid, new.file_name, new.path, new.description, new.keywords);
+        END;
+        "#,
+    )?;
+
+    if !existed {
+        conn.execute("INSERT INTO images_fts(images_fts) VALUES('rebuild')", [])?;
+    }
+    Ok(())
+}
+
+fn fts_phrase(token: &str) -> String {
+    format!("\"{}\"", token.replace('"', "\"\""))
+}
+
+fn like_pattern(token: &str) -> String {
+    let escaped = token
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("%{escaped}%")
+}
+
+pub fn search_text(conn: &Connection, query: &str) -> Result<Vec<PathBuf>> {
+    let tokens: Vec<&str> = query
+        .split_whitespace()
+        .filter(|token| !token.is_empty())
+        .collect();
+    if tokens.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if tokens.iter().all(|token| token.chars().count() >= 3) {
+        let expression = tokens
+            .iter()
+            .map(|token| fts_phrase(token))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let mut stmt = conn.prepare(
+            "SELECT images.path FROM images_fts JOIN images ON images.rowid = images_fts.rowid WHERE images_fts MATCH ?1 ORDER BY bm25(images_fts)",
+        )?;
+        let rows = stmt.query_map(params![expression], |row| row.get::<_, String>(0))?;
+        return Ok(rows.filter_map(|row| row.ok()).map(PathBuf::from).collect());
+    }
+
+    // FTS5's trigram tokenizer cannot satisfy one- and two-character substring
+    // queries. Preserve the old contains semantics with a parameterized LIKE
+    // fallback on this background search connection.
+    let clause = "(file_name LIKE ? ESCAPE '\\' COLLATE NOCASE OR path LIKE ? ESCAPE '\\' COLLATE NOCASE OR description LIKE ? ESCAPE '\\' COLLATE NOCASE OR keywords LIKE ? ESCAPE '\\' COLLATE NOCASE)";
+    let sql = format!(
+        "SELECT path FROM images WHERE {} ORDER BY file_name COLLATE NOCASE",
+        std::iter::repeat_n(clause, tokens.len())
+            .collect::<Vec<_>>()
+            .join(" AND ")
+    );
+    let mut values = Vec::<String>::with_capacity(tokens.len() * 4);
+    for token in tokens {
+        let pattern = like_pattern(token);
+        for _ in 0..4 {
+            values.push(pattern.clone());
+        }
+    }
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
+        row.get::<_, String>(0)
+    })?;
+    Ok(rows.filter_map(|row| row.ok()).map(PathBuf::from).collect())
 }
 
 fn ensure_column(conn: &Connection, table: &str, column: &str, declaration: &str) -> Result<()> {
@@ -497,6 +601,86 @@ mod tests {
             "windows-image-search-{label}-{}-{nonce}.sqlite3",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn fts_text_search_supports_substrings_and_and_semantics() {
+        let db_path = temp_db_path("fts-text-search");
+        let root = std::env::temp_dir().join("windows-image-search-fts-root");
+        let brown = root.join("BrownMarble_A01.jpg");
+        let gray = root.join("SilverCement_B02.jpg");
+
+        {
+            let conn = open(&db_path).unwrap();
+            upsert_image(
+                &conn,
+                &brown,
+                &root,
+                "BrownMarble_A01.jpg",
+                "jpg",
+                1,
+                1,
+                32,
+                32,
+                "warm stone with gold veins",
+                "brown marble polished",
+                [120, 70, 40],
+                1,
+                &[1.0],
+            )
+            .unwrap();
+            upsert_image(
+                &conn,
+                &gray,
+                &root,
+                "SilverCement_B02.jpg",
+                "jpg",
+                1,
+                1,
+                32,
+                32,
+                "cool concrete texture",
+                "gray cement",
+                [130, 130, 130],
+                2,
+                &[1.0],
+            )
+            .unwrap();
+
+            let substring = search_text(&conn, "marb").unwrap();
+            assert_eq!(substring, vec![brown.clone()]);
+
+            let and_query = search_text(&conn, "brown vein").unwrap();
+            assert_eq!(and_query, vec![brown.clone()]);
+
+            let short_fallback = search_text(&conn, "A0").unwrap();
+            assert_eq!(short_fallback, vec![brown.clone()]);
+
+            // Updating searchable metadata must refresh FTS, while embedding-only
+            // updates do not need to touch the FTS index.
+            upsert_image(
+                &conn,
+                &brown,
+                &root,
+                "BrownMarble_A01.jpg",
+                "jpg",
+                2,
+                2,
+                32,
+                32,
+                "warm stone without the previous metallic term",
+                "brown marble polished",
+                [120, 70, 40],
+                1,
+                &[1.0],
+            )
+            .unwrap();
+            assert!(search_text(&conn, "gold").unwrap().is_empty());
+        }
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(format!("{}-wal", db_path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", db_path.display()));
     }
 
     #[test]

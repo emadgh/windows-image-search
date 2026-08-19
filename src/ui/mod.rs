@@ -5,12 +5,13 @@ use crate::db::{self, ImageSummary};
 use crate::embedding::EmbeddingService;
 use crate::indexer::{self, WorkerMessage};
 use crate::settings::{self, IndexingSettings};
+use crate::text_search::TextSearchService;
 use eframe::egui;
 use egui::{ColorImage, TextureHandle, TextureOptions};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thumbnails::{ThumbnailPool, ThumbnailResult};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -37,6 +38,12 @@ pub struct ImageSearchApp {
     pub(super) indexing_settings: IndexingSettings,
     settings_path: PathBuf,
     pub(super) search_text: String,
+    text_search_service: TextSearchService,
+    text_search_matches: Option<HashSet<PathBuf>>,
+    text_search_observed: String,
+    text_search_due: Option<Instant>,
+    text_search_generation: u64,
+    text_search_pending: bool,
     pub(super) color_enabled: bool,
     pub(super) target_color: [u8; 3],
     pub(super) color_tolerance: f32,
@@ -66,6 +73,7 @@ impl ImageSearchApp {
         let settings_path = app_data_dir.join("performance-settings.ini");
         let indexing_settings = settings::load(&settings_path);
         let embedding_service = EmbeddingService::new(model_cache);
+        let text_search_service = TextSearchService::new(db_path.clone());
         let images = db::load_image_summaries(&db_path).unwrap_or_default();
         let image_positions = images
             .iter()
@@ -84,6 +92,12 @@ impl ImageSearchApp {
             indexing_settings,
             settings_path,
             search_text: String::new(),
+            text_search_service,
+            text_search_matches: None,
+            text_search_observed: String::new(),
+            text_search_due: None,
+            text_search_generation: 0,
+            text_search_pending: false,
             color_enabled: false,
             target_color: [128, 128, 128],
             color_tolerance: 0.22,
@@ -111,7 +125,10 @@ impl ImageSearchApp {
             match message {
                 WorkerMessage::Status(status) => self.status = status,
                 WorkerMessage::Progress { done, total } => self.progress = Some((done, total)),
-                WorkerMessage::IndexedBatch(records) => self.merge_indexed_batch(records),
+                WorkerMessage::IndexedBatch(records) => {
+                    self.merge_indexed_batch(records);
+                    self.refresh_text_search_after_data_change();
+                }
                 WorkerMessage::Reload => {
                     match db::load_image_summaries(&self.db_path) {
                         Ok(images) => {
@@ -121,6 +138,7 @@ impl ImageSearchApp {
                         Err(err) => self.last_error = Some(format!("Reload failed: {err:#}")),
                     }
                     self.progress = None;
+                    self.refresh_text_search_after_data_change();
                 }
                 WorkerMessage::SimilarityResults(results) => {
                     self.similarity_results = Some(results);
@@ -283,25 +301,16 @@ impl ImageSearchApp {
     }
 
     pub(super) fn visible_indices(&self) -> Vec<usize> {
-        let tokens: Vec<String> = self
-            .search_text
-            .split_whitespace()
-            .map(str::to_ascii_lowercase)
-            .collect();
+        let text_filter_active = !self.search_text.trim().is_empty();
         self.source()
             .iter()
             .enumerate()
             .filter(|(_, record)| {
-                if !tokens.is_empty() {
-                    let haystack = format!(
-                        "{} {} {} {}",
-                        record.file_name,
-                        record.path.display(),
-                        record.description,
-                        record.keywords
-                    )
-                    .to_ascii_lowercase();
-                    if !tokens.iter().all(|token| haystack.contains(token)) {
+                if text_filter_active {
+                    let Some(matches) = &self.text_search_matches else {
+                        return false;
+                    };
+                    if !matches.contains(&record.path) {
                         return false;
                     }
                 }
@@ -311,6 +320,70 @@ impl ImageSearchApp {
             })
             .map(|(index, _)| index)
             .collect()
+    }
+
+    fn observe_text_search_input(&mut self) {
+        if self.search_text == self.text_search_observed {
+            return;
+        }
+        self.text_search_observed = self.search_text.clone();
+        self.text_search_generation = self.text_search_generation.wrapping_add(1);
+        self.text_search_matches = None;
+
+        if self.search_text.trim().is_empty() {
+            self.text_search_due = None;
+            self.text_search_pending = false;
+        } else {
+            self.text_search_due = Some(Instant::now() + Duration::from_millis(160));
+            self.text_search_pending = true;
+        }
+    }
+
+    fn refresh_text_search_after_data_change(&mut self) {
+        if self.search_text.trim().is_empty() {
+            return;
+        }
+        self.text_search_generation = self.text_search_generation.wrapping_add(1);
+        self.text_search_due = Some(Instant::now() + Duration::from_millis(220));
+        self.text_search_pending = true;
+    }
+
+    fn dispatch_text_search_if_due(&mut self) {
+        let Some(due) = self.text_search_due else {
+            return;
+        };
+        if Instant::now() < due {
+            return;
+        }
+        self.text_search_due = None;
+        self.text_search_service
+            .request(self.text_search_generation, self.search_text.clone());
+    }
+
+    fn process_text_search_results(&mut self) {
+        while let Some(result) = self.text_search_service.try_recv() {
+            if result.generation != self.text_search_generation || result.query != self.search_text
+            {
+                continue;
+            }
+            match result.paths {
+                Ok(paths) => {
+                    let count = paths.len();
+                    self.text_search_matches = Some(paths);
+                    self.text_search_pending = false;
+                    self.status = format!(
+                        "Indexed text search: {count} match{} in {} ms",
+                        if count == 1 { "" } else { "es" },
+                        result.elapsed_ms
+                    );
+                }
+                Err(err) => {
+                    self.text_search_matches = Some(HashSet::new());
+                    self.text_search_pending = false;
+                    self.last_error = Some(format!("Text search failed: {err}"));
+                }
+            }
+        }
     }
 
     pub(super) fn thumbnail(&mut self, path: &Path) -> Option<TextureHandle> {
@@ -502,6 +575,9 @@ impl ImageSearchApp {
                             .hint_text("filename, path, description, keywords…")
                             .desired_width(f32::INFINITY),
                     );
+                    if self.text_search_pending {
+                        ui.small("Searching indexed text…");
+                    }
 
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
@@ -676,6 +752,13 @@ impl eframe::App for ImageSearchApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_worker_messages();
         self.process_thumbnail_messages(ctx);
+        self.observe_text_search_input();
+        self.dispatch_text_search_if_due();
+        self.process_text_search_results();
+
+        if self.text_search_pending || self.text_search_due.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
 
         if ctx.input(|input| input.viewport().close_requested())
             && self.indexing
