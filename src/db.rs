@@ -98,7 +98,8 @@ pub fn open(db_path: &Path) -> Result<Connection> {
             embedding BLOB,
             embedding_dim INTEGER,
             embedding_normalized INTEGER NOT NULL DEFAULT 0,
-            last_seen_scan INTEGER NOT NULL DEFAULT 0
+            last_seen_scan INTEGER NOT NULL DEFAULT 0,
+            content_fingerprint INTEGER
         );
 
         CREATE INDEX IF NOT EXISTS idx_images_root ON images(root);
@@ -156,6 +157,7 @@ pub fn open(db_path: &Path) -> Result<Connection> {
         "last_seen_scan",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
+    ensure_column(&conn, "images", "content_fingerprint", "INTEGER")?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_images_root_scan ON images(root, last_seen_scan)",
         [],
@@ -541,7 +543,8 @@ pub fn upsert_image(
             material_texture_version = 0,
             embedding = NULL,
             embedding_dim = NULL,
-            embedding_normalized = 0
+            embedding_normalized = 0,
+            content_fingerprint = NULL
         "#,
         params![
             path.to_string_lossy().to_string(),
@@ -600,6 +603,14 @@ pub fn set_material_texture(conn: &Connection, path: &Path, descriptor: &[f32]) 
             descriptor.len() as i64,
             material_texture::VERSION,
         ],
+    )?;
+    Ok(())
+}
+
+pub fn set_content_fingerprint(conn: &Connection, path: &Path, fingerprint: u64) -> Result<()> {
+    conn.execute(
+        "UPDATE images SET content_fingerprint = ?2 WHERE path = ?1",
+        params![path.to_string_lossy().to_string(), fingerprint as i64],
     )?;
     Ok(())
 }

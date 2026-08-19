@@ -1,3 +1,4 @@
+use crate::portable;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -86,8 +87,14 @@ fn run_watcher(
         match event_rx.recv_timeout(timeout) {
             Ok(Ok(event)) => {
                 if event_kind_needs_indexing(&event.kind) {
-                    pending_paths.extend(event.paths);
-                    flush_at = Some(Instant::now() + EVENT_DEBOUNCE);
+                    pending_paths.extend(event.paths.into_iter().filter(|path| {
+                        !watched_roots
+                            .iter()
+                            .any(|root| portable::is_internal_path(root, path))
+                    }));
+                    if !pending_paths.is_empty() {
+                        flush_at = Some(Instant::now() + EVENT_DEBOUNCE);
+                    }
                 }
             }
             Ok(Err(err)) => {

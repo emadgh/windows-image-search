@@ -1,11 +1,11 @@
-use crate::thumbnail_cache;
+use crate::{portable, thumbnail_cache};
 use image::DynamicImage;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{
     mpsc::{self, Receiver},
-    Arc, Condvar, Mutex,
+    Arc, Condvar, Mutex, RwLock,
 };
 
 // A request is considered stale after enough newer visible-thumbnail requests
@@ -36,8 +36,6 @@ struct ThumbnailJob {
 
 impl Ord for ThumbnailJob {
     fn cmp(&self, other: &Self) -> Ordering {
-        // BinaryHeap is a max-heap: newest viewport requests must be popped
-        // before older requests accumulated while the user was elsewhere.
         self.request_sequence
             .cmp(&other.request_sequence)
             .then_with(|| self.revision.cmp(&other.revision))
@@ -76,10 +74,6 @@ impl SchedulerState {
             let was_stale =
                 sequence.saturating_sub(pending.last_seen_sequence) > STALE_REQUEST_DISTANCE;
             pending.last_seen_sequence = sequence;
-
-            // If a path returns to the viewport after being stale, promote it
-            // to the newest end of the priority queue. The old heap entry is
-            // left in place and will be skipped through the revision check.
             if was_stale && !pending.in_flight && !pending.completed {
                 pending.revision = pending.revision.saturating_add(1);
                 pending.queued_sequence = sequence;
@@ -164,16 +158,18 @@ impl SchedulerState {
 }
 
 pub struct ThumbnailPool {
-    cache_dir: PathBuf,
+    fallback_cache_dir: PathBuf,
+    roots: Arc<RwLock<Vec<PathBuf>>>,
     scheduler: Arc<(Mutex<SchedulerState>, Condvar)>,
     result_rx: Receiver<ThumbnailResult>,
 }
 
 impl ThumbnailPool {
-    pub fn new(cache_dir: PathBuf) -> Self {
-        let _ = std::fs::create_dir_all(&cache_dir);
+    pub fn new(fallback_cache_dir: PathBuf, roots: Vec<PathBuf>) -> Self {
+        let _ = std::fs::create_dir_all(&fallback_cache_dir);
         let (result_tx, result_rx) = mpsc::channel::<ThumbnailResult>();
         let scheduler = Arc::new((Mutex::new(SchedulerState::default()), Condvar::new()));
+        let roots = Arc::new(RwLock::new(roots));
 
         let logical = std::thread::available_parallelism()
             .map(|v| v.get())
@@ -182,8 +178,9 @@ impl ThumbnailPool {
 
         for _ in 0..workers {
             let scheduler = Arc::clone(&scheduler);
+            let roots = Arc::clone(&roots);
             let tx = result_tx.clone();
-            let cache = cache_dir.clone();
+            let fallback_cache = fallback_cache_dir.clone();
             std::thread::spawn(move || loop {
                 let job = {
                     let (lock, wake) = &*scheduler;
@@ -202,11 +199,7 @@ impl ThumbnailPool {
                     }
                 };
 
-                // Once image decoding itself has started it is not safely
-                // interruptible through the image crate. New viewport jobs do
-                // not wait behind queued stale work though: as soon as a worker
-                // is free it pops the newest request first.
-                let result = match load_or_build(&cache, &job.path) {
+                let result = match load_or_build(&fallback_cache, &roots, &job.path) {
                     Some((width, height, rgba)) => ThumbnailResult::Ready {
                         path: job.path.clone(),
                         width,
@@ -229,9 +222,16 @@ impl ThumbnailPool {
         }
 
         Self {
-            cache_dir,
+            fallback_cache_dir,
+            roots,
             scheduler,
             result_rx,
+        }
+    }
+
+    pub fn set_roots(&self, roots: Vec<PathBuf>) {
+        if let Ok(mut current) = self.roots.write() {
+            *current = roots;
         }
     }
 
@@ -258,8 +258,15 @@ impl ThumbnailPool {
     }
 
     pub fn clear_cache(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.cache_dir);
-        let _ = std::fs::create_dir_all(&self.cache_dir);
+        let _ = std::fs::remove_dir_all(&self.fallback_cache_dir);
+        let _ = std::fs::create_dir_all(&self.fallback_cache_dir);
+        if let Ok(roots) = self.roots.read() {
+            for root in roots.iter() {
+                let cache = portable::thumbnail_dir(root);
+                let _ = std::fs::remove_dir_all(&cache);
+                let _ = std::fs::create_dir_all(cache);
+            }
+        }
         let (lock, wake) = &*self.scheduler;
         if let Ok(mut state) = lock.lock() {
             state.clear();
@@ -268,12 +275,26 @@ impl ThumbnailPool {
     }
 
     pub fn cache_dir(&self) -> &Path {
-        &self.cache_dir
+        &self.fallback_cache_dir
     }
 }
 
-fn load_or_build(cache_dir: &Path, source: &Path) -> Option<(usize, usize, Vec<u8>)> {
-    thumbnail_cache::load_or_build(cache_dir, source).map(to_rgba)
+fn load_or_build(
+    fallback_cache: &Path,
+    roots: &RwLock<Vec<PathBuf>>,
+    source: &Path,
+) -> Option<(usize, usize, Vec<u8>)> {
+    let root = roots
+        .read()
+        .ok()
+        .and_then(|roots| portable::indexed_root_for_path(source, &roots).cloned());
+    let image = match root {
+        Some(root) if portable::is_indexed_root(&root) => {
+            thumbnail_cache::load_or_build_for_root(&root, source)
+        }
+        _ => thumbnail_cache::load_or_build(fallback_cache, source),
+    }?;
+    Some(to_rgba(image))
 }
 
 fn to_rgba(image: DynamicImage) -> (usize, usize, Vec<u8>) {
