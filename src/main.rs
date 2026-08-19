@@ -3,6 +3,7 @@ mod db;
 mod embedding;
 mod fs_watch;
 mod indexer;
+mod material_texture;
 mod metadata;
 mod settings;
 mod text_search;

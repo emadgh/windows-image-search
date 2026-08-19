@@ -10,11 +10,15 @@ const SCALES: [u32; 2] = [96, 48];
 pub fn descriptor(image: &DynamicImage) -> Vec<f32> {
     let mut output = Vec::with_capacity(DIM);
     for size in SCALES {
-        let gray = image.resize_exact(size, size, FilterType::Triangle).to_luma8();
+        let gray = image
+            .resize_exact(size, size, FilterType::Triangle)
+            .to_luma8();
         output.extend(gradient_histogram(&gray));
     }
     for size in SCALES {
-        let gray = image.resize_exact(size, size, FilterType::Triangle).to_luma8();
+        let gray = image
+            .resize_exact(size, size, FilterType::Triangle)
+            .to_luma8();
         output.extend(lbp_histogram(&gray));
     }
     debug_assert_eq!(output.len(), DIM);
@@ -123,7 +127,10 @@ fn lbp_histogram(gray: &GrayImage) -> Vec<f32> {
 }
 
 fn rotation_invariant_code(code: u8) -> u8 {
-    (0..8).map(|shift| code.rotate_right(shift)).min().unwrap_or(code)
+    (0..8)
+        .map(|shift| code.rotate_right(shift))
+        .min()
+        .unwrap_or(code)
 }
 
 fn normalize_histogram(hist: &mut [f32]) {
@@ -164,7 +171,12 @@ mod tests {
     fn descriptor_has_fixed_compact_dimension_and_normalized_segments() {
         let descriptor = descriptor(&striped(128, 128, true));
         assert_eq!(descriptor.len(), DIM);
-        let segments = [&descriptor[0..8], &descriptor[8..16], &descriptor[16..32], &descriptor[32..48]];
+        let segments = [
+            &descriptor[0..8],
+            &descriptor[8..16],
+            &descriptor[16..32],
+            &descriptor[32..48],
+        ];
         for segment in segments {
             let sum: f32 = segment.iter().sum();
             assert!((sum - 1.0).abs() < 1e-4 || sum == 0.0);

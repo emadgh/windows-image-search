@@ -1,3 +1,4 @@
+use crate::material_texture;
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, params_from_iter, Connection};
 use std::collections::{HashMap, HashSet};
@@ -20,6 +21,7 @@ pub struct ImageRecord {
     pub dominant: [u8; 3],
     pub visual_hash: Option<u64>,
     pub color_histogram: Option<Vec<f32>>,
+    pub material_texture: Option<Vec<f32>>,
     pub embedding: Option<Vec<f32>>,
     pub embedding_normalized: bool,
     pub score: Option<f32>,
@@ -92,6 +94,9 @@ pub fn open(db_path: &Path) -> Result<Connection> {
             visual_hash INTEGER,
             color_histogram BLOB,
             color_histogram_dim INTEGER,
+            material_texture BLOB,
+            material_texture_dim INTEGER,
+            material_texture_version INTEGER NOT NULL DEFAULT 0,
             embedding BLOB,
             embedding_dim INTEGER,
             embedding_normalized INTEGER NOT NULL DEFAULT 0,
@@ -133,6 +138,14 @@ pub fn open(db_path: &Path) -> Result<Connection> {
     ensure_column(&conn, "images", "visual_hash", "INTEGER")?;
     ensure_column(&conn, "images", "color_histogram", "BLOB")?;
     ensure_column(&conn, "images", "color_histogram_dim", "INTEGER")?;
+    ensure_column(&conn, "images", "material_texture", "BLOB")?;
+    ensure_column(&conn, "images", "material_texture_dim", "INTEGER")?;
+    ensure_column(
+        &conn,
+        "images",
+        "material_texture_version",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     ensure_column(
         &conn,
         "images",
@@ -549,6 +562,9 @@ pub fn upsert_image(
             visual_hash = excluded.visual_hash,
             color_histogram = excluded.color_histogram,
             color_histogram_dim = excluded.color_histogram_dim,
+            material_texture = NULL,
+            material_texture_dim = NULL,
+            material_texture_version = 0,
             embedding = NULL,
             embedding_dim = NULL,
             embedding_normalized = 0
@@ -597,11 +613,30 @@ pub fn set_visual_descriptor(
     Ok(())
 }
 
+pub fn set_material_texture(conn: &Connection, path: &Path, descriptor: &[f32]) -> Result<()> {
+    conn.execute(
+        r#"
+        UPDATE images
+        SET material_texture = ?2, material_texture_dim = ?3, material_texture_version = ?4
+        WHERE path = ?1
+        "#,
+        params![
+            path.to_string_lossy().to_string(),
+            encode_f32_vec(descriptor),
+            descriptor.len() as i64,
+            material_texture::VERSION,
+        ],
+    )?;
+    Ok(())
+}
+
 pub fn paths_missing_visual_descriptor(conn: &Connection) -> Result<Vec<PathBuf>> {
     let mut stmt = conn.prepare(
-        "SELECT path FROM images WHERE visual_hash IS NULL OR color_histogram IS NULL ORDER BY path",
+        "SELECT path FROM images WHERE visual_hash IS NULL OR color_histogram IS NULL OR material_texture IS NULL OR material_texture_version <> ?1 ORDER BY path",
     )?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let rows = stmt.query_map(params![material_texture::VERSION], |row| {
+        row.get::<_, String>(0)
+    })?;
     Ok(rows.filter_map(|r| r.ok()).map(PathBuf::from).collect())
 }
 
@@ -741,7 +776,8 @@ pub fn load_images(db_path: &Path) -> Result<Vec<ImageRecord>> {
         SELECT path, root, file_name, extension, size, modified, width, height,
                description, keywords, dominant_r, dominant_g, dominant_b,
                visual_hash, color_histogram, color_histogram_dim,
-               embedding, embedding_dim, embedding_normalized, rowid
+               embedding, embedding_dim, embedding_normalized, rowid,
+               material_texture, material_texture_dim, material_texture_version
         FROM images
         ORDER BY file_name COLLATE NOCASE
         "#,
@@ -760,6 +796,16 @@ pub fn load_images(db_path: &Path) -> Result<Vec<ImageRecord>> {
 
         let visual_hash_signed: Option<i64> = row.get(13)?;
         let embedding_normalized = row.get::<_, bool>(18)?;
+        let material_texture_blob: Option<Vec<u8>> = row.get(20)?;
+        let material_texture_dim: Option<i64> = row.get(21)?;
+        let material_texture_version = row.get::<_, i64>(22)?;
+        let material_texture = if material_texture_version == material_texture::VERSION {
+            material_texture_blob.and_then(|bytes| {
+                decode_f32_vec(&bytes, material_texture_dim.unwrap_or(0).max(0) as usize)
+            })
+        } else {
+            None
+        };
         Ok(ImageRecord {
             rowid: row.get::<_, i64>(19)?.max(0) as usize,
             path: PathBuf::from(row.get::<_, String>(0)?),
@@ -779,6 +825,7 @@ pub fn load_images(db_path: &Path) -> Result<Vec<ImageRecord>> {
             ],
             visual_hash: visual_hash_signed.map(|value| value as u64),
             color_histogram,
+            material_texture,
             embedding,
             embedding_normalized,
             score: None,
@@ -801,7 +848,8 @@ pub fn load_search_images(db_path: &Path) -> Result<Vec<ImageRecord>> {
         SELECT path, root, file_name, extension, size, modified, width, height,
                description, keywords, dominant_r, dominant_g, dominant_b,
                visual_hash, color_histogram, color_histogram_dim,
-               embedding_normalized, rowid
+               embedding_normalized, rowid,
+               material_texture, material_texture_dim, material_texture_version
         FROM images
         ORDER BY file_name COLLATE NOCASE
         "#,
@@ -813,6 +861,16 @@ pub fn load_search_images(db_path: &Path) -> Result<Vec<ImageRecord>> {
         let color_histogram = histogram_blob
             .and_then(|bytes| decode_f32_vec(&bytes, histogram_dim.unwrap_or(0) as usize));
         let visual_hash_signed: Option<i64> = row.get(13)?;
+        let material_texture_blob: Option<Vec<u8>> = row.get(18)?;
+        let material_texture_dim: Option<i64> = row.get(19)?;
+        let material_texture_version = row.get::<_, i64>(20)?;
+        let material_texture = if material_texture_version == material_texture::VERSION {
+            material_texture_blob.and_then(|bytes| {
+                decode_f32_vec(&bytes, material_texture_dim.unwrap_or(0).max(0) as usize)
+            })
+        } else {
+            None
+        };
         Ok(ImageRecord {
             rowid: row.get::<_, i64>(17)?.max(0) as usize,
             path: PathBuf::from(row.get::<_, String>(0)?),
@@ -832,6 +890,7 @@ pub fn load_search_images(db_path: &Path) -> Result<Vec<ImageRecord>> {
             ],
             visual_hash: visual_hash_signed.map(|value| value as u64),
             color_histogram,
+            material_texture,
             embedding: None,
             embedding_normalized: row.get::<_, bool>(16)?,
             score: None,
