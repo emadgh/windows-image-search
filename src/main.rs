@@ -13,6 +13,8 @@ use anyhow::{Context, Result};
 use eframe::egui;
 use std::path::PathBuf;
 
+const APP_TITLE: &str = concat!("Windows Image Search v", env!("CARGO_PKG_VERSION"));
+
 fn app_paths() -> Result<(PathBuf, PathBuf)> {
     let base = dirs::data_local_dir()
         .or_else(dirs::data_dir)
@@ -33,14 +35,14 @@ fn main() -> eframe::Result<()> {
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Windows Image Search")
+            .with_title(APP_TITLE)
             .with_inner_size([1380.0, 860.0])
             .with_min_inner_size([900.0, 600.0]),
         ..Default::default()
     };
 
     eframe::run_native(
-        "Windows Image Search",
+        APP_TITLE,
         native_options,
         Box::new(move |_cc| Ok(Box::new(ui::ImageSearchApp::new(db_path, model_cache)))),
     )
