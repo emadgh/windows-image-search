@@ -39,31 +39,102 @@ jobs:
           $lines = $match.Groups[1].Value -split "`r?`n"
           $python = ($lines | ForEach-Object { $_ -replace '^          ', '' }) -join "`n"
           $python = $python.Replace("if count != 1:", "if count < 1:")
-          $python = $python -replace 'if count < 1:\n        raise SystemExit', "if count < 1:`n        if label == 'embedding batch size':`n            return text`n        raise SystemExit"
+          $python = $python -replace 'if count < 1:\n        raise SystemExit', "if count < 1:`n        return text"
           $python | Set-Content -Encoding UTF8 patch_settings.py
           python patch_settings.py
           Remove-Item patch_settings.py
 
           @'
           from pathlib import Path
+          import re
+
+          # Complete CLIP batch wiring in function scope.
           path = Path("src/indexer.rs")
           text = path.read_text(encoding="utf-8")
-          if "let batch_size = indexing_settings.batch_size;" not in text:
-              needle = "    let total = paths.len();\n    for (batch_index, batch) in paths.chunks(16).enumerate() {\n"
-              replacement = "    let total = paths.len();\n    let batch_size = indexing_settings.batch_size;\n    for (batch_index, batch) in paths.chunks(batch_size).enumerate() {\n"
-              if needle not in text:
-                  raise SystemExit("cannot locate CLIP chunks(16) block")
-              text = text.replace(needle, replacement, 1)
-          if ".embed(batch_paths, Some(16))" in text:
-              text = text.replace(
-                  ".embed(batch_paths, Some(16))",
-                  ".embed(batch_paths, Some(batch_size))",
+          start = text.index("fn build_embeddings(")
+          end = text.index("\npub fn spawn_similarity_search", start)
+          block = text[start:end]
+          if "let batch_size = indexing_settings.batch_size;" not in block:
+              block = block.replace(
+                  "    let total = paths.len();\n",
+                  "    let total = paths.len();\n    let batch_size = indexing_settings.batch_size;\n",
                   1,
               )
+          block = block.replace("paths.chunks(16)", "paths.chunks(batch_size)")
+          block = block.replace(".embed(batch_paths, Some(16))", ".embed(batch_paths, Some(batch_size))")
+          block = block.replace("((batch_index + 1) * 16).min(total)", "((batch_index + 1) * batch_size).min(total)")
+          text = text[:start] + block + text[end:]
           path.write_text(text, encoding="utf-8")
-          '@ | Set-Content -Encoding UTF8 fix_embedding_batch.py
-          python fix_embedding_batch.py
-          Remove-Item fix_embedding_batch.py
+
+          # Complete UI wiring from the clean main layout.
+          path = Path("src/ui/mod.rs")
+          text = path.read_text(encoding="utf-8")
+
+          if "use crate::settings::{self, IndexingSettings};" not in text:
+              text = text.replace(
+                  "use crate::indexer::{self, WorkerMessage};\n",
+                  "use crate::indexer::{self, WorkerMessage};\nuse crate::settings::{self, IndexingSettings};\n",
+                  1,
+              )
+
+          if "pub(super) indexing_settings: IndexingSettings," not in text:
+              text = text.replace(
+                  "    pub(super) similarity_settings: indexer::SimilaritySettings,\n",
+                  "    pub(super) similarity_settings: indexer::SimilaritySettings,\n    pub(super) indexing_settings: IndexingSettings,\n    settings_path: PathBuf,\n",
+                  1,
+              )
+
+          if "let settings_path = app_data_dir.join(\"performance-settings.ini\");" not in text:
+              pattern = re.compile(
+                  r'''        let thumbnail_cache = db_path\n            \.parent\(\)\n            \.unwrap_or_else\(\|\| Path::new\("\."\)\)\n            \.join\("thumbnail-cache"\);\n'''
+              )
+              replacement = '''        let app_data_dir = db_path.parent().unwrap_or_else(|| Path::new("."));\n        let thumbnail_cache = app_data_dir.join("thumbnail-cache");\n        let settings_path = app_data_dir.join("performance-settings.ini");\n        let indexing_settings = settings::load(&settings_path);\n'''
+              text, count = pattern.subn(replacement, text, count=1)
+              if count != 1:
+                  raise SystemExit("could not patch UI settings path")
+
+          if "            indexing_settings,\n            settings_path," not in text:
+              text = text.replace(
+                  "            similarity_settings: indexer::SimilaritySettings::default(),\n",
+                  "            similarity_settings: indexer::SimilaritySettings::default(),\n            indexing_settings,\n            settings_path,\n",
+                  1,
+              )
+
+          rescan_old = '''        indexer::spawn_rescan(\n            self.db_path.clone(),\n            self.model_cache.clone(),\n            self.roots.clone(),\n            self.tx.clone(),\n        );\n'''
+          rescan_new = '''        indexer::spawn_rescan(\n            self.db_path.clone(),\n            self.model_cache.clone(),\n            self.roots.clone(),\n            self.indexing_settings,\n            self.tx.clone(),\n        );\n'''
+          if rescan_old in text:
+              text = text.replace(rescan_old, rescan_new, 1)
+
+          search_old = '''        indexer::spawn_similarity_search(\n            self.db_path.clone(),\n            self.model_cache.clone(),\n            path,\n            self.similarity_settings,\n            self.tx.clone(),\n        );\n'''
+          search_new = '''        indexer::spawn_similarity_search(\n            self.db_path.clone(),\n            self.model_cache.clone(),\n            path,\n            self.similarity_settings,\n            self.indexing_settings,\n            self.tx.clone(),\n        );\n'''
+          if search_old in text:
+              text = text.replace(search_old, search_new, 1)
+
+          if "let mut save_performance_settings = false;" not in text:
+              text = text.replace(
+                  "        let mut clear_cache = false;\n",
+                  "        let mut clear_cache = false;\n        let mut save_performance_settings = false;\n",
+                  1,
+              )
+
+          if 'ui.heading("Indexing performance");' not in text:
+              marker = '''                ui.add_space(12.0);\n                ui.separator();\n                ui.heading("Thumbnail cache");\n'''
+              section = '''                ui.add_space(12.0);\n                ui.separator();\n                ui.heading("Indexing performance");\n                ui.label(\n                    "Tune disk/CPU pressure. Changes are saved immediately and apply to the next indexing or image-search operation.",\n                );\n                let logical_threads = settings::logical_parallelism();\n                ui.small(format!(\n                    "Detected {logical_threads} logical CPU thread{}. Safe defaults: Decode 2 / CLIP up to 4 / Batch 16.",\n                    if logical_threads == 1 { "" } else { "s" }\n                ));\n\n                ui.add_enabled_ui(!self.busy, |ui| {\n                    let decode_changed = ui\n                        .add(\n                            egui::Slider::new(\n                                &mut self.indexing_settings.decode_workers,\n                                1..=settings::max_decode_workers(),\n                            )\n                            .text("Image decode workers"),\n                        )\n                        .changed();\n                    let clip_changed = ui\n                        .add(\n                            egui::Slider::new(\n                                &mut self.indexing_settings.clip_threads,\n                                1..=settings::max_clip_threads(),\n                            )\n                            .text("CLIP CPU threads"),\n                        )\n                        .changed();\n                    let batch_changed = ui\n                        .add(\n                            egui::Slider::new(\n                                &mut self.indexing_settings.batch_size,\n                                1..=settings::MAX_BATCH_SIZE,\n                            )\n                            .text("Index / embedding batch size"),\n                        )\n                        .changed();\n\n                    if decode_changed || clip_changed || batch_changed {\n                        self.indexing_settings = self.indexing_settings.sanitized();\n                        save_performance_settings = true;\n                    }\n                    if ui.button("Reset safe defaults").clicked() {\n                        self.indexing_settings = IndexingSettings::default();\n                        save_performance_settings = true;\n                    }\n                });\n                if self.busy {\n                    ui.small("Performance controls are locked while a worker operation is active.");\n                }\n\n                ui.add_space(12.0);\n                ui.separator();\n                ui.heading("Thumbnail cache");\n'''
+              if marker not in text:
+                  raise SystemExit("could not locate thumbnail cache section")
+              text = text.replace(marker, section, 1)
+
+          if 'Performance settings saved: decode' not in text:
+              marker = '''        if clear_cache {\n            self.clear_thumbnail_cache();\n        }\n    }\n'''
+              replacement = '''        if clear_cache {\n            self.clear_thumbnail_cache();\n        }\n        if save_performance_settings {\n            self.indexing_settings = self.indexing_settings.sanitized();\n            match settings::save(&self.settings_path, self.indexing_settings) {\n                Ok(()) => {\n                    self.status = format!(\n                        "Performance settings saved: decode {}, CLIP {}, batch {}",\n                        self.indexing_settings.decode_workers,\n                        self.indexing_settings.clip_threads,\n                        self.indexing_settings.batch_size\n                    );\n                }\n                Err(err) => {\n                    self.last_error = Some(format!("Cannot save performance settings: {err:#}"));\n                }\n            }\n        }\n    }\n'''
+              if marker not in text:
+                  raise SystemExit("could not locate settings window footer")
+              text = text.replace(marker, replacement, 1)
+
+          path.write_text(text, encoding="utf-8")
+          '@ | Set-Content -Encoding UTF8 finish_performance_settings.py
+          python finish_performance_settings.py
+          Remove-Item finish_performance_settings.py
 
       - name: Format check
         run: |
