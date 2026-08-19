@@ -1,0 +1,43 @@
+name: Apply search controls patch
+
+on:
+  push:
+    branches: [feat/search-controls-and-recursive-scan]
+    paths:
+      - .github/workflows/apply-search-controls.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/search-controls-and-recursive-scan
+
+      - name: Apply patch
+        run: python scripts/apply_search_controls.py
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Format
+        run: cargo fmt --all
+
+      - name: Commit generated changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src
+          if git diff --cached --quiet; then
+            echo "No generated changes"
+            exit 0
+          fi
+          git commit -m "feat: add image search controls and scan diagnostics"
+          git push origin HEAD:feat/search-controls-and-recursive-scan
