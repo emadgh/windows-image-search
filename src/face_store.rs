@@ -98,31 +98,33 @@ pub fn detection_is_current(
     detector_id: &str,
     detector_version: &str,
 ) -> Result<bool> {
-    let current = conn
-        .query_row(
-            r#"
-            SELECT 1
-            FROM face_detection_state
-            WHERE image_path = ?1
-              AND detector_id = ?2
-              AND detector_version = ?3
-              AND schema_version = ?4
-              AND source_size = ?5
-              AND source_modified = ?6
-            LIMIT 1
-            "#,
-            params![
-                image_path.to_string_lossy().to_string(),
-                detector_id,
-                detector_version,
-                face_detection::SCHEMA_VERSION,
-                source_size as i64,
-                source_modified,
-            ],
-            |_| Ok(()),
-        )
-        .is_ok();
-    Ok(current)
+    let current = conn.query_row(
+        r#"
+        SELECT 1
+        FROM face_detection_state
+        WHERE image_path = ?1
+          AND detector_id = ?2
+          AND detector_version = ?3
+          AND schema_version = ?4
+          AND source_size = ?5
+          AND source_modified = ?6
+        LIMIT 1
+        "#,
+        params![
+            image_path.to_string_lossy().to_string(),
+            detector_id,
+            detector_version,
+            face_detection::SCHEMA_VERSION,
+            source_size as i64,
+            source_modified,
+        ],
+        |_| Ok(()),
+    );
+    match current {
+        Ok(()) => Ok(true),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+        Err(err) => Err(err.into()),
+    }
 }
 
 pub fn paths_needing_detection(

@@ -77,7 +77,12 @@ fn portable_sync_preserves_faces_for_metadata_only_updates_and_invalidates_sourc
             &[sample_face()],
         )
         .unwrap();
-        assert_eq!(face_store::load_faces(&portable_conn, &relative).unwrap().len(), 1);
+        assert_eq!(
+            face_store::load_faces(&portable_conn, &relative)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     // Embedding-only synchronization must update the portable image row in place,
@@ -89,7 +94,12 @@ fn portable_sync_preserves_faces_for_metadata_only_updates_and_invalidates_sourc
     }
     {
         let portable_conn = db::open(&portable::index_db_path(&root)).unwrap();
-        assert_eq!(face_store::load_faces(&portable_conn, &relative).unwrap().len(), 1);
+        assert_eq!(
+            face_store::load_faces(&portable_conn, &relative)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     // A real source-state change must invalidate detections through the portable
@@ -118,7 +128,9 @@ fn portable_sync_preserves_faces_for_metadata_only_updates_and_invalidates_sourc
     }
     {
         let portable_conn = db::open(&portable::index_db_path(&root)).unwrap();
-        assert!(face_store::load_faces(&portable_conn, &relative).unwrap().is_empty());
+        assert!(face_store::load_faces(&portable_conn, &relative)
+            .unwrap()
+            .is_empty());
         assert!(face_store::load_detection_state(&portable_conn, &relative)
             .unwrap()
             .is_none());
