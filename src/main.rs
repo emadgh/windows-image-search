@@ -5,6 +5,7 @@ mod fs_watch;
 mod indexer;
 mod material_texture;
 mod metadata;
+mod model_benchmark;
 mod preview_benchmark;
 mod runtime_benchmark;
 mod settings;
@@ -25,6 +26,7 @@ enum StartupMode {
     AnnBenchmark(usize),
     ClipPreviewBenchmark(usize),
     ClipRuntimeBenchmark(usize),
+    ImageModelBenchmark(usize),
     MaterialTextureBenchmark(usize),
 }
 
@@ -90,6 +92,21 @@ fn startup_mode() -> StartupMode {
                 .max(1);
             return StartupMode::ClipRuntimeBenchmark(samples);
         }
+        if let Some(value) = arg.strip_prefix("--benchmark-image-models=") {
+            let queries = value
+                .parse::<usize>()
+                .unwrap_or_else(|_| model_benchmark::default_query_count())
+                .max(1);
+            return StartupMode::ImageModelBenchmark(queries);
+        }
+        if arg == "--benchmark-image-models" {
+            let queries = args
+                .peek()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or_else(model_benchmark::default_query_count)
+                .max(1);
+            return StartupMode::ImageModelBenchmark(queries);
+        }
         if let Some(value) = arg.strip_prefix("--benchmark-material-texture=") {
             let samples = value
                 .parse::<usize>()
@@ -119,6 +136,10 @@ fn preview_benchmark_report_path(db_path: &Path) -> PathBuf {
 
 fn runtime_benchmark_report_path(db_path: &Path) -> PathBuf {
     benchmark_report_path(db_path, "clip-runtime")
+}
+
+fn image_model_benchmark_report_path(db_path: &Path) -> PathBuf {
+    benchmark_report_path(db_path, "image-models")
 }
 
 fn material_texture_benchmark_report_path(db_path: &Path) -> PathBuf {
@@ -192,6 +213,18 @@ fn main() -> eframe::Result<()> {
                 "CLIP runtime",
             ),
             Err(err) => eprintln!("CLIP runtime benchmark failed: {err:#}"),
+        }
+        return Ok(());
+    }
+
+    if let StartupMode::ImageModelBenchmark(query_count) = mode {
+        match model_benchmark::benchmark(&db_path, &model_cache, query_count) {
+            Ok(report) => write_benchmark_report(
+                &image_model_benchmark_report_path(&db_path),
+                &report,
+                "image models",
+            ),
+            Err(err) => eprintln!("Image model benchmark failed: {err:#}"),
         }
         return Ok(());
     }
