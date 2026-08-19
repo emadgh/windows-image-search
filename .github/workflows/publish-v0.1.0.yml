@@ -112,18 +112,31 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --json tagName,name,isLatest,url,assets
 
-      - name: Record successful publication
+      - name: Record workflow result
+        if: always()
         env:
           GH_TOKEN: ${{ github.token }}
+          JOB_STATUS: ${{ job.status }}
         run: |
           set -euo pipefail
-          RELEASE_URL="$(gh release view v0.1.0 --repo "$GITHUB_REPOSITORY" --json url --jq .url)"
-          printf '{"status":"published","tag":"v0.1.0","release_url":"%s"}\n' "$RELEASE_URL" > release-status.json
+          RUN_URL="https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          RELEASE_URL=""
+          if [ "$JOB_STATUS" = "success" ]; then
+            RELEASE_URL="$(gh release view v0.1.0 --repo "$GITHUB_REPOSITORY" --json url --jq .url)"
+          fi
+          printf '{"status":"%s","tag":"v0.1.0","release_url":"%s","run_url":"%s"}\n' "$JOB_STATUS" "$RELEASE_URL" "$RUN_URL" > release-status.json
           CONTENT="$(base64 -w0 release-status.json)"
-          gh api \
-            --method PUT \
-            -H 'Accept: application/vnd.github+json' \
-            "/repos/$GITHUB_REPOSITORY/contents/.release-status-v0.1.0.json" \
-            -f message='chore: record v0.1.0 publication' \
-            -f content="$CONTENT" \
-            -f branch='chore/publish-v0.1.0'
+          API_PATH="/repos/$GITHUB_REPOSITORY/contents/.release-status-v0.1.0.json"
+          EXISTING_SHA="$(gh api "$API_PATH?ref=chore%2Fpublish-v0.1.0" --jq .sha 2>/dev/null || true)"
+          if [ -n "$EXISTING_SHA" ]; then
+            gh api --method PUT "$API_PATH" \
+              -f message='chore: update v0.1.0 publication status' \
+              -f content="$CONTENT" \
+              -f branch='chore/publish-v0.1.0' \
+              -f sha="$EXISTING_SHA"
+          else
+            gh api --method PUT "$API_PATH" \
+              -f message='chore: record v0.1.0 publication status' \
+              -f content="$CONTENT" \
+              -f branch='chore/publish-v0.1.0'
+          fi
