@@ -5,6 +5,7 @@ A native, local-first image index and visual search application for Windows, wri
 ## v0.2.x features
 
 - Configure one or more folders to index recursively.
+- Portable per-root indexes under `<root>/.imagesearch`, suitable for external/removable drives and drive-letter changes.
 - Crash-safe incremental **Rescan** with durable batch commits and live results while indexing.
 - Filesystem watching for new, changed, renamed and deleted images without requiring a full rescan.
 - Supports JPG/JPEG, PNG, TIF and TIFF.
@@ -12,20 +13,37 @@ A native, local-first image index and visual search application for Windows, wri
 - Search/filter by dominant color with adjustable tolerance.
 - Hybrid image similarity using color distribution, texture/dHash, CLIP semantic similarity and dominant color.
 - Two-stage candidate generation for large libraries, with persisted HNSW semantic retrieval and exact hybrid reranking.
-- Persistent thumbnail disk cache, viewport-priority loading and bounded GPU/UI texture residency.
+- Persistent portable thumbnail disk cache, viewport-priority loading and bounded GPU/UI texture residency.
 - Collections for grouping indexed folders/files.
 - Switch between a resizable thumbnail grid and an Explorer-style detailed list.
 - Double-click to open an image; context menu can open its containing folder or copy its path.
 
-## First run
+## First run and portable indexes
 
 1. Start `windows-image-search.exe`.
-2. Open **Settings**, add one or more indexed folders, then run **Rescan**.
-3. Metadata, color/texture descriptors and cached thumbnail previews are committed incrementally.
-4. CLIP embeddings are generated for images that do not have one yet.
-5. The CLIP model is downloaded on its first use and cached under the app's local data directory. After it is cached, similarity search can run offline.
+2. Open **Settings** and add one or more indexed folders.
+3. A new folder gets a `.imagesearch` directory and can then be populated with **Rescan**. If the folder already contains a valid `.imagesearch/index.sqlite3`, the existing portable index is attached and reused without decoding/rescanning the source images.
+4. Metadata, color/texture descriptors, cached thumbnail previews and CLIP embeddings are committed incrementally.
+5. The CLIP model is downloaded on its first use and cached under the Windows user's local application-data directory. After it is cached, similarity search can run offline.
 
-Index data is stored under the current Windows user's local application-data directory in `WindowsImageSearch/index.sqlite3`. The index contains file paths, file state, dimensions, extracted text metadata, compact visual descriptors and CLIP embeddings; original images are never copied into the database.
+Each configured root owns its durable image-search data:
+
+```text
+<root>/.imagesearch/
+  index.sqlite3
+  thumbnails/
+  ann-index/
+```
+
+The presence of `.imagesearch/index.sqlite3` marks a previously indexed root. Source paths inside the portable database are stored relative to that root, so an external drive can move from a path such as `E:\Materials` to `F:\Materials` without invalidating its image records, descriptors, embeddings or thumbnail identities. Adding the moved folder on another machine rehydrates the application from the portable database instead of performing a full image rescan.
+
+The application still keeps a small local `WindowsImageSearch/index.sqlite3` under the current user's application-data directory. In v0.2.10 this is a rebuildable multi-root session/catalog cache used to union currently attached libraries and retain shared state such as root registration and collections; the root-local `.imagesearch/index.sqlite3` files are the durable source of image index data. Downloaded model files and UI/performance settings also remain local to the Windows user.
+
+Existing v0.2.9 central records are migrated root-by-root when an available folder is attached. Compact visual descriptors and CLIP embeddings are copied directly rather than regenerated. Existing cached thumbnails are copied into the root's portable thumbnail cache when their old cache entries are available. Migration is committed per root, so an interrupted migration can be resumed without deleting the old central data prematurely.
+
+`.imagesearch` and all of its descendants are excluded from recursive image traversal and filesystem-watch indexing events. Changed source files are mirrored back to the portable database in durable batches. Watcher-reported changes are revalidated even if a replacement file preserved its size and modified timestamp, and newly decoded sources receive a stable content fingerprint.
+
+Original source images are never copied into the SQLite database.
 
 ## Search modes
 
@@ -43,7 +61,7 @@ Click **Search by image**, choose a query image, and use the similarity sliders 
 
 ## Diagnostic benchmarks
 
-Benchmarks are opt-in CLI diagnostics. They do not change normal GUI/indexing/search behavior and write timestamped reports beside the application database in the `WindowsImageSearch` local-data directory.
+Benchmarks are opt-in CLI diagnostics. Before a diagnostic runs, available registered portable roots are attached into the local multi-root session cache so the command sees the same current indexed libraries as the GUI. Benchmark reports are written beside the local session database in the `WindowsImageSearch` application-data directory.
 
 ### Run the complete v0.2 benchmark gate
 
@@ -100,13 +118,13 @@ Or include it in the complete gate with `-MaterialEvalManifest`. Every labeled i
 
 ### Library profile
 
-Record the composition of the currently indexed library before interpreting benchmark results:
+Record the composition of the currently attached portable libraries before interpreting benchmark results:
 
 ```powershell
 .\windows-image-search.exe --benchmark-library-profile
 ```
 
-The report includes indexed image count, source files that currently exist or are missing, persisted total source bytes, database size, extension distribution, width/height min/median/P90/max, megapixel min/P50/P90/P95/max, megapixel buckets, and landscape/portrait/square counts. The command uses the current local SQLite index and does not modify production search settings.
+The report includes indexed image count, source files that currently exist or are missing, persisted total source bytes, database size, extension distribution, width/height min/median/P90/max, megapixel min/P50/P90/P95/max, megapixel buckets, and landscape/portrait/square counts. The command uses the hydrated multi-root session index and does not modify production search settings.
 
 ### ANN retrieval
 
@@ -183,7 +201,7 @@ cargo test --all-targets
 cargo run --release
 ```
 
-Windows CI reads the package version from `Cargo.toml` and uploads a versioned artifact such as `windows-image-search-v0.2.9-win64`. The ZIP contains `windows-image-search.exe`, `run-v0.2-benchmark-gate.ps1`, `README.md`, `LICENSE` and `VERSION.txt`.
+Windows CI reads the package version from `Cargo.toml` and uploads a versioned artifact such as `windows-image-search-v0.2.10-win64`. The ZIP contains `windows-image-search.exe`, `run-v0.2-benchmark-gate.ps1`, `README.md`, `LICENSE` and `VERSION.txt`.
 
 ## Privacy
 
