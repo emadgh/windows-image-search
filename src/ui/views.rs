@@ -67,12 +67,13 @@ impl ImageSearchApp {
                                         egui::vec2(self.thumb_size, self.thumb_size),
                                         fit,
                                         selected,
-                                        egui::Sense::click(),
+                                        egui::Sense::click_and_drag(),
                                     )
                                 } else {
                                     let response = ui.add_sized(
                                         [self.thumb_size, self.thumb_size],
-                                        egui::Button::new("Loading thumbnail…"),
+                                        egui::Button::new("Loading thumbnail…")
+                                            .sense(egui::Sense::click_and_drag()),
                                     );
                                     if selected {
                                         ui.painter().rect_stroke(
@@ -89,13 +90,15 @@ impl ImageSearchApp {
                                 };
 
                                 self.handle_result_response(&response, &record.path);
+                                self.attach_collection_drag_source(&response, &record.path);
                                 response.context_menu(|ui| file_context_menu(ui, &record.path));
 
                                 let label = ui.add(
                                     egui::Label::new(truncate_middle(&record.file_name, 30))
-                                        .sense(egui::Sense::click()),
+                                        .sense(egui::Sense::click_and_drag()),
                                 );
                                 self.handle_result_response(&label, &record.path);
+                                self.attach_collection_drag_source(&label, &record.path);
                                 label.context_menu(|ui| file_context_menu(ui, &record.path));
                                 label.on_hover_text(record.path.display().to_string());
 
@@ -138,12 +141,16 @@ impl ImageSearchApp {
                                 egui::vec2(widths.thumb, 54.0),
                                 fit,
                                 selected,
-                                egui::Sense::click(),
+                                egui::Sense::click_and_drag(),
                             )
                         } else {
-                            ui.add_sized([widths.thumb, 54.0], egui::Button::new("…"))
+                            ui.add_sized(
+                                [widths.thumb, 54.0],
+                                egui::Button::new("…").sense(egui::Sense::click_and_drag()),
+                            )
                         };
                         self.handle_result_response(&response, &record.path);
+                        self.attach_collection_drag_source(&response, &record.path);
                         response.context_menu(|ui| file_context_menu(ui, &record.path));
 
                         ui.allocate_ui_with_layout(
@@ -152,9 +159,10 @@ impl ImageSearchApp {
                             |ui| {
                                 let name = ui.add(
                                     egui::Label::new(truncate_middle(&record.file_name, 44))
-                                        .sense(egui::Sense::click()),
+                                        .sense(egui::Sense::click_and_drag()),
                                 );
                                 self.handle_result_response(&name, &record.path);
+                                self.attach_collection_drag_source(&name, &record.path);
                                 name.context_menu(|ui| file_context_menu(ui, &record.path));
                                 name.on_hover_text(record.path.display().to_string());
                                 ui.small(truncate_middle(&record.root.display().to_string(), 48));

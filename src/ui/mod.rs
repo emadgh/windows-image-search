@@ -1,3 +1,4 @@
+mod collections;
 mod thumbnails;
 mod views;
 
@@ -41,6 +42,7 @@ pub struct ImageSearchApp {
     pub(super) similarity_settings: indexer::SimilaritySettings,
     pub(super) indexing_settings: IndexingSettings,
     settings_path: PathBuf,
+    pub(super) collections: collections::CollectionsState,
     pub(super) search_text: String,
     text_search_service: TextSearchService,
     text_search_matches: Option<HashSet<PathBuf>>,
@@ -86,6 +88,8 @@ impl ImageSearchApp {
             .enumerate()
             .map(|(index, record)| (record.path.clone(), index))
             .collect();
+        let collections =
+            collections::CollectionsState::load(&db_path, &images).unwrap_or_default();
         Self {
             roots,
             images,
@@ -100,6 +104,7 @@ impl ImageSearchApp {
             similarity_settings: indexer::SimilaritySettings::default(),
             indexing_settings,
             settings_path,
+            collections,
             search_text: String::new(),
             text_search_service,
             text_search_matches: None,
@@ -136,10 +141,12 @@ impl ImageSearchApp {
                 WorkerMessage::Progress { done, total } => self.progress = Some((done, total)),
                 WorkerMessage::IndexedBatch(records) => {
                     self.merge_indexed_batch(records);
+                    self.refresh_collection_effective_membership();
                     self.refresh_text_search_after_data_change();
                 }
                 WorkerMessage::RemovedPaths(paths) => {
                     self.remove_indexed_paths(paths);
+                    self.refresh_collection_effective_membership();
                     self.refresh_text_search_after_data_change();
                 }
                 WorkerMessage::Reload => {
@@ -151,6 +158,7 @@ impl ImageSearchApp {
                         Err(err) => self.last_error = Some(format!("Reload failed: {err:#}")),
                     }
                     self.progress = None;
+                    self.refresh_collection_effective_membership();
                     self.refresh_text_search_after_data_change();
                 }
                 WorkerMessage::SimilarityResults(results) => {
@@ -339,6 +347,7 @@ impl ImageSearchApp {
                 self.fs_watch_service.set_roots(self.roots.clone());
                 self.similarity_results = None;
                 self.selected_paths.clear();
+                self.refresh_collection_effective_membership();
                 self.refresh_text_search_after_data_change();
             }
             Err(err) => self.last_error = Some(format!("Cannot remove folder: {err:#}")),
@@ -393,6 +402,9 @@ impl ImageSearchApp {
             .iter()
             .enumerate()
             .filter(|(_, record)| {
+                if !self.collection_filter_matches(&record.path) {
+                    return false;
+                }
                 if text_filter_active {
                     let Some(matches) = &self.text_search_matches else {
                         return false;
@@ -512,7 +524,7 @@ impl ImageSearchApp {
         egui::Window::new("Settings")
             .open(&mut open)
             .resizable(true)
-            .default_width(620.0)
+            .default_width(920.0)
             .show(ctx, |ui| {
                 ui.heading("Indexed folders");
                 ui.label(
@@ -551,6 +563,8 @@ impl ImageSearchApp {
                         });
                     }
                 }
+
+                self.show_collections_settings(ui);
 
                 ui.add_space(12.0);
                 ui.separator();
@@ -668,6 +682,7 @@ impl ImageSearchApp {
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.heading("Search");
+                    self.show_collection_filter(ui);
                     ui.add(
                         egui::TextEdit::singleline(&mut self.search_text)
                             .hint_text("filename, path, description, keywords…")
