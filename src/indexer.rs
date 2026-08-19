@@ -1,6 +1,7 @@
 use crate::ann;
 use crate::db::{self, ImageRecord, ImageSummary};
 use crate::embedding::EmbeddingService;
+use crate::material_texture;
 use crate::metadata;
 use crate::settings::IndexingSettings;
 use crate::thumbnail_cache;
@@ -41,6 +42,7 @@ struct PreparedImage {
     dominant: [u8; 3],
     visual_hash: u64,
     color_histogram: Vec<f32>,
+    material_texture: Vec<f32>,
 }
 
 impl PreparedImage {
@@ -251,7 +253,14 @@ fn incremental_update(
                 .par_iter()
                 .filter_map(|item| {
                     let result = inspect_image(&item.path, &thumbnail_cache_dir).map(
-                        |(width, height, dominant, visual_hash, color_histogram)| {
+                        |(
+                            width,
+                            height,
+                            dominant,
+                            visual_hash,
+                            color_histogram,
+                            material_texture,
+                        )| {
                             let text = metadata::extract(&item.path);
                             PreparedImage {
                                 root: item.root.clone(),
@@ -277,6 +286,7 @@ fn incremental_update(
                                 dominant,
                                 visual_hash,
                                 color_histogram,
+                                material_texture,
                             }
                         },
                     );
@@ -322,6 +332,7 @@ fn incremental_update(
                     item.visual_hash,
                     &item.color_histogram,
                 )?;
+                db::set_material_texture(&transaction, &item.path, &item.material_texture)?;
                 committed_paths.push(item.path.clone());
             }
             transaction.commit()?;
@@ -487,7 +498,14 @@ fn rescan(
                 .par_iter()
                 .filter_map(|item| {
                     let result = inspect_image(&item.path, &thumbnail_cache_dir).map(
-                        |(width, height, dominant, visual_hash, color_histogram)| {
+                        |(
+                            width,
+                            height,
+                            dominant,
+                            visual_hash,
+                            color_histogram,
+                            material_texture,
+                        )| {
                             let text = metadata::extract(&item.path);
                             PreparedImage {
                                 root: item.root.clone(),
@@ -513,6 +531,7 @@ fn rescan(
                                 dominant,
                                 visual_hash,
                                 color_histogram,
+                                material_texture,
                             }
                         },
                     );
@@ -561,6 +580,7 @@ fn rescan(
                     item.visual_hash,
                     &item.color_histogram,
                 )?;
+                db::set_material_texture(&transaction, &item.path, &item.material_texture)?;
             }
             transaction.commit()?;
         }
@@ -640,7 +660,7 @@ fn build_visual_descriptors(
         .context("creating visual descriptor worker pool")?;
     let done = AtomicUsize::new(0);
 
-    let descriptors: Vec<(PathBuf, u64, Vec<f32>)> = pool.install(|| {
+    let descriptors: Vec<(PathBuf, u64, Vec<f32>, Vec<f32>)> = pool.install(|| {
         paths
             .par_iter()
             .filter_map(|path| {
@@ -652,8 +672,8 @@ fn build_visual_descriptors(
                     )));
                 }
                 match result {
-                    Ok((_, visual_hash, color_histogram)) => {
-                        Some((path.clone(), visual_hash, color_histogram))
+                    Ok((_, visual_hash, color_histogram, material_texture)) => {
+                        Some((path.clone(), visual_hash, color_histogram, material_texture))
                     }
                     Err(err) => {
                         let _ = tx.send(WorkerMessage::Error(format!(
@@ -667,8 +687,9 @@ fn build_visual_descriptors(
             .collect()
     });
 
-    for (path, visual_hash, color_histogram) in descriptors {
+    for (path, visual_hash, color_histogram, material_texture) in descriptors {
         db::set_visual_descriptor(conn, &path, visual_hash, &color_histogram)?;
+        db::set_material_texture(conn, &path, &material_texture)?;
     }
     Ok(())
 }
@@ -889,7 +910,8 @@ fn similarity_search(
     }
 
     let query_image = decode_image(query_path)?;
-    let (query_dominant, query_hash, query_histogram) = visual_descriptor(&query_image);
+    let (query_dominant, query_hash, query_histogram, query_material_texture) =
+        visual_descriptor(&query_image);
 
     let query_embedding = if settings.clip_weight > 0.0 {
         match query_clip_embedding(
@@ -974,9 +996,13 @@ fn similarity_search(
         }
 
         let hash_similarity = if compute_hash {
-            record
+            let dhash = record
                 .visual_hash
-                .map(|hash| perceptual_hash_similarity(query_hash, hash))
+                .map(|hash| perceptual_hash_similarity(query_hash, hash));
+            let material = record.material_texture.as_deref().and_then(|descriptor| {
+                material_texture::similarity(&query_material_texture, descriptor)
+            });
+            material_texture::combine_with_dhash(dhash, material)
         } else {
             None
         };
@@ -1238,7 +1264,7 @@ fn normalized_path_key(path: &Path) -> String {
 fn inspect_image(
     path: &Path,
     thumbnail_cache_dir: &Path,
-) -> Result<(u32, u32, [u8; 3], u64, Vec<f32>)> {
+) -> Result<(u32, u32, [u8; 3], u64, Vec<f32>, Vec<f32>)> {
     let image = decode_image(path)?;
     let (width, height) = image.dimensions();
 
@@ -1247,8 +1273,15 @@ fn inspect_image(
     // authoritative image index; the UI can still rebuild the preview later.
     let _ = thumbnail_cache::store_from_decoded(thumbnail_cache_dir, path, &image);
 
-    let (dominant, visual_hash, color_histogram) = visual_descriptor(&image);
-    Ok((width, height, dominant, visual_hash, color_histogram))
+    let (dominant, visual_hash, color_histogram, material_texture) = visual_descriptor(&image);
+    Ok((
+        width,
+        height,
+        dominant,
+        visual_hash,
+        color_histogram,
+        material_texture,
+    ))
 }
 
 fn decode_image(path: &Path) -> Result<DynamicImage> {
@@ -1259,7 +1292,7 @@ fn decode_image(path: &Path) -> Result<DynamicImage> {
         .with_context(|| format!("decoding {}", path.display()))
 }
 
-fn visual_descriptor(image: &DynamicImage) -> ([u8; 3], u64, Vec<f32>) {
+fn visual_descriptor(image: &DynamicImage) -> ([u8; 3], u64, Vec<f32>, Vec<f32>) {
     let color_thumb = image.thumbnail(128, 128).to_rgba8();
 
     // Dominant color uses a finer 8×8×8 quantization for display and the
@@ -1328,7 +1361,8 @@ fn visual_descriptor(image: &DynamicImage) -> ([u8; 3], u64, Vec<f32>) {
         }
     }
 
-    (dominant, visual_hash, color_histogram)
+    let material_texture = material_texture::descriptor(image);
+    (dominant, visual_hash, color_histogram, material_texture)
 }
 
 pub fn is_supported_image(path: &Path) -> bool {
