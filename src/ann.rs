@@ -38,7 +38,13 @@ pub fn search_candidates(
         return Ok(HashMap::new());
     }
 
-    let hnsw = load_index(&index_dir, &manifest)?;
+    // HnswIo owns reload state that the loaded Hnsw may borrow, so the loader
+    // intentionally stays in the same scope and outlives every HNSW access.
+    let mut loader = HnswIo::new(&index_dir, &manifest.basename);
+    let hnsw: Hnsw<f32, DistCosine> = loader
+        .load_hnsw::<f32, DistCosine>()
+        .context("loading persisted CLIP HNSW index")?;
+
     let k = limit.min(manifest.count);
     if k == 0 {
         return Ok(HashMap::new());
@@ -51,7 +57,7 @@ pub fn search_candidates(
         .map(|neighbour| {
             // DistCosine returns cosine distance. The application historically
             // clamps CLIP cosine similarity to [0, 1], so preserve that scale.
-            let similarity = (1.0 - neighbour.distance).clamp(0.0, 1.0);
+            let similarity = (1.0_f32 - neighbour.distance).clamp(0.0_f32, 1.0_f32);
             (neighbour.d_id, similarity)
         })
         .collect())
@@ -72,7 +78,13 @@ pub fn benchmark(db_path: &Path, requested_queries: usize) -> Result<String> {
     }
 
     let load_started = Instant::now();
-    let hnsw = load_index(&index_dir, &manifest)?;
+    // Keep the reloader alive for the full benchmark. hnsw_rs can back a
+    // reloaded graph with data owned by HnswIo, so returning Hnsw from a helper
+    // with a local loader would violate that lifetime contract.
+    let mut loader = HnswIo::new(&index_dir, &manifest.basename);
+    let hnsw: Hnsw<f32, DistCosine> = loader
+        .load_hnsw::<f32, DistCosine>()
+        .context("loading persisted CLIP HNSW index")?;
     let load_ms = load_started.elapsed().as_secs_f64() * 1_000.0;
 
     let query_indices = sample_indices(entries.len(), requested_queries.max(1));
@@ -128,7 +140,11 @@ pub fn benchmark(db_path: &Path, requested_queries: usize) -> Result<String> {
 
     let mut report = String::new();
     writeln!(report, "Windows Image Search ANN Benchmark")?;
-    writeln!(report, "application_version=v{}", env!("CARGO_PKG_VERSION"))?;
+    writeln!(
+        report,
+        "application_version=v{}",
+        env!("CARGO_PKG_VERSION")
+    )?;
     writeln!(report, "vectors={}", entries.len())?;
     writeln!(report, "queries={}", query_indices.len())?;
     writeln!(report, "hnsw_rebuilt={rebuilt}")?;
@@ -180,13 +196,6 @@ fn ensure_manifest(db_path: &Path, index_dir: &Path) -> Result<(Manifest, bool)>
         }
         _ => Ok((rebuild(db_path, index_dir, signature)?, true)),
     }
-}
-
-fn load_index(index_dir: &Path, manifest: &Manifest) -> Result<Hnsw<f32, DistCosine>> {
-    let mut loader = HnswIo::new(index_dir, &manifest.basename);
-    loader
-        .load_hnsw::<f32, DistCosine>()
-        .context("loading persisted CLIP HNSW index")
 }
 
 fn search_ef(k: usize, count: usize) -> usize {
