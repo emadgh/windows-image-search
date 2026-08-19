@@ -2,6 +2,7 @@ mod ann;
 mod db;
 mod embedding;
 mod face_detection;
+mod face_pipeline;
 #[cfg(test)]
 mod face_portable_tests;
 mod face_store;

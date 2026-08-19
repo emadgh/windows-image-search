@@ -148,7 +148,8 @@ where
                 }
 
                 let result = (|| -> Result<usize> {
-                    let (oriented, orientation) = face_detection::decode_oriented_with_orientation(&absolute)?;
+                    let (oriented, orientation) =
+                        face_detection::decode_oriented_with_orientation(&absolute)?;
                     let (width, height) = oriented.dimensions();
                     let detections = detector.detect(&oriented)?;
                     let stored = face_store::replace_detections(
@@ -445,8 +446,13 @@ mod tests {
             version: "1",
             calls: 0,
         };
-        run_available_roots(&[root.clone()], &mut v1, FacePipelineOptions::default(), |_| {})
-            .unwrap();
+        run_available_roots(
+            &[root.clone()],
+            &mut v1,
+            FacePipelineOptions::default(),
+            |_| {},
+        )
+        .unwrap();
         let mut v2 = FakeDetector {
             version: "2",
             calls: 0,
