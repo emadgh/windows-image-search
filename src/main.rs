@@ -5,6 +5,7 @@ mod fs_watch;
 mod indexer;
 mod material_texture;
 mod metadata;
+mod preview_benchmark;
 mod settings;
 mod text_search;
 mod thumbnail_cache;
@@ -20,6 +21,7 @@ enum StartupMode {
     Gui,
     Version,
     AnnBenchmark(usize),
+    ClipPreviewBenchmark(usize),
 }
 
 fn app_paths() -> Result<(PathBuf, PathBuf)> {
@@ -54,17 +56,43 @@ fn startup_mode() -> StartupMode {
                 .max(1);
             return StartupMode::AnnBenchmark(queries);
         }
+        if let Some(value) = arg.strip_prefix("--benchmark-clip-preview=") {
+            let samples = value
+                .parse::<usize>()
+                .unwrap_or_else(|_| preview_benchmark::default_sample_count())
+                .max(3);
+            return StartupMode::ClipPreviewBenchmark(samples);
+        }
+        if arg == "--benchmark-clip-preview" {
+            let samples = args
+                .peek()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or_else(preview_benchmark::default_sample_count)
+                .max(3);
+            return StartupMode::ClipPreviewBenchmark(samples);
+        }
     }
     StartupMode::Gui
 }
 
-fn benchmark_report_path(db_path: &Path) -> PathBuf {
+fn ann_benchmark_report_path(db_path: &Path) -> PathBuf {
     let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
     db_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(format!(
             "ann-benchmark-v{}-{timestamp}.txt",
+            env!("CARGO_PKG_VERSION")
+        ))
+}
+
+fn preview_benchmark_report_path(db_path: &Path) -> PathBuf {
+    let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    db_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(
+            "clip-preview-benchmark-v{}-{timestamp}.txt",
             env!("CARGO_PKG_VERSION")
         ))
 }
@@ -85,7 +113,7 @@ fn main() -> eframe::Result<()> {
     if let StartupMode::AnnBenchmark(query_count) = mode {
         match ann::benchmark(&db_path, query_count) {
             Ok(report) => {
-                let destination = benchmark_report_path(&db_path);
+                let destination = ann_benchmark_report_path(&db_path);
                 match std::fs::write(&destination, &report) {
                     Ok(()) => {
                         println!("{report}");
@@ -98,6 +126,26 @@ fn main() -> eframe::Result<()> {
                 }
             }
             Err(err) => eprintln!("ANN benchmark failed: {err:#}"),
+        }
+        return Ok(());
+    }
+
+    if let StartupMode::ClipPreviewBenchmark(sample_count) = mode {
+        match preview_benchmark::benchmark(&db_path, &model_cache, sample_count) {
+            Ok(report) => {
+                let destination = preview_benchmark_report_path(&db_path);
+                match std::fs::write(&destination, &report) {
+                    Ok(()) => {
+                        println!("{report}");
+                        println!("report={}", destination.display());
+                    }
+                    Err(err) => {
+                        println!("{report}");
+                        eprintln!("Cannot save CLIP preview benchmark report: {err}");
+                    }
+                }
+            }
+            Err(err) => eprintln!("CLIP preview benchmark failed: {err:#}"),
         }
         return Ok(());
     }
