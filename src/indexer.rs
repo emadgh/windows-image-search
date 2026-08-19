@@ -11,6 +11,8 @@ use std::time::UNIX_EPOCH;
 use walkdir::WalkDir;
 
 const COLOR_HISTOGRAM_BINS: usize = 64;
+const INDEX_DECODE_WORKERS_CAP: usize = 2;
+const INDEX_COMMIT_BATCH: usize = 16;
 
 #[derive(Clone)]
 struct PendingImage {
@@ -36,15 +38,43 @@ struct PreparedImage {
     color_histogram: Vec<f32>,
 }
 
+impl PreparedImage {
+    fn to_record(&self) -> ImageRecord {
+        ImageRecord {
+            path: self.path.clone(),
+            root: self.root.clone(),
+            file_name: self.file_name.clone(),
+            extension: self.extension.clone(),
+            size: self.size,
+            modified: self.modified,
+            width: self.width,
+            height: self.height,
+            description: self.description.clone(),
+            keywords: self.keywords.clone(),
+            dominant: self.dominant,
+            visual_hash: Some(self.visual_hash),
+            color_histogram: Some(self.color_histogram.clone()),
+            embedding: None,
+            score: None,
+        }
+    }
+}
+
 fn background_worker_count() -> usize {
     let logical = std::thread::available_parallelism()
         .map(|value| value.get())
         .unwrap_or(4);
-    logical.saturating_sub(1).max(1).min(6)
+    logical
+        .saturating_sub(1)
+        .max(1)
+        .min(INDEX_DECODE_WORKERS_CAP)
 }
 
 fn clip_worker_count() -> usize {
-    background_worker_count().min(4)
+    let logical = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(4);
+    logical.saturating_sub(1).max(1).min(4)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -77,6 +107,7 @@ pub enum WorkerMessage {
     Status(String),
     Progress { done: usize, total: usize },
     Reload,
+    IndexedBatch(Vec<ImageRecord>),
     SimilarityResults(Vec<ImageRecord>),
     Error(String),
     Idle,
@@ -104,7 +135,7 @@ fn rescan(
     roots: &[PathBuf],
     tx: &Sender<WorkerMessage>,
 ) -> Result<()> {
-    let conn = db::open(db_path)?;
+    let mut conn = db::open(db_path)?;
     let mut candidates: Vec<(PathBuf, PathBuf)> = Vec::new();
 
     let _ = tx.send(WorkerMessage::Status(
@@ -147,7 +178,8 @@ fn rescan(
     let mut pending = Vec::<PendingImage>::new();
 
     // Keep filesystem/SQLite state checks cheap and serialized, but move image
-    // decoding + metadata extraction to a bounded worker pool below.
+    // decoding + metadata extraction to a small worker pool below. Completed
+    // batches are committed immediately so a crash does not discard the whole run.
     for (index, (root, path)) in candidates.iter().enumerate() {
         seen_by_root
             .entry(root.clone())
@@ -194,101 +226,112 @@ fn rescan(
     }
 
     let changed_total = pending.len();
+    let workers = background_worker_count();
     let _ = tx.send(WorkerMessage::Status(format!(
-        "Preparing {changed_total} changed image{} on {} background worker{}…",
+        "Preparing {changed_total} changed image{} with {workers} HDD-friendly decode worker{}; committing every {INDEX_COMMIT_BATCH} images…",
         if changed_total == 1 { "" } else { "s" },
-        background_worker_count(),
-        if background_worker_count() == 1 {
-            ""
-        } else {
-            "s"
-        }
+        if workers == 1 { "" } else { "s" },
     )));
 
     let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(background_worker_count())
+        .num_threads(workers)
         .thread_name(|index| format!("image-index-{index}"))
         .build()
         .context("creating image indexing worker pool")?;
     let prepared_count = AtomicUsize::new(0);
+    let mut changed = 0usize;
 
-    let prepared: Vec<PreparedImage> = pool.install(|| {
-        pending
-            .par_iter()
-            .filter_map(|item| {
-                let result = inspect_image(&item.path).map(
-                    |(width, height, dominant, visual_hash, color_histogram)| {
-                        let text = metadata::extract(&item.path);
-                        PreparedImage {
-                            root: item.root.clone(),
-                            path: item.path.clone(),
-                            file_name: item
-                                .path
-                                .file_name()
-                                .and_then(|name| name.to_str())
-                                .unwrap_or_default()
-                                .to_owned(),
-                            extension: item
-                                .path
-                                .extension()
-                                .and_then(|ext| ext.to_str())
-                                .unwrap_or_default()
-                                .to_ascii_lowercase(),
-                            size: item.size,
-                            modified: item.modified,
-                            width,
-                            height,
-                            description: text.description,
-                            keywords: text.keywords,
-                            dominant,
-                            visual_hash,
-                            color_histogram,
-                        }
-                    },
-                );
+    for batch in pending.chunks(INDEX_COMMIT_BATCH) {
+        let prepared: Vec<PreparedImage> = pool.install(|| {
+            batch
+                .par_iter()
+                .filter_map(|item| {
+                    let result = inspect_image(&item.path).map(
+                        |(width, height, dominant, visual_hash, color_histogram)| {
+                            let text = metadata::extract(&item.path);
+                            PreparedImage {
+                                root: item.root.clone(),
+                                path: item.path.clone(),
+                                file_name: item
+                                    .path
+                                    .file_name()
+                                    .and_then(|name| name.to_str())
+                                    .unwrap_or_default()
+                                    .to_owned(),
+                                extension: item
+                                    .path
+                                    .extension()
+                                    .and_then(|ext| ext.to_str())
+                                    .unwrap_or_default()
+                                    .to_ascii_lowercase(),
+                                size: item.size,
+                                modified: item.modified,
+                                width,
+                                height,
+                                description: text.description,
+                                keywords: text.keywords,
+                                dominant,
+                                visual_hash,
+                                color_histogram,
+                            }
+                        },
+                    );
 
-                let done = prepared_count.fetch_add(1, Ordering::Relaxed) + 1;
-                if done % 16 == 0 || done == changed_total {
-                    let _ = tx.send(WorkerMessage::Status(format!(
-                        "Decoding/reading metadata: {done}/{changed_total}"
-                    )));
-                }
-
-                match result {
-                    Ok(value) => Some(value),
-                    Err(err) => {
-                        let _ = tx.send(WorkerMessage::Error(format!(
-                            "Cannot decode {}: {err:#}",
-                            item.path.display()
+                    let done = prepared_count.fetch_add(1, Ordering::Relaxed) + 1;
+                    if done % 8 == 0 || done == changed_total {
+                        let _ = tx.send(WorkerMessage::Status(format!(
+                            "Decoding/reading metadata: {done}/{changed_total}; committed {changed}"
                         )));
-                        None
                     }
-                }
-            })
-            .collect()
-    });
 
-    // SQLite writes stay on this worker thread; CPU-heavy preparation above is
-    // parallelized without sharing a Connection across threads.
-    for item in &prepared {
-        db::upsert_image(
-            &conn,
-            &item.path,
-            &item.root,
-            &item.file_name,
-            &item.extension,
-            item.size,
-            item.modified,
-            item.width,
-            item.height,
-            &item.description,
-            &item.keywords,
-            item.dominant,
-            item.visual_hash,
-            &item.color_histogram,
-        )?;
+                    match result {
+                        Ok(value) => Some(value),
+                        Err(err) => {
+                            let _ = tx.send(WorkerMessage::Error(format!(
+                                "Cannot decode {}: {err:#}",
+                                item.path.display()
+                            )));
+                            None
+                        }
+                    }
+                })
+                .collect()
+        });
+
+        if prepared.is_empty() {
+            continue;
+        }
+
+        {
+            let transaction = conn.transaction()?;
+            for item in &prepared {
+                db::upsert_image(
+                    &transaction,
+                    &item.path,
+                    &item.root,
+                    &item.file_name,
+                    &item.extension,
+                    item.size,
+                    item.modified,
+                    item.width,
+                    item.height,
+                    &item.description,
+                    &item.keywords,
+                    item.dominant,
+                    item.visual_hash,
+                    &item.color_histogram,
+                )?;
+            }
+            transaction.commit()?;
+        }
+
+        changed += prepared.len();
+        let live_records = prepared.iter().map(PreparedImage::to_record).collect();
+        let _ = tx.send(WorkerMessage::IndexedBatch(live_records));
+        let _ = tx.send(WorkerMessage::Status(format!(
+            "Committed base index: {changed}/{changed_total} changed images safely stored"
+        )));
     }
-    let changed = prepared.len();
 
     let mut removed = 0usize;
     for root in roots {
@@ -312,7 +355,7 @@ fn rescan(
 
     let missing = db::paths_missing_embedding(&conn)?;
     if !missing.is_empty() {
-        if let Err(err) = build_embeddings(&conn, model_cache, &missing, tx) {
+        if let Err(err) = build_embeddings(&mut conn, model_cache, &missing, tx) {
             let _ = tx.send(WorkerMessage::Error(format!(
                 "Texture/color index is ready, but CLIP indexing is unavailable: {err:#}"
             )));
@@ -374,7 +417,7 @@ fn build_visual_descriptors(
 }
 
 fn build_embeddings(
-    conn: &rusqlite::Connection,
+    conn: &mut rusqlite::Connection,
     model_cache: &Path,
     paths: &[PathBuf],
     tx: &Sender<WorkerMessage>,
@@ -395,12 +438,16 @@ fn build_embeddings(
         let embeddings = model
             .embed(batch_paths, Some(16))
             .with_context(|| format!("embedding image batch {}", batch_index + 1))?;
-        for (path, embedding) in batch.iter().zip(embeddings.iter()) {
-            db::set_embedding(conn, path, embedding)?;
+        {
+            let transaction = conn.transaction()?;
+            for (path, embedding) in batch.iter().zip(embeddings.iter()) {
+                db::set_embedding(&transaction, path, embedding)?;
+            }
+            transaction.commit()?;
         }
         let done = ((batch_index + 1) * 16).min(total);
         let _ = tx.send(WorkerMessage::Status(format!(
-            "Building CLIP index: {done}/{total}"
+            "Building CLIP index: {done}/{total} (committed)"
         )));
     }
     Ok(())
@@ -756,6 +803,7 @@ pub fn is_supported_image(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn perceptual_hash_prefers_identical_pattern() {
@@ -850,12 +898,80 @@ mod tests {
 
     #[test]
     fn clip_cannot_outvote_bad_color_and_texture_match() {
-        let brown = [150, 82, 38];
         let settings = SimilaritySettings::default();
         let good = hybrid_similarity(Some(0.90), Some(0.88), Some(0.62), 0.90, settings);
         let semantically_close_but_wrong =
             hybrid_similarity(Some(0.35), Some(0.12), Some(0.95), 0.55, settings);
 
         assert!(good > semantically_close_but_wrong);
+    }
+
+    #[test]
+    fn committed_batch_survives_later_rollback() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let db_path = std::env::temp_dir().join(format!(
+            "windows-image-search-durability-{}-{nonce}.sqlite3",
+            std::process::id()
+        ));
+        let root = PathBuf::from("C:/indexed");
+        let first = root.join("first.jpg");
+        let second = root.join("second.jpg");
+
+        {
+            let mut conn = db::open(&db_path).unwrap();
+            {
+                let transaction = conn.transaction().unwrap();
+                db::upsert_image(
+                    &transaction,
+                    &first,
+                    &root,
+                    "first.jpg",
+                    "jpg",
+                    123,
+                    456,
+                    64,
+                    64,
+                    "",
+                    "",
+                    [120, 90, 60],
+                    0x55AA_55AA_55AA_55AA,
+                    &[1.0, 0.0, 0.0, 0.0],
+                )
+                .unwrap();
+                transaction.commit().unwrap();
+            }
+            {
+                let transaction = conn.transaction().unwrap();
+                db::upsert_image(
+                    &transaction,
+                    &second,
+                    &root,
+                    "second.jpg",
+                    "jpg",
+                    123,
+                    456,
+                    64,
+                    64,
+                    "",
+                    "",
+                    [120, 90, 60],
+                    0xAA55_AA55_AA55_AA55,
+                    &[1.0, 0.0, 0.0, 0.0],
+                )
+                .unwrap();
+                // Simulate an interrupted batch: dropping rolls it back.
+            }
+        }
+
+        let records = db::load_images(&db_path).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].path, first);
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(format!("{}-wal", db_path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", db_path.display()));
     }
 }
