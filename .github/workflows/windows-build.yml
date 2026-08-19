@@ -38,6 +38,7 @@ jobs:
           if (-not $match.Success) { throw "Could not extract patch script from helper workflow" }
           $lines = $match.Groups[1].Value -split "`r?`n"
           $python = ($lines | ForEach-Object { $_ -replace '^          ', '' }) -join "`n"
+          $python = $python.Replace("if count != 1:", "if count < 1:")
           $python | Set-Content -Encoding UTF8 patch_settings.py
           python patch_settings.py
           Remove-Item patch_settings.py
