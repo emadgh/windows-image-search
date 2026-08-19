@@ -1,5 +1,6 @@
 use crate::db::{self, ImageRecord};
 use crate::metadata;
+use crate::settings::IndexingSettings;
 use anyhow::{Context, Result};
 use fastembed::{ImageEmbedding, ImageEmbeddingModel, ImageInitOptions};
 use image::{imageops::FilterType, DynamicImage, GenericImageView, Pixel};
@@ -11,8 +12,6 @@ use std::time::UNIX_EPOCH;
 use walkdir::WalkDir;
 
 const COLOR_HISTOGRAM_BINS: usize = 64;
-const INDEX_DECODE_WORKERS_CAP: usize = 2;
-const INDEX_COMMIT_BATCH: usize = 16;
 
 #[derive(Clone)]
 struct PendingImage {
@@ -60,23 +59,6 @@ impl PreparedImage {
     }
 }
 
-fn background_worker_count() -> usize {
-    let logical = std::thread::available_parallelism()
-        .map(|value| value.get())
-        .unwrap_or(4);
-    logical
-        .saturating_sub(1)
-        .max(1)
-        .min(INDEX_DECODE_WORKERS_CAP)
-}
-
-fn clip_worker_count() -> usize {
-    let logical = std::thread::available_parallelism()
-        .map(|value| value.get())
-        .unwrap_or(4);
-    logical.saturating_sub(1).max(1).min(4)
-}
-
 #[derive(Clone, Copy, Debug)]
 pub struct SimilaritySettings {
     pub color_distribution_weight: f32,
@@ -117,10 +99,11 @@ pub fn spawn_rescan(
     db_path: PathBuf,
     model_cache: PathBuf,
     roots: Vec<PathBuf>,
+    indexing_settings: IndexingSettings,
     tx: Sender<WorkerMessage>,
 ) {
     std::thread::spawn(move || {
-        let result = rescan(&db_path, &model_cache, &roots, &tx);
+        let result = rescan(&db_path, &model_cache, &roots, indexing_settings, &tx);
         if let Err(err) = result {
             let _ = tx.send(WorkerMessage::Error(format!("Indexing failed: {err:#}")));
         }
@@ -133,8 +116,10 @@ fn rescan(
     db_path: &Path,
     model_cache: &Path,
     roots: &[PathBuf],
+    indexing_settings: IndexingSettings,
     tx: &Sender<WorkerMessage>,
 ) -> Result<()> {
+    let indexing_settings = indexing_settings.sanitized();
     let mut conn = db::open(db_path)?;
     let mut candidates: Vec<(PathBuf, PathBuf)> = Vec::new();
 
@@ -226,9 +211,10 @@ fn rescan(
     }
 
     let changed_total = pending.len();
-    let workers = background_worker_count();
+    let workers = indexing_settings.decode_workers;
+    let batch_size = indexing_settings.batch_size;
     let _ = tx.send(WorkerMessage::Status(format!(
-        "Preparing {changed_total} changed image{} with {workers} HDD-friendly decode worker{}; committing every {INDEX_COMMIT_BATCH} images…",
+        "Preparing {changed_total} changed image{} with {workers} decode worker{}; committing every {batch_size} images…",
         if changed_total == 1 { "" } else { "s" },
         if workers == 1 { "" } else { "s" },
     )));
@@ -241,7 +227,7 @@ fn rescan(
     let prepared_count = AtomicUsize::new(0);
     let mut changed = 0usize;
 
-    for batch in pending.chunks(INDEX_COMMIT_BATCH) {
+    for batch in pending.chunks(batch_size) {
         let prepared: Vec<PreparedImage> = pool.install(|| {
             batch
                 .par_iter()
@@ -346,7 +332,7 @@ fn rescan(
             missing_visual.len(),
             if missing_visual.len() == 1 { "" } else { "s" }
         )));
-        build_visual_descriptors(&conn, &missing_visual, tx)?;
+        build_visual_descriptors(&conn, &missing_visual, indexing_settings.decode_workers, tx)?;
     }
 
     let _ = tx.send(WorkerMessage::Status(format!(
@@ -355,7 +341,8 @@ fn rescan(
 
     let missing = db::paths_missing_embedding(&conn)?;
     if !missing.is_empty() {
-        if let Err(err) = build_embeddings(&mut conn, model_cache, &missing, tx) {
+        if let Err(err) = build_embeddings(&mut conn, model_cache, &missing, indexing_settings, tx)
+        {
             let _ = tx.send(WorkerMessage::Error(format!(
                 "Texture/color index is ready, but CLIP indexing is unavailable: {err:#}"
             )));
@@ -373,11 +360,12 @@ fn rescan(
 fn build_visual_descriptors(
     conn: &rusqlite::Connection,
     paths: &[PathBuf],
+    workers: usize,
     tx: &Sender<WorkerMessage>,
 ) -> Result<()> {
     let total = paths.len();
     let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(background_worker_count())
+        .num_threads(workers.max(1))
         .thread_name(|index| format!("visual-index-{index}"))
         .build()
         .context("creating visual descriptor worker pool")?;
@@ -420,8 +408,10 @@ fn build_embeddings(
     conn: &mut rusqlite::Connection,
     model_cache: &Path,
     paths: &[PathBuf],
+    indexing_settings: IndexingSettings,
     tx: &Sender<WorkerMessage>,
 ) -> Result<()> {
+    let indexing_settings = indexing_settings.sanitized();
     std::fs::create_dir_all(model_cache)?;
     let _ = tx.send(WorkerMessage::Status(
         "Loading CLIP model (first use may download it)…".to_owned(),
@@ -429,14 +419,15 @@ fn build_embeddings(
     let options = ImageInitOptions::new(ImageEmbeddingModel::ClipVitB32)
         .with_cache_dir(model_cache.to_path_buf())
         .with_show_download_progress(true)
-        .with_intra_threads(clip_worker_count());
+        .with_intra_threads(indexing_settings.clip_threads);
     let mut model = ImageEmbedding::try_new(options).context("loading CLIP image model")?;
 
     let total = paths.len();
-    for (batch_index, batch) in paths.chunks(16).enumerate() {
+    let batch_size = indexing_settings.batch_size;
+    for (batch_index, batch) in paths.chunks(batch_size).enumerate() {
         let batch_paths = batch.to_vec();
         let embeddings = model
-            .embed(batch_paths, Some(16))
+            .embed(batch_paths, Some(batch_size))
             .with_context(|| format!("embedding image batch {}", batch_index + 1))?;
         {
             let transaction = conn.transaction()?;
@@ -445,7 +436,7 @@ fn build_embeddings(
             }
             transaction.commit()?;
         }
-        let done = ((batch_index + 1) * 16).min(total);
+        let done = ((batch_index + 1) * batch_size).min(total);
         let _ = tx.send(WorkerMessage::Status(format!(
             "Building CLIP index: {done}/{total} (committed)"
         )));
@@ -458,13 +449,21 @@ pub fn spawn_similarity_search(
     model_cache: PathBuf,
     query_path: PathBuf,
     settings: SimilaritySettings,
+    indexing_settings: IndexingSettings,
     tx: Sender<WorkerMessage>,
 ) {
     std::thread::spawn(move || {
         let _ = tx.send(WorkerMessage::Status(
             "Preparing hybrid visual search…".to_owned(),
         ));
-        match similarity_search(&db_path, &model_cache, &query_path, settings, &tx) {
+        match similarity_search(
+            &db_path,
+            &model_cache,
+            &query_path,
+            settings,
+            indexing_settings,
+            &tx,
+        ) {
             Ok(results) => {
                 let count = results.len();
                 let _ = tx.send(WorkerMessage::SimilarityResults(results));
@@ -487,8 +486,10 @@ fn similarity_search(
     model_cache: &Path,
     query_path: &Path,
     settings: SimilaritySettings,
+    indexing_settings: IndexingSettings,
     tx: &Sender<WorkerMessage>,
 ) -> Result<Vec<ImageRecord>> {
+    let indexing_settings = indexing_settings.sanitized();
     let conn = db::open(db_path)?;
 
     // Upgrade existing v0.1.0 indexes on demand. This means a user can install
@@ -501,21 +502,22 @@ fn similarity_search(
             missing_visual.len(),
             if missing_visual.len() == 1 { "" } else { "s" }
         )));
-        build_visual_descriptors(&conn, &missing_visual, tx)?;
+        build_visual_descriptors(&conn, &missing_visual, indexing_settings.decode_workers, tx)?;
     }
 
     let query_image = decode_image(query_path)?;
     let (query_dominant, query_hash, query_histogram) = visual_descriptor(&query_image);
 
-    let query_embedding = match query_clip_embedding(model_cache, query_path) {
-        Ok(embedding) => Some(embedding),
-        Err(err) => {
-            let _ = tx.send(WorkerMessage::Status(format!(
-                "CLIP unavailable; using texture/color similarity only ({err})"
-            )));
-            None
-        }
-    };
+    let query_embedding =
+        match query_clip_embedding(model_cache, query_path, indexing_settings.clip_threads) {
+            Ok(embedding) => Some(embedding),
+            Err(err) => {
+                let _ = tx.send(WorkerMessage::Status(format!(
+                    "CLIP unavailable; using texture/color similarity only ({err})"
+                )));
+                None
+            }
+        };
 
     let query_key = normalized_path_key(query_path);
     let mut records = db::load_images(db_path)?;
@@ -573,12 +575,16 @@ fn similarity_search(
     Ok(records)
 }
 
-fn query_clip_embedding(model_cache: &Path, query_path: &Path) -> Result<Vec<f32>> {
+fn query_clip_embedding(
+    model_cache: &Path,
+    query_path: &Path,
+    clip_threads: usize,
+) -> Result<Vec<f32>> {
     std::fs::create_dir_all(model_cache)?;
     let options = ImageInitOptions::new(ImageEmbeddingModel::ClipVitB32)
         .with_cache_dir(model_cache.to_path_buf())
         .with_show_download_progress(true)
-        .with_intra_threads(clip_worker_count());
+        .with_intra_threads(clip_threads.max(1));
     let mut model = ImageEmbedding::try_new(options).context("loading CLIP image model")?;
     let query_vecs = model
         .embed(vec![query_path.to_path_buf()], Some(1))

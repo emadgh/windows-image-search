@@ -1,6 +1,7 @@
 mod db;
 mod indexer;
 mod metadata;
+mod settings;
 mod ui;
 
 use anyhow::{Context, Result};
