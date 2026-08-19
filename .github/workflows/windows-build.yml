@@ -26,6 +26,19 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
 
+      - name: Resolve application version
+        id: version
+        shell: pwsh
+        run: |
+          $match = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+          if (-not $match) { throw "Cannot resolve package version from Cargo.toml" }
+          $version = $match.Matches[0].Groups[1].Value
+          $artifact = "windows-image-search-v$version-win64"
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "artifact=$artifact" >> $env:GITHUB_OUTPUT
+          Write-Host "Application version: $version"
+          Write-Host "Artifact: $artifact"
+
       - name: Format check
         run: cargo fmt --all -- --check
 
@@ -41,21 +54,21 @@ jobs:
       - name: Package Windows build
         shell: pwsh
         run: |
+          $artifact = "${{ steps.version.outputs.artifact }}"
+          $version = "${{ steps.version.outputs.version }}"
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item target\release\windows-image-search.exe dist\windows-image-search.exe
-          Get-ChildItem target\release -Recurse -Filter *.dll -ErrorAction SilentlyContinue |
-            ForEach-Object {
-              $dest = Join-Path dist $_.Name
-              if (-not (Test-Path $dest)) { Copy-Item $_.FullName $dest }
-            }
+          Get-ChildItem target\release -File -Filter *.dll -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item $_.FullName (Join-Path dist $_.Name) }
           Copy-Item README.md dist\README.md
           Copy-Item LICENSE dist\LICENSE
-          Compress-Archive -Path dist\* -DestinationPath windows-image-search-win64.zip -Force
+          Set-Content -Path dist\VERSION.txt -Value "v$version" -Encoding ascii
+          Compress-Archive -Path dist\* -DestinationPath "$artifact.zip" -Force
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
-          name: windows-image-search-win64
-          path: windows-image-search-win64.zip
+          name: ${{ steps.version.outputs.artifact }}
+          path: ${{ steps.version.outputs.artifact }}.zip
           if-no-files-found: error
           retention-days: 30
