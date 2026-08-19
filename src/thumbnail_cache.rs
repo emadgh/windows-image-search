@@ -1,3 +1,4 @@
+use crate::portable;
 use anyhow::{Context, Result};
 use image::codecs::jpeg::JpegEncoder;
 use image::DynamicImage;
@@ -19,8 +20,63 @@ pub fn cache_dir_for_db(db_path: &Path) -> PathBuf {
 }
 
 pub fn cache_path(cache_dir: &Path, source: &Path) -> PathBuf {
+    cache_path_with_identity(cache_dir, source, source)
+}
+
+pub fn cache_path_for_root(root: &Path, source: &Path) -> Result<PathBuf> {
+    let relative = portable::relative_source_path(root, source)?;
+    Ok(cache_path_with_identity(
+        &portable::thumbnail_dir(root),
+        &relative,
+        source,
+    ))
+}
+
+pub fn load_cached(cache_dir: &Path, source: &Path) -> Option<DynamicImage> {
+    load_cached_path(cache_path(cache_dir, source))
+}
+
+pub fn load_cached_for_root(root: &Path, source: &Path) -> Option<DynamicImage> {
+    let path = cache_path_for_root(root, source).ok()?;
+    load_cached_path(path)
+}
+
+pub fn store_from_decoded(
+    cache_dir: &Path,
+    source: &Path,
+    image: &DynamicImage,
+) -> Result<PathBuf> {
+    let cache_path = cache_path(cache_dir, source);
+    store_at_path(cache_path, image)
+}
+
+pub fn store_from_decoded_for_root(
+    root: &Path,
+    source: &Path,
+    image: &DynamicImage,
+) -> Result<PathBuf> {
+    let cache_path = cache_path_for_root(root, source)?;
+    store_at_path(cache_path, image)
+}
+
+pub fn load_or_build(cache_dir: &Path, source: &Path) -> Option<DynamicImage> {
+    if let Some(image) = load_cached(cache_dir, source) {
+        return Some(image);
+    }
+    build_and_store(cache_path(cache_dir, source), source)
+}
+
+pub fn load_or_build_for_root(root: &Path, source: &Path) -> Option<DynamicImage> {
+    if let Some(image) = load_cached_for_root(root, source) {
+        return Some(image);
+    }
+    let cache_path = cache_path_for_root(root, source).ok()?;
+    build_and_store(cache_path, source)
+}
+
+fn cache_path_with_identity(cache_dir: &Path, identity: &Path, source: &Path) -> PathBuf {
     let mut hasher = DefaultHasher::new();
-    source.to_string_lossy().hash(&mut hasher);
+    identity.to_string_lossy().hash(&mut hasher);
     if let Ok(meta) = std::fs::metadata(source) {
         meta.len().hash(&mut hasher);
         if let Ok(modified) = meta.modified() {
@@ -33,12 +89,19 @@ pub fn cache_path(cache_dir: &Path, source: &Path) -> PathBuf {
     cache_dir.join(format!("{:016x}.jpg", hasher.finish()))
 }
 
-pub fn load_cached(cache_dir: &Path, source: &Path) -> Option<DynamicImage> {
-    let path = cache_path(cache_dir, source);
+fn portable_key_for_state(identity: &Path, size: u64, modified_secs: u64, modified_nanos: u32) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    identity.to_string_lossy().hash(&mut hasher);
+    size.hash(&mut hasher);
+    modified_secs.hash(&mut hasher);
+    modified_nanos.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn load_cached_path(path: PathBuf) -> Option<DynamicImage> {
     if !path.exists() {
         return None;
     }
-
     let decoded = image::ImageReader::open(&path)
         .ok()
         .and_then(|reader| reader.with_guessed_format().ok())
@@ -49,22 +112,13 @@ pub fn load_cached(cache_dir: &Path, source: &Path) -> Option<DynamicImage> {
     decoded
 }
 
-pub fn store_from_decoded(
-    cache_dir: &Path,
-    source: &Path,
-    image: &DynamicImage,
-) -> Result<PathBuf> {
-    let cache_path = cache_path(cache_dir, source);
+fn store_at_path(cache_path: PathBuf, image: &DynamicImage) -> Result<PathBuf> {
     let thumb = image.thumbnail(CACHE_EDGE, CACHE_EDGE).to_rgb8();
     write_rgb_thumbnail(&cache_path, &thumb)?;
     Ok(cache_path)
 }
 
-pub fn load_or_build(cache_dir: &Path, source: &Path) -> Option<DynamicImage> {
-    if let Some(image) = load_cached(cache_dir, source) {
-        return Some(image);
-    }
-
+fn build_and_store(cache_path: PathBuf, source: &Path) -> Option<DynamicImage> {
     let image = image::ImageReader::open(source)
         .ok()?
         .with_guessed_format()
@@ -72,7 +126,6 @@ pub fn load_or_build(cache_dir: &Path, source: &Path) -> Option<DynamicImage> {
         .decode()
         .ok()?;
     let thumb = image.thumbnail(CACHE_EDGE, CACHE_EDGE).to_rgb8();
-    let cache_path = cache_path(cache_dir, source);
     let _ = write_rgb_thumbnail(&cache_path, &thumb);
     Some(DynamicImage::ImageRgb8(thumb))
 }
@@ -119,6 +172,18 @@ mod tests {
     }
 
     #[test]
+    fn portable_key_does_not_depend_on_drive_or_root_prefix() {
+        let relative = Path::new("tiles/stone/face.jpg");
+        let first = portable_key_for_state(relative, 12345, 55, 9);
+        let second = portable_key_for_state(relative, 12345, 55, 9);
+        assert_eq!(first, second);
+        assert_ne!(
+            first,
+            portable_key_for_state(Path::new("tiles/stone/other.jpg"), 12345, 55, 9)
+        );
+    }
+
+    #[test]
     fn decoded_image_can_seed_and_reload_512px_cache() {
         let dir = temp_dir("thumb-seed");
         let source_dir = dir.join("source");
@@ -136,5 +201,19 @@ mod tests {
         assert!(cached.width() <= CACHE_EDGE);
         assert!(cached.height() <= CACHE_EDGE);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn portable_cache_is_written_inside_root_marker() {
+        let root = temp_dir("portable-thumb");
+        std::fs::create_dir_all(root.join("tiles")).unwrap();
+        let source = root.join("tiles").join("face.png");
+        let image = DynamicImage::ImageRgb8(ImageBuffer::from_pixel(32, 32, Rgb([1, 2, 3])));
+        image.save(&source).unwrap();
+        let decoded = image::ImageReader::open(&source).unwrap().decode().unwrap();
+        let path = store_from_decoded_for_root(&root, &source, &decoded).unwrap();
+        assert!(path.starts_with(root.join(".imagesearch").join("thumbnails")));
+        assert!(load_cached_for_root(&root, &source).is_some());
+        let _ = std::fs::remove_dir_all(root);
     }
 }
