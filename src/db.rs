@@ -19,6 +19,7 @@ pub struct ImageRecord {
     pub visual_hash: Option<u64>,
     pub color_histogram: Option<Vec<f32>>,
     pub embedding: Option<Vec<f32>>,
+    pub embedding_normalized: bool,
     pub score: Option<f32>,
 }
 
@@ -90,6 +91,7 @@ pub fn open(db_path: &Path) -> Result<Connection> {
             color_histogram_dim INTEGER,
             embedding BLOB,
             embedding_dim INTEGER,
+            embedding_normalized INTEGER NOT NULL DEFAULT 0,
             last_seen_scan INTEGER NOT NULL DEFAULT 0
         );
 
@@ -104,6 +106,12 @@ pub fn open(db_path: &Path) -> Result<Connection> {
     ensure_column(&conn, "images", "visual_hash", "INTEGER")?;
     ensure_column(&conn, "images", "color_histogram", "BLOB")?;
     ensure_column(&conn, "images", "color_histogram_dim", "INTEGER")?;
+    ensure_column(
+        &conn,
+        "images",
+        "embedding_normalized",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     ensure_column(
         &conn,
         "images",
@@ -244,7 +252,8 @@ pub fn upsert_image(
             color_histogram = excluded.color_histogram,
             color_histogram_dim = excluded.color_histogram_dim,
             embedding = NULL,
-            embedding_dim = NULL
+            embedding_dim = NULL,
+            embedding_normalized = 0
         "#,
         params![
             path.to_string_lossy().to_string(),
@@ -299,12 +308,13 @@ pub fn paths_missing_visual_descriptor(conn: &Connection) -> Result<Vec<PathBuf>
 }
 
 pub fn set_embedding(conn: &Connection, path: &Path, embedding: &[f32]) -> Result<()> {
+    let normalized = normalized_f32_vec(embedding);
     conn.execute(
-        "UPDATE images SET embedding = ?2, embedding_dim = ?3 WHERE path = ?1",
+        "UPDATE images SET embedding = ?2, embedding_dim = ?3, embedding_normalized = 1 WHERE path = ?1",
         params![
             path.to_string_lossy().to_string(),
-            encode_f32_vec(embedding),
-            embedding.len() as i64
+            encode_f32_vec(&normalized),
+            normalized.len() as i64
         ],
     )?;
     Ok(())
@@ -396,7 +406,7 @@ pub fn load_images(db_path: &Path) -> Result<Vec<ImageRecord>> {
         SELECT path, root, file_name, extension, size, modified, width, height,
                description, keywords, dominant_r, dominant_g, dominant_b,
                visual_hash, color_histogram, color_histogram_dim,
-               embedding, embedding_dim
+               embedding, embedding_dim, embedding_normalized
         FROM images
         ORDER BY file_name COLLATE NOCASE
         "#,
@@ -414,6 +424,7 @@ pub fn load_images(db_path: &Path) -> Result<Vec<ImageRecord>> {
             .and_then(|bytes| decode_f32_vec(&bytes, embedding_dim.unwrap_or(0) as usize));
 
         let visual_hash_signed: Option<i64> = row.get(13)?;
+        let embedding_normalized = row.get::<_, bool>(18)?;
         Ok(ImageRecord {
             path: PathBuf::from(row.get::<_, String>(0)?),
             root: PathBuf::from(row.get::<_, String>(1)?),
@@ -433,11 +444,21 @@ pub fn load_images(db_path: &Path) -> Result<Vec<ImageRecord>> {
             visual_hash: visual_hash_signed.map(|value| value as u64),
             color_histogram,
             embedding,
+            embedding_normalized,
             score: None,
         })
     })?;
 
     Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+fn normalized_f32_vec(values: &[f32]) -> Vec<f32> {
+    let norm_sq = values.iter().map(|value| value * value).sum::<f32>();
+    if norm_sq <= f32::EPSILON {
+        return values.to_vec();
+    }
+    let inverse = norm_sq.sqrt().recip();
+    values.iter().map(|value| value * inverse).collect()
 }
 
 fn encode_f32_vec(values: &[f32]) -> Vec<u8> {
@@ -557,6 +578,7 @@ mod tests {
         assert_eq!(full.len(), 1);
         assert_eq!(summaries.len(), 1);
         assert!(full[0].embedding.is_some());
+        assert!(full[0].embedding_normalized);
         assert!(full[0].color_histogram.is_some());
         assert_eq!(summaries[0].path, full[0].path);
         assert_eq!(summaries[0].file_name, full[0].file_name);
