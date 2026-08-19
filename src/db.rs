@@ -22,8 +22,6 @@ pub struct ImageRecord {
     pub visual_hash: Option<u64>,
     pub color_histogram: Option<Vec<f32>>,
     pub material_texture: Option<Vec<f32>>,
-    pub embedding: Option<Vec<f32>>,
-    pub embedding_normalized: bool,
     pub score: Option<f32>,
 }
 
@@ -460,30 +458,6 @@ pub fn load_collection_membership(
     Ok(CollectionMembership { folders, files })
 }
 
-pub fn load_collection_effective_paths(
-    db_path: &Path,
-    collection_id: i64,
-) -> Result<std::collections::HashSet<PathBuf>> {
-    let membership = load_collection_membership(db_path, collection_id)?;
-    let manual: std::collections::HashSet<&Path> =
-        membership.files.iter().map(PathBuf::as_path).collect();
-    let conn = open(db_path)?;
-    let mut stmt = conn.prepare("SELECT path FROM images")?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-    let mut effective = std::collections::HashSet::new();
-    for path in rows.filter_map(|row| row.ok()).map(PathBuf::from) {
-        if manual.contains(path.as_path())
-            || membership
-                .folders
-                .iter()
-                .any(|folder| path.starts_with(folder))
-        {
-            effective.insert(path);
-        }
-    }
-    Ok(effective)
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FileState {
     pub size: u64,
@@ -769,72 +743,6 @@ pub fn load_image_summaries(db_path: &Path) -> Result<Vec<ImageSummary>> {
     Ok(rows.filter_map(|row| row.ok()).collect())
 }
 
-pub fn load_images(db_path: &Path) -> Result<Vec<ImageRecord>> {
-    let conn = open(db_path)?;
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT path, root, file_name, extension, size, modified, width, height,
-               description, keywords, dominant_r, dominant_g, dominant_b,
-               visual_hash, color_histogram, color_histogram_dim,
-               embedding, embedding_dim, embedding_normalized, rowid,
-               material_texture, material_texture_dim, material_texture_version
-        FROM images
-        ORDER BY file_name COLLATE NOCASE
-        "#,
-    )?;
-
-    let rows = stmt.query_map([], |row| {
-        let histogram_blob: Option<Vec<u8>> = row.get(14)?;
-        let histogram_dim: Option<i64> = row.get(15)?;
-        let color_histogram = histogram_blob
-            .and_then(|bytes| decode_f32_vec(&bytes, histogram_dim.unwrap_or(0) as usize));
-
-        let embedding_blob: Option<Vec<u8>> = row.get(16)?;
-        let embedding_dim: Option<i64> = row.get(17)?;
-        let embedding = embedding_blob
-            .and_then(|bytes| decode_f32_vec(&bytes, embedding_dim.unwrap_or(0) as usize));
-
-        let visual_hash_signed: Option<i64> = row.get(13)?;
-        let embedding_normalized = row.get::<_, bool>(18)?;
-        let material_texture_blob: Option<Vec<u8>> = row.get(20)?;
-        let material_texture_dim: Option<i64> = row.get(21)?;
-        let material_texture_version = row.get::<_, i64>(22)?;
-        let material_texture = if material_texture_version == material_texture::VERSION {
-            material_texture_blob.and_then(|bytes| {
-                decode_f32_vec(&bytes, material_texture_dim.unwrap_or(0).max(0) as usize)
-            })
-        } else {
-            None
-        };
-        Ok(ImageRecord {
-            rowid: row.get::<_, i64>(19)?.max(0) as usize,
-            path: PathBuf::from(row.get::<_, String>(0)?),
-            root: PathBuf::from(row.get::<_, String>(1)?),
-            file_name: row.get(2)?,
-            extension: row.get(3)?,
-            size: row.get::<_, i64>(4)?.max(0) as u64,
-            modified: row.get(5)?,
-            width: row.get::<_, i64>(6)?.max(0) as u32,
-            height: row.get::<_, i64>(7)?.max(0) as u32,
-            description: row.get(8)?,
-            keywords: row.get(9)?,
-            dominant: [
-                row.get::<_, i64>(10)?.clamp(0, 255) as u8,
-                row.get::<_, i64>(11)?.clamp(0, 255) as u8,
-                row.get::<_, i64>(12)?.clamp(0, 255) as u8,
-            ],
-            visual_hash: visual_hash_signed.map(|value| value as u64),
-            color_histogram,
-            material_texture,
-            embedding,
-            embedding_normalized,
-            score: None,
-        })
-    })?;
-
-    Ok(rows.filter_map(|r| r.ok()).collect())
-}
-
 #[derive(Clone, Debug)]
 pub struct AnnEmbedding {
     pub rowid: usize,
@@ -891,8 +799,6 @@ pub fn load_search_images(db_path: &Path) -> Result<Vec<ImageRecord>> {
             visual_hash: visual_hash_signed.map(|value| value as u64),
             color_histogram,
             material_texture,
-            embedding: None,
-            embedding_normalized: row.get::<_, bool>(16)?,
             score: None,
         })
     })?;
@@ -1087,8 +993,21 @@ mod tests {
         assert_eq!(membership.folders, vec![assigned.clone()]);
         assert_eq!(membership.files.len(), 2);
 
-        // first.jpg belongs both through the folder and explicitly, but appears once.
-        let effective = load_collection_effective_paths(&db_path, collection.id).unwrap();
+        // Reconstruct the same effective membership used by the UI from the
+        // persisted folder/file rules plus lightweight indexed summaries. A
+        // file assigned both ways must still appear only once.
+        let effective: std::collections::HashSet<PathBuf> = load_image_summaries(&db_path)
+            .unwrap()
+            .into_iter()
+            .filter(|summary| {
+                membership.files.iter().any(|file| file == &summary.path)
+                    || membership
+                        .folders
+                        .iter()
+                        .any(|folder| summary.path.starts_with(folder))
+            })
+            .map(|summary| summary.path)
+            .collect();
         assert_eq!(effective.len(), 3);
         assert!(effective.contains(&first));
         assert!(effective.contains(&nested));
@@ -1308,17 +1227,23 @@ mod tests {
             set_embedding(&conn, &image, &[0.1, 0.2, 0.3, 0.4]).unwrap();
         }
 
-        let full = load_images(&db_path).unwrap();
+        let search_records = load_search_images(&db_path).unwrap();
         let summaries = load_image_summaries(&db_path).unwrap();
-        assert_eq!(full.len(), 1);
+        assert_eq!(search_records.len(), 1);
         assert_eq!(summaries.len(), 1);
-        assert!(full[0].embedding.is_some());
-        assert!(full[0].embedding_normalized);
-        assert!(full[0].color_histogram.is_some());
-        assert_eq!(summaries[0].path, full[0].path);
-        assert_eq!(summaries[0].file_name, full[0].file_name);
-        assert_eq!(summaries[0].description, full[0].description);
-        assert_eq!(summaries[0].dominant, full[0].dominant);
+        assert!(search_records[0].color_histogram.is_some());
+        assert_eq!(summaries[0].path, search_records[0].path);
+        assert_eq!(summaries[0].file_name, search_records[0].file_name);
+        assert_eq!(summaries[0].description, search_records[0].description);
+        assert_eq!(summaries[0].dominant, search_records[0].dominant);
+
+        // Heavy CLIP vectors stay out of UI/search records and are loaded only
+        // for the rowids selected by the candidate stage.
+        let rowids = std::collections::HashSet::from([search_records[0].rowid]);
+        let embeddings = load_embeddings_for_rowids(&db_path, &rowids).unwrap();
+        let (embedding, normalized) = embeddings.get(&search_records[0].rowid).unwrap();
+        assert_eq!(embedding.len(), 4);
+        assert!(*normalized);
 
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(format!("{}-wal", db_path.display()));

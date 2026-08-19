@@ -77,6 +77,14 @@ impl QueryVariant {
             Self::HalfResolution => "half_resolution",
         }
     }
+
+    fn index(self) -> usize {
+        match self {
+            Self::CenterCrop80 => 0,
+            Self::OffsetCrop70 => 1,
+            Self::HalfResolution => 2,
+        }
+    }
 }
 
 struct QueryCase {
@@ -304,12 +312,10 @@ fn benchmark_model_once(
         .map(|variant| (variant, RankMetrics::default()))
         .collect();
 
-    for (query_index, (query, embedding)) in queries.iter().zip(query_embeddings.iter()).enumerate()
-    {
+    for (query, embedding) in queries.iter().zip(query_embeddings.iter()) {
         let rank = rank_for_query(embedding, &corpus_embeddings, query.target_index);
         overall.record(rank);
-        let variant_index = query_index % QUERY_VARIANTS.len();
-        per_variant[variant_index].1.record(rank);
+        per_variant[query.variant.index()].1.record(rank);
     }
 
     Ok(ModelReport {
