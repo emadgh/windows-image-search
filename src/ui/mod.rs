@@ -8,6 +8,7 @@ use crate::fs_watch::{FsWatchMessage, FsWatchService};
 use crate::indexer::{self, WorkerMessage};
 use crate::settings::{self, IndexingSettings};
 use crate::text_search::TextSearchService;
+use crate::thumbnail_cache;
 use eframe::egui;
 use egui::{ColorImage, TextureHandle, TextureOptions};
 use std::collections::{HashMap, HashSet};
@@ -75,7 +76,7 @@ impl ImageSearchApp {
     pub fn new(db_path: PathBuf, model_cache: PathBuf) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         let app_data_dir = db_path.parent().unwrap_or_else(|| Path::new("."));
-        let thumbnail_cache = app_data_dir.join("thumbnail-cache");
+        let thumbnail_cache = thumbnail_cache::cache_dir_for_db(&db_path);
         let settings_path = app_data_dir.join("performance-settings.ini");
         let indexing_settings = settings::load(&settings_path);
         let embedding_service = EmbeddingService::new(model_cache);

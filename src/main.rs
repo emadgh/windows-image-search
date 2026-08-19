@@ -5,6 +5,7 @@ mod indexer;
 mod metadata;
 mod settings;
 mod text_search;
+mod thumbnail_cache;
 mod ui;
 
 use anyhow::{Context, Result};

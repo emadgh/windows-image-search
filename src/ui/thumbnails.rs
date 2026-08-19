@@ -1,17 +1,11 @@
-use image::codecs::jpeg::JpegEncoder;
+use crate::thumbnail_cache;
 use image::DynamicImage;
-use std::collections::{hash_map::DefaultHasher, HashSet};
-use std::fs::File;
-use std::hash::{Hash, Hasher};
-use std::io::BufWriter;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{
     mpsc::{self, Receiver, Sender},
     Arc, Mutex,
 };
-use std::time::UNIX_EPOCH;
-
-const CACHE_EDGE: u32 = 512;
 
 #[derive(Debug)]
 pub enum ThumbnailResult {
@@ -113,36 +107,7 @@ impl ThumbnailPool {
 }
 
 fn load_or_build(cache_dir: &Path, source: &Path) -> Option<(usize, usize, Vec<u8>)> {
-    let cache_path = thumbnail_cache_path(cache_dir, source);
-
-    if cache_path.exists() {
-        if let Ok(reader) = image::ImageReader::open(&cache_path) {
-            if let Ok(reader) = reader.with_guessed_format() {
-                if let Ok(image) = reader.decode() {
-                    return Some(to_rgba(image));
-                }
-            }
-        }
-        let _ = std::fs::remove_file(&cache_path);
-    }
-
-    let image = image::ImageReader::open(source)
-        .ok()?
-        .with_guessed_format()
-        .ok()?
-        .decode()
-        .ok()?;
-    let thumb = image.thumbnail(CACHE_EDGE, CACHE_EDGE).to_rgb8();
-
-    if let Some(parent) = cache_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(file) = File::create(&cache_path) {
-        let mut encoder = JpegEncoder::new_with_quality(BufWriter::new(file), 84);
-        let _ = encoder.encode_image(&DynamicImage::ImageRgb8(thumb.clone()));
-    }
-
-    Some(to_rgba(DynamicImage::ImageRgb8(thumb)))
+    thumbnail_cache::load_or_build(cache_dir, source).map(to_rgba)
 }
 
 fn to_rgba(image: DynamicImage) -> (usize, usize, Vec<u8>) {
@@ -152,19 +117,4 @@ fn to_rgba(image: DynamicImage) -> (usize, usize, Vec<u8>) {
         rgba.height() as usize,
         rgba.into_raw(),
     )
-}
-
-fn thumbnail_cache_path(cache_dir: &Path, source: &Path) -> PathBuf {
-    let mut hasher = DefaultHasher::new();
-    source.to_string_lossy().hash(&mut hasher);
-    if let Ok(meta) = std::fs::metadata(source) {
-        meta.len().hash(&mut hasher);
-        if let Ok(modified) = meta.modified() {
-            if let Ok(delta) = modified.duration_since(UNIX_EPOCH) {
-                delta.as_secs().hash(&mut hasher);
-                delta.subsec_nanos().hash(&mut hasher);
-            }
-        }
-    }
-    cache_dir.join(format!("{:016x}.jpg", hasher.finish()))
 }
