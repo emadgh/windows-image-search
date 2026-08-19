@@ -45,6 +45,30 @@ Click **Search by image**, choose a query image, and use the similarity sliders 
 
 Benchmarks are opt-in CLI diagnostics. They do not change normal GUI/indexing/search behavior and write timestamped reports beside the application database in the `WindowsImageSearch` local-data directory.
 
+### Run the complete v0.2 benchmark gate
+
+The Windows build includes `run-v0.2-benchmark-gate.ps1` beside the executable. Run it after indexing a representative tile, marble, stone or ceramic library:
+
+```powershell
+.\run-v0.2-benchmark-gate.ps1 -Executable .\windows-image-search.exe
+```
+
+The runner records the application version, exact benchmark commands/sample counts, timestamps, exit codes and wall time. It also records Windows, CPU, total RAM, GPU/driver and Windows-reported adapter RAM, plus disk model/media information using built-in CIM queries. It then runs ANN, cached-preview CLIP, CPU-vs-DirectML, alternative image-model and material-texture diagnostics and writes each result to its own file.
+
+Results are saved under a timestamped `benchmark-results` directory and compressed into a ZIP suitable for attaching to the performance roadmap issues. Sample counts can be overridden, for example:
+
+```powershell
+.\run-v0.2-benchmark-gate.ps1 `
+  -Executable .\windows-image-search.exe `
+  -AnnQueries 64 `
+  -PreviewSamples 96 `
+  -RuntimeSamples 96 `
+  -ImageModelQueries 32 `
+  -TextureSamples 48
+```
+
+`Win32_VideoController.AdapterRAM` is recorded exactly as Windows/WMI reports it; some drivers do not expose exact dedicated VRAM through this field, so treat it as hardware context rather than a precise GPU-memory profiler.
+
 ### ANN retrieval
 
 Compare persisted HNSW retrieval against exact brute-force CLIP ranking on the current indexed library:
@@ -120,7 +144,7 @@ cargo test --all-targets
 cargo run --release
 ```
 
-Windows CI reads the package version from `Cargo.toml` and uploads a versioned artifact such as `windows-image-search-v0.2.4-win64`. The ZIP contains the stable executable name `windows-image-search.exe`, `README.md`, `LICENSE` and `VERSION.txt`.
+Windows CI reads the package version from `Cargo.toml` and uploads a versioned artifact such as `windows-image-search-v0.2.4-win64`. The ZIP contains `windows-image-search.exe`, `run-v0.2-benchmark-gate.ps1`, `README.md`, `LICENSE` and `VERSION.txt`.
 
 ## Privacy
 
