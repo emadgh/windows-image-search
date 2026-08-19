@@ -45,6 +45,11 @@ jobs:
       - name: Cargo check
         run: cargo check --all-targets
 
+      - name: Future-incompatible lint check
+        env:
+          RUSTFLAGS: -Dfuture-incompatible
+        run: cargo check --all-targets
+
       - name: Regression tests
         run: cargo test --all-targets
 
