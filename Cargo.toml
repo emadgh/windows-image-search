@@ -1,6 +1,6 @@
 [package]
 name = "windows-image-search"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2021"
 description = "Local image indexing and visual search for Windows"
 license = "MIT"
