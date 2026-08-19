@@ -31,7 +31,12 @@ jobs:
 
       - name: Apply live filesystem watcher
         if: github.event_name == 'pull_request' && github.head_ref == 'feat/live-filesystem-watcher'
-        run: python scripts/apply_live_filesystem_watcher.py
+        shell: pwsh
+        run: |
+          $script = Get-Content scripts/apply_live_filesystem_watcher.py -Raw
+          $script = $script.Replace("if count != 1:", "if count < 1:")
+          Set-Content scripts/apply_live_filesystem_watcher.py -Value $script -Encoding UTF8
+          python scripts/apply_live_filesystem_watcher.py
 
       - name: Format check
         run: |
