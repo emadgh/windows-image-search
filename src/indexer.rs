@@ -3,7 +3,7 @@ use crate::db::{self, ImageRecord, ImageSummary};
 use crate::embedding::EmbeddingService;
 use crate::material_texture;
 use crate::metadata;
-use crate::settings::IndexingSettings;
+use crate::settings::{ClipExecutionProvider, IndexingSettings};
 use crate::thumbnail_cache;
 use anyhow::{bail, Context, Result};
 use image::{imageops::FilterType, DynamicImage, GenericImageView, Pixel};
@@ -710,7 +710,12 @@ fn build_embeddings(
     let batch_size = indexing_settings.batch_size;
     for (batch_index, batch) in paths.chunks(batch_size).enumerate() {
         let response = embedding_service
-            .embed(batch.to_vec(), batch_size, indexing_settings.clip_threads)
+            .embed_with_provider(
+                batch.to_vec(),
+                batch_size,
+                indexing_settings.clip_threads,
+                indexing_settings.clip_execution_provider,
+            )
             .with_context(|| format!("embedding image batch {}", batch_index + 1))?;
         if response.embeddings.len() != batch.len() {
             bail!(
@@ -720,15 +725,23 @@ fn build_embeddings(
             );
         }
         if batch_index == 0 {
-            let _ = tx.send(WorkerMessage::Status(if response.model_reloaded {
+            let mut status = if response.model_reloaded {
                 format!(
-                    "CLIP model initialized with {} CPU thread{}; subsequent batches/searches will reuse it",
+                    "CLIP model initialized on {} with {} CPU thread{}; subsequent batches/searches will reuse it",
+                    response.active_provider.label(),
                     indexing_settings.clip_threads,
                     if indexing_settings.clip_threads == 1 { "" } else { "s" }
                 )
             } else {
-                "Reusing the already-loaded CLIP model".to_owned()
-            }));
+                format!(
+                    "Reusing the already-loaded CLIP model on {}",
+                    response.active_provider.label()
+                )
+            };
+            if let Some(reason) = &response.fallback_reason {
+                status.push_str(&format!(" — {reason}"));
+            }
+            let _ = tx.send(WorkerMessage::Status(status));
         }
 
         {
@@ -918,14 +931,24 @@ fn similarity_search(
             embedding_service,
             query_path,
             indexing_settings.clip_threads,
+            indexing_settings.clip_execution_provider,
         ) {
-            Ok((embedding, model_reloaded)) => {
-                let _ = tx.send(WorkerMessage::Status(if model_reloaded {
-                    "CLIP model initialized for this query; future searches will reuse it"
-                        .to_owned()
+            Ok((embedding, model_reloaded, active_provider, fallback_reason)) => {
+                let mut status = if model_reloaded {
+                    format!(
+                        "CLIP model initialized on {} for this query; future searches will reuse it",
+                        active_provider.label()
+                    )
                 } else {
-                    "Reusing loaded CLIP model for query".to_owned()
-                }));
+                    format!(
+                        "Reusing loaded CLIP model on {} for query",
+                        active_provider.label()
+                    )
+                };
+                if let Some(reason) = fallback_reason {
+                    status.push_str(&format!(" — {reason}"));
+                }
+                let _ = tx.send(WorkerMessage::Status(status));
                 Some(embedding)
             }
             Err(err) => {
@@ -1130,15 +1153,23 @@ fn query_clip_embedding(
     embedding_service: &EmbeddingService,
     query_path: &Path,
     clip_threads: usize,
-) -> Result<(Vec<f32>, bool)> {
-    let response = embedding_service.embed(vec![query_path.to_path_buf()], 1, clip_threads)?;
+    requested_provider: ClipExecutionProvider,
+) -> Result<(Vec<f32>, bool, ClipExecutionProvider, Option<String>)> {
+    let response = embedding_service.embed_with_provider(
+        vec![query_path.to_path_buf()],
+        1,
+        clip_threads,
+        requested_provider,
+    )?;
     let model_reloaded = response.model_reloaded;
+    let active_provider = response.active_provider;
+    let fallback_reason = response.fallback_reason.clone();
     let embedding = response
         .embeddings
         .into_iter()
         .next()
         .context("CLIP returned no query embedding")?;
-    Ok((embedding, model_reloaded))
+    Ok((embedding, model_reloaded, active_provider, fallback_reason))
 }
 
 fn passes_color_gate(

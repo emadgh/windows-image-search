@@ -78,12 +78,7 @@ impl EmbeddingService {
         batch_size: usize,
         clip_threads: usize,
     ) -> Result<EmbeddingResponse> {
-        self.embed_with_provider(
-            paths,
-            batch_size,
-            clip_threads,
-            ClipExecutionProvider::Cpu,
-        )
+        self.embed_with_provider(paths, batch_size, clip_threads, ClipExecutionProvider::Cpu)
     }
 
     pub fn embed_with_provider(
@@ -162,11 +157,7 @@ fn load_model(
                                 "DirectML initialization failed ({directml_error:#}) and CPU fallback could not initialize"
                             )
                         })?;
-                    Ok((
-                        cpu_model,
-                        ClipExecutionProvider::Cpu,
-                        Some(fallback_reason),
-                    ))
+                    Ok((cpu_model, ClipExecutionProvider::Cpu, Some(fallback_reason)))
                 }
             }
         }
