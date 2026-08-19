@@ -1,4 +1,5 @@
 mod collections;
+mod texture_lru;
 mod thumbnails;
 mod views;
 
@@ -15,6 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
+use texture_lru::{TextureLru, DEFAULT_GPU_TEXTURE_CAPACITY};
 use thumbnails::{ThumbnailPool, ThumbnailResult};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -58,6 +60,7 @@ pub struct ImageSearchApp {
     pub(super) thumb_size: f32,
     pub(super) thumb_fit: ThumbnailFit,
     pub(super) textures: HashMap<PathBuf, TextureHandle>,
+    texture_lru: TextureLru,
     pub(super) selected_paths: HashSet<PathBuf>,
     thumb_pool: ThumbnailPool,
     pub(super) tx: Sender<WorkerMessage>,
@@ -120,6 +123,7 @@ impl ImageSearchApp {
             thumb_size: 168.0,
             thumb_fit: ThumbnailFit::Contain,
             textures: HashMap::new(),
+            texture_lru: TextureLru::new(DEFAULT_GPU_TEXTURE_CAPACITY),
             selected_paths: HashSet::new(),
             thumb_pool: ThumbnailPool::new(thumbnail_cache),
             tx,
@@ -197,6 +201,7 @@ impl ImageSearchApp {
     fn merge_indexed_batch(&mut self, records: Vec<ImageSummary>) {
         for record in records {
             self.textures.remove(&record.path);
+            self.texture_lru.remove(&record.path);
             if let Some(&index) = self.image_positions.get(&record.path) {
                 self.images[index] = record;
             } else {
@@ -218,6 +223,7 @@ impl ImageSearchApp {
         }
         for path in &removed {
             self.textures.remove(path);
+            self.texture_lru.remove(path);
             self.selected_paths.remove(path);
         }
         self.rebuild_image_positions();
@@ -288,11 +294,31 @@ impl ImageSearchApp {
                     image,
                     TextureOptions::LINEAR,
                 );
-                self.textures.insert(path, texture);
+                self.textures.insert(path.clone(), texture);
+                self.texture_lru.register(&path);
             }
         }
         if received {
+            self.evict_gpu_textures();
             ctx.request_repaint();
+        }
+    }
+
+    fn evict_gpu_textures(&mut self) {
+        if self.textures.len() <= self.texture_lru.capacity() {
+            return;
+        }
+
+        let residents: Vec<PathBuf> = self.textures.keys().cloned().collect();
+        let mut protected = HashSet::new();
+        if let Some(query) = &self.query_image {
+            if self.textures.contains_key(query) {
+                protected.insert(query.clone());
+            }
+        }
+
+        for path in self.texture_lru.eviction_victims(&residents, &protected) {
+            self.textures.remove(&path);
         }
     }
 
@@ -487,8 +513,9 @@ impl ImageSearchApp {
     }
 
     pub(super) fn thumbnail(&mut self, path: &Path) -> Option<TextureHandle> {
-        if let Some(texture) = self.textures.get(path) {
-            return Some(texture.clone());
+        if let Some(texture) = self.textures.get(path).cloned() {
+            self.texture_lru.touch(path);
+            return Some(texture);
         }
         self.thumb_pool.request(path);
         None
@@ -507,6 +534,7 @@ impl ImageSearchApp {
 
     fn clear_thumbnail_cache(&mut self) {
         self.textures.clear();
+        self.texture_lru.clear();
         self.thumb_pool.clear_cache();
         self.status = "Thumbnail cache cleared".into();
     }
@@ -641,6 +669,11 @@ impl ImageSearchApp {
                 ui.label(
                     "Cached previews are generated at up to 512 px on background worker threads.",
                 );
+                ui.small(format!(
+                    "GPU/UI thumbnail textures: {} / {} active (LRU bounded; disk cache survives eviction).",
+                    self.textures.len(),
+                    self.texture_lru.capacity()
+                ));
                 if ui.button("Clear thumbnail cache").clicked() {
                     clear_cache = true;
                 }
