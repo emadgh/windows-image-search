@@ -24,7 +24,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Apply portable-index integration
-        run: python scripts/apply_portable_index_v0210.py
+        run: |
+          python scripts/apply_portable_index_v0210.py
+          python scripts/apply_portable_durability_v0210.py
 
       - name: Format
         run: cargo fmt --all
@@ -46,8 +48,8 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock src\main.rs src\db.rs src\fs_watch.rs src\indexer.rs src\ui\mod.rs
-          if (git status --porcelain -- Cargo.toml Cargo.lock src\main.rs src\db.rs src\fs_watch.rs src\indexer.rs src\ui\mod.rs) {
-            git commit -m "feat: integrate portable per-root index storage"
+          git add Cargo.toml Cargo.lock src\main.rs src\db.rs src\fs_watch.rs src\indexer.rs src\ui\mod.rs src\portable.rs src\ann.rs
+          if (git status --porcelain -- Cargo.toml Cargo.lock src\main.rs src\db.rs src\fs_watch.rs src\indexer.rs src\ui\mod.rs src\portable.rs src\ann.rs) {
+            git commit -m "feat: harden portable index durability"
             git push origin HEAD:feat/portable-root-index-v0.2.10
           }
