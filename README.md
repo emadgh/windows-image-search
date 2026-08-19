@@ -75,6 +75,18 @@ Compare available CLIP runtime backends and batch sizes on local hardware:
 
 Production inference remains unchanged; the command is intended to collect evidence before changing backend defaults.
 
+### Alternative image embedding models
+
+Compare supported image models on the same bounded local corpus without replacing the production CLIP embeddings:
+
+```powershell
+.\windows-image-search.exe --benchmark-image-models 24
+```
+
+The benchmark compares `ClipVitB32`, `UnicomVitB16`, `UnicomVitB32`, `NomicEmbedVisionV15`, and `Resnet50` on CPU. It deterministically builds up to 512 corpus images, creates center-crop, off-center crop/layout-shift, and reduced-resolution queries, and reports embedding dimension, initialization time, corpus throughput, average query embedding latency, Recall@10/25, MRR, and mean rank for each model and transform. A model download/initialization failure is recorded without aborting the remaining comparisons.
+
+The automated ground truth is recovery of the transformed query's original indexed source. Use the results to narrow candidates, but do not change the production model until representative same-material tile/marble/stone evaluation also supports the change. Running this command can download additional model files into the existing local model cache.
+
 ### Material texture robustness
 
 Evaluate the compact material descriptor against 64-bit dHash on the current indexed corpus:
@@ -112,4 +124,4 @@ Windows CI reads the package version from `Cargo.toml` and uploads a versioned a
 
 ## Privacy
 
-The application is designed for local indexing and local inference. Network access is only required when the CLIP model has not yet been cached and must be downloaded.
+The application is designed for local indexing and local inference. Network access is only required when an embedding model has not yet been cached and must be downloaded.
