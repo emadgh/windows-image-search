@@ -1,11 +1,14 @@
-use image::codecs::jpeg::JpegEncoder;
 use image::DynamicImage;
+use image::codecs::jpeg::JpegEncoder;
 use std::collections::{HashSet, hash_map::DefaultHasher};
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, mpsc::{self, Receiver, Sender}};
+use std::sync::{
+    Arc, Mutex,
+    mpsc::{self, Receiver, Sender},
+};
 use std::time::UNIX_EPOCH;
 
 const CACHE_EDGE: u32 = 512;
@@ -48,7 +51,9 @@ impl ThumbnailPool {
             let cache = cache_dir.clone();
             std::thread::spawn(move || loop {
                 let job = {
-                    let Ok(lock) = rx.lock() else { break; };
+                    let Ok(lock) = rx.lock() else {
+                        break;
+                    };
                     match lock.recv() {
                         Ok(job) => job,
                         Err(_) => break,
@@ -111,11 +116,12 @@ fn load_or_build(cache_dir: &Path, source: &Path) -> Option<(usize, usize, Vec<u
     let cache_path = thumbnail_cache_path(cache_dir, source);
 
     if cache_path.exists() {
-        if let Ok(image) = image::ImageReader::open(&cache_path)
-            .and_then(|reader| reader.with_guessed_format())
-            .and_then(|reader| reader.decode().map_err(std::io::Error::other))
-        {
-            return Some(to_rgba(image));
+        if let Ok(reader) = image::ImageReader::open(&cache_path) {
+            if let Ok(reader) = reader.with_guessed_format() {
+                if let Ok(image) = reader.decode() {
+                    return Some(to_rgba(image));
+                }
+            }
         }
         let _ = std::fs::remove_file(&cache_path);
     }
@@ -136,7 +142,7 @@ fn load_or_build(cache_dir: &Path, source: &Path) -> Option<(usize, usize, Vec<u
         let _ = encoder.encode_image(&DynamicImage::ImageRgb8(thumb.clone()));
     }
 
-    to_rgba(DynamicImage::ImageRgb8(thumb)).into()
+    Some(to_rgba(DynamicImage::ImageRgb8(thumb)))
 }
 
 fn to_rgba(image: DynamicImage) -> (usize, usize, Vec<u8>) {
