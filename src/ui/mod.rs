@@ -22,6 +22,7 @@ pub struct ImageSearchApp {
     pub(super) images: Vec<ImageRecord>,
     pub(super) similarity_results: Option<Vec<ImageRecord>>,
     pub(super) query_image: Option<PathBuf>,
+    pub(super) similarity_settings: indexer::SimilaritySettings,
     pub(super) search_text: String,
     pub(super) color_enabled: bool,
     pub(super) target_color: [u8; 3],
@@ -47,6 +48,7 @@ impl ImageSearchApp {
             model_cache,
             similarity_results: None,
             query_image: None,
+            similarity_settings: indexer::SimilaritySettings::default(),
             search_text: String::new(),
             color_enabled: false,
             target_color: [128, 128, 128],
@@ -141,13 +143,28 @@ impl ImageSearchApp {
         else {
             return;
         };
+        self.run_similarity_search(path);
+    }
+
+    fn rerun_similarity_search(&mut self) {
+        if let Some(path) = self.query_image.clone() {
+            self.run_similarity_search(path);
+        }
+    }
+
+    fn run_similarity_search(&mut self, path: PathBuf) {
+        if self.busy {
+            return;
+        }
         self.busy = true;
         self.last_error = None;
         self.query_image = Some(path.clone());
+        self.status = "Starting image search with current controls…".into();
         indexer::spawn_similarity_search(
             self.db_path.clone(),
             self.model_cache.clone(),
             path,
+            self.similarity_settings,
             self.tx.clone(),
         );
     }
@@ -266,6 +283,90 @@ impl eframe::App for ImageSearchApp {
                     ui.add(egui::Slider::new(&mut self.thumb_size, 96.0..=280.0).text("Thumbnail"));
                 }
             });
+
+            ui.collapsing("Image similarity controls", |ui| {
+                ui.label("Weights are relative and are normalized automatically; they do not have to total 100%.");
+                ui.horizontal_wrapped(|ui| {
+                    ui.add(
+                        egui::Slider::new(
+                            &mut self.similarity_settings.color_distribution_weight,
+                            0.0..=100.0,
+                        )
+                        .text("Color distribution")
+                        .suffix("%"),
+                    );
+                    ui.add(
+                        egui::Slider::new(
+                            &mut self.similarity_settings.texture_weight,
+                            0.0..=100.0,
+                        )
+                        .text("Texture / pattern")
+                        .suffix("%"),
+                    );
+                    ui.add(
+                        egui::Slider::new(
+                            &mut self.similarity_settings.clip_weight,
+                            0.0..=100.0,
+                        )
+                        .text("CLIP semantic")
+                        .suffix("%"),
+                    );
+                    ui.add(
+                        egui::Slider::new(
+                            &mut self.similarity_settings.dominant_color_weight,
+                            0.0..=100.0,
+                        )
+                        .text("Dominant color")
+                        .suffix("%"),
+                    );
+                });
+
+                ui.horizontal_wrapped(|ui| {
+                    ui.checkbox(
+                        &mut self.similarity_settings.strict_color_rejection,
+                        "Reject color mismatches",
+                    );
+                    if self.similarity_settings.strict_color_rejection {
+                        ui.add(
+                            egui::Slider::new(
+                                &mut self.similarity_settings.min_color_distribution_match,
+                                0.0..=100.0,
+                            )
+                            .text("Minimum color-distribution match")
+                            .suffix("%"),
+                        );
+                        ui.add(
+                            egui::Slider::new(
+                                &mut self.similarity_settings.max_dominant_color_difference,
+                                5.0..=100.0,
+                            )
+                            .text("Maximum dominant-color difference")
+                            .suffix("%"),
+                        )
+                        .on_hover_text("Lower values are stricter and reject cream/beige results sooner for a brown query.");
+                    }
+                });
+
+                ui.horizontal_wrapped(|ui| {
+                    let total = self.similarity_settings.color_distribution_weight
+                        + self.similarity_settings.texture_weight
+                        + self.similarity_settings.clip_weight
+                        + self.similarity_settings.dominant_color_weight;
+                    ui.small(format!("Weight total: {total:.0}% (normalized during scoring)"));
+                    if ui.button("Reset 44 / 31 / 20 / 5").clicked() {
+                        self.similarity_settings = indexer::SimilaritySettings::default();
+                    }
+                    if ui
+                        .add_enabled(
+                            !self.busy && self.query_image.is_some(),
+                            egui::Button::new("Apply / re-run current image"),
+                        )
+                        .clicked()
+                    {
+                        self.rerun_similarity_search();
+                    }
+                });
+            });
         });
 
         egui::SidePanel::left("folders")
@@ -274,6 +375,7 @@ impl eframe::App for ImageSearchApp {
             .show(ctx, |ui| {
                 ui.heading("Indexed folders");
                 ui.small(format!("{} images", self.images.len()));
+                ui.small("Recursive indexing: ON (all subfolders)");
                 ui.separator();
                 let mut remove = None;
                 for root in &self.roots {
@@ -327,7 +429,7 @@ impl eframe::App for ImageSearchApp {
                     if visible.len() == 1 { "" } else { "s" }
                 ));
                 if self.similarity_results.is_some() {
-                    ui.small("CLIP similarity order");
+                    ui.small("Hybrid similarity order using current weights");
                 }
             });
             ui.separator();
