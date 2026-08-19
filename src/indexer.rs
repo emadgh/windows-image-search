@@ -155,9 +155,7 @@ fn incremental_update(
     tx: &Sender<WorkerMessage>,
 ) -> Result<()> {
     let indexing_settings = indexing_settings.sanitized();
-    let thumbnail_cache_dir = thumbnail_cache::cache_dir_for_db(db_path);
     let mut conn = db::open(db_path)?;
-    let existing_states = db::load_file_states(&conn)?;
     let unique_paths: HashSet<PathBuf> = changed_paths.iter().cloned().collect();
     let mut candidates = HashMap::<PathBuf, PathBuf>::new();
     let mut removed_targets = Vec::<PathBuf>::new();
@@ -387,7 +385,6 @@ fn rescan(
     tx: &Sender<WorkerMessage>,
 ) -> Result<()> {
     let indexing_settings = indexing_settings.sanitized();
-    let thumbnail_cache_dir = thumbnail_cache::cache_dir_for_db(db_path);
     let mut conn = db::open(db_path)?;
     let existing_file_states = db::load_file_states(&conn)?;
     let mut candidates: Vec<(PathBuf, PathBuf)> = Vec::new();

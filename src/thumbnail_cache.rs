@@ -89,7 +89,13 @@ fn cache_path_with_identity(cache_dir: &Path, identity: &Path, source: &Path) ->
     cache_dir.join(format!("{:016x}.jpg", hasher.finish()))
 }
 
-fn portable_key_for_state(identity: &Path, size: u64, modified_secs: u64, modified_nanos: u32) -> u64 {
+#[cfg(test)]
+fn portable_key_for_state(
+    identity: &Path,
+    size: u64,
+    modified_secs: u64,
+    modified_nanos: u32,
+) -> u64 {
     let mut hasher = DefaultHasher::new();
     identity.to_string_lossy().hash(&mut hasher);
     size.hash(&mut hasher);

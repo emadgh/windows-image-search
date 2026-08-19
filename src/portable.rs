@@ -346,6 +346,13 @@ fn import_root_into_session(
             ),
             params![root_text, prefix],
         )?;
+        // A Windows drive letter/root path can later belong to another portable
+        // library. Keep a one-to-one registry so stale library ids cannot claim the
+        // new drive while the durable library id remains stored on the drive itself.
+        tx.execute(
+            "DELETE FROM portable_root_registry WHERE root_path = ?1 AND library_id <> ?2",
+            params![root_text, library_id],
+        )?;
         tx.execute(
             "INSERT INTO portable_root_registry(library_id, root_path) VALUES(?1, ?2) \
              ON CONFLICT(library_id) DO UPDATE SET root_path = excluded.root_path",
