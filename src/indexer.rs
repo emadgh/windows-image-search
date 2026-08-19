@@ -10,6 +10,31 @@ use walkdir::WalkDir;
 
 const COLOR_HISTOGRAM_BINS: usize = 64;
 
+#[derive(Clone, Copy, Debug)]
+pub struct SimilaritySettings {
+    pub color_distribution_weight: f32,
+    pub texture_weight: f32,
+    pub clip_weight: f32,
+    pub dominant_color_weight: f32,
+    pub strict_color_rejection: bool,
+    pub min_color_distribution_match: f32,
+    pub max_dominant_color_difference: f32,
+}
+
+impl Default for SimilaritySettings {
+    fn default() -> Self {
+        Self {
+            color_distribution_weight: 44.0,
+            texture_weight: 31.0,
+            clip_weight: 20.0,
+            dominant_color_weight: 5.0,
+            strict_color_rejection: true,
+            min_color_distribution_match: 18.0,
+            max_dominant_color_difference: 35.0,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum WorkerMessage {
     Status(String),
@@ -45,18 +70,36 @@ fn rescan(
     let conn = db::open(db_path)?;
     let mut candidates: Vec<(PathBuf, PathBuf)> = Vec::new();
 
-    let _ = tx.send(WorkerMessage::Status("Scanning folders…".to_owned()));
+    let _ = tx.send(WorkerMessage::Status(
+        "Scanning folders recursively…".to_owned(),
+    ));
+    let mut traversal_errors = 0usize;
     for root in roots {
         if !root.exists() {
+            traversal_errors += 1;
+            let _ = tx.send(WorkerMessage::Error(format!(
+                "Indexed root does not exist: {}",
+                root.display()
+            )));
             continue;
         }
-        for entry in WalkDir::new(root)
-            .follow_links(false)
-            .into_iter()
-            .filter_map(|entry| entry.ok())
-        {
-            if entry.file_type().is_file() && is_supported_image(entry.path()) {
-                candidates.push((root.clone(), entry.into_path()));
+
+        for entry in WalkDir::new(root).follow_links(false).into_iter() {
+            match entry {
+                Ok(entry) => {
+                    if entry.file_type().is_file() && is_supported_image(entry.path()) {
+                        candidates.push((root.clone(), entry.into_path()));
+                    }
+                }
+                Err(err) => {
+                    traversal_errors += 1;
+                    if traversal_errors <= 8 {
+                        let _ = tx.send(WorkerMessage::Error(format!(
+                            "Recursive scan could not access an entry under {}: {err}",
+                            root.display()
+                        )));
+                    }
+                }
             }
         }
     }
@@ -172,8 +215,9 @@ fn rescan(
     }
 
     let _ = tx.send(WorkerMessage::Status(format!(
-        "Index ready: {total} image{}",
-        if total == 1 { "" } else { "s" }
+        "Index ready: {total} image{} (recursive scan, {traversal_errors} traversal error{})",
+        if total == 1 { "" } else { "s" },
+        if traversal_errors == 1 { "" } else { "s" }
     )));
     Ok(())
 }
@@ -245,13 +289,14 @@ pub fn spawn_similarity_search(
     db_path: PathBuf,
     model_cache: PathBuf,
     query_path: PathBuf,
+    settings: SimilaritySettings,
     tx: Sender<WorkerMessage>,
 ) {
     std::thread::spawn(move || {
         let _ = tx.send(WorkerMessage::Status(
             "Preparing hybrid visual search…".to_owned(),
         ));
-        match similarity_search(&db_path, &model_cache, &query_path, &tx) {
+        match similarity_search(&db_path, &model_cache, &query_path, settings, &tx) {
             Ok(results) => {
                 let count = results.len();
                 let _ = tx.send(WorkerMessage::SimilarityResults(results));
@@ -273,6 +318,7 @@ fn similarity_search(
     db_path: &Path,
     model_cache: &Path,
     query_path: &Path,
+    settings: SimilaritySettings,
     tx: &Sender<WorkerMessage>,
 ) -> Result<Vec<ImageRecord>> {
     let conn = db::open(db_path)?;
@@ -330,15 +376,22 @@ fn similarity_search(
         });
         let dominant_similarity = rgb_similarity(query_dominant, record.dominant);
 
+        if !passes_color_gate(histogram_similarity, dominant_similarity, settings) {
+            record.score = None;
+            continue;
+        }
+
         record.score = Some(hybrid_similarity(
             hash_similarity,
             histogram_similarity,
             clip_similarity,
             dominant_similarity,
-            query_dominant,
-            record.dominant,
+            settings,
         ));
     }
+
+    records
+        .retain(|record| normalized_path_key(&record.path) == query_key || record.score.is_some());
 
     records.sort_by(|a, b| {
         let a_exact = normalized_path_key(&a.path) == query_key;
@@ -368,51 +421,66 @@ fn query_clip_embedding(model_cache: &Path, query_path: &Path) -> Result<Vec<f32
         .context("CLIP returned no query embedding")
 }
 
+fn passes_color_gate(
+    histogram_similarity: Option<f32>,
+    dominant_similarity: f32,
+    settings: SimilaritySettings,
+) -> bool {
+    if !settings.strict_color_rejection {
+        return true;
+    }
+
+    if histogram_similarity
+        .is_some_and(|similarity| similarity * 100.0 < settings.min_color_distribution_match)
+    {
+        return false;
+    }
+
+    let dominant_difference = (1.0 - dominant_similarity).clamp(0.0, 1.0) * 100.0;
+    dominant_difference <= settings.max_dominant_color_difference
+}
+
 fn hybrid_similarity(
     hash_similarity: Option<f32>,
     histogram_similarity: Option<f32>,
     clip_similarity: Option<f32>,
     dominant_similarity: f32,
-    query_dominant: [u8; 3],
-    candidate_dominant: [u8; 3],
+    settings: SimilaritySettings,
 ) -> f32 {
-    // For material/texture libraries, local appearance is more important than
-    // CLIP's semantic neighborhood. Histogram + perceptual hash therefore own
-    // 75% of the normal score; CLIP is deliberately capped at 20% influence.
-    let mut weighted = 0.05 * dominant_similarity;
-    let mut weight = 0.05;
+    // User-controlled weights are normalized over whichever descriptors are
+    // available for a candidate. They do not need to sum to exactly 100%.
+    let mut weighted = 0.0f32;
+    let mut weight = 0.0f32;
 
-    if let Some(value) = histogram_similarity {
-        weighted += 0.44 * value;
-        weight += 0.44;
-    }
-    if let Some(value) = hash_similarity {
-        weighted += 0.31 * value;
-        weight += 0.31;
-    }
-    if let Some(value) = clip_similarity {
-        weighted += 0.20 * value;
-        weight += 0.20;
+    let dominant_weight = settings.dominant_color_weight.max(0.0);
+    if dominant_weight > 0.0 {
+        weighted += dominant_weight * dominant_similarity;
+        weight += dominant_weight;
     }
 
-    let mut score = if weight > 0.0 { weighted / weight } else { 0.0 };
-
-    // CLIP often places brown marble, grayscale stone, cement, and travertine
-    // close together. If the query is clearly chromatic, strongly suppress
-    // candidates whose dominant color is essentially achromatic.
-    let query_saturation = rgb_saturation(query_dominant);
-    let candidate_saturation = rgb_saturation(candidate_dominant);
-    if query_saturation > 0.18 && candidate_saturation < query_saturation * 0.45 {
-        score *= 0.68;
+    let histogram_weight = settings.color_distribution_weight.max(0.0);
+    if let Some(value) = histogram_similarity.filter(|_| histogram_weight > 0.0) {
+        weighted += histogram_weight * value;
+        weight += histogram_weight;
     }
 
-    // Also suppress globally different color distributions even if CLIP and
-    // edge structure happen to agree.
-    if histogram_similarity.is_some_and(|similarity| similarity < 0.20) {
-        score *= 0.82;
+    let texture_weight = settings.texture_weight.max(0.0);
+    if let Some(value) = hash_similarity.filter(|_| texture_weight > 0.0) {
+        weighted += texture_weight * value;
+        weight += texture_weight;
     }
 
-    score.clamp(0.0, 1.0)
+    let clip_weight = settings.clip_weight.max(0.0);
+    if let Some(value) = clip_similarity.filter(|_| clip_weight > 0.0) {
+        weighted += clip_weight * value;
+        weight += clip_weight;
+    }
+
+    if weight <= f32::EPSILON {
+        0.0
+    } else {
+        (weighted / weight).clamp(0.0, 1.0)
+    }
 }
 
 fn perceptual_hash_similarity(a: u64, b: u64) -> f32 {
@@ -456,19 +524,6 @@ fn rgb_similarity(a: [u8; 3], b: [u8; 3]) -> f32 {
     let db = a[2] as f32 - b[2] as f32;
     let distance = (dr * dr + dg * dg + db * db).sqrt();
     (1.0 - distance / (255.0 * 3.0f32.sqrt())).clamp(0.0, 1.0)
-}
-
-fn rgb_saturation(rgb: [u8; 3]) -> f32 {
-    let r = rgb[0] as f32 / 255.0;
-    let g = rgb[1] as f32 / 255.0;
-    let b = rgb[2] as f32 / 255.0;
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-    if max <= f32::EPSILON {
-        0.0
-    } else {
-        (max - min) / max
-    }
 }
 
 fn normalized_path_key(path: &Path) -> String {
@@ -606,45 +661,79 @@ mod tests {
         let similar_brown = [145, 88, 46];
         let gray = [128, 128, 128];
 
+        let settings = SimilaritySettings::default();
+        let colored_dominant = rgb_similarity(brown, similar_brown);
+        let gray_dominant = rgb_similarity(brown, gray);
+
+        assert!(passes_color_gate(Some(0.72), colored_dominant, settings));
+        assert!(!passes_color_gate(Some(0.72), gray_dominant, settings));
+
         let colored_score = hybrid_similarity(
             Some(0.75),
             Some(0.72),
             Some(0.70),
-            rgb_similarity(brown, similar_brown),
-            brown,
-            similar_brown,
+            colored_dominant,
+            settings,
         );
-        let gray_score = hybrid_similarity(
-            Some(0.75),
-            Some(0.72),
-            Some(0.70),
-            rgb_similarity(brown, gray),
-            brown,
-            gray,
-        );
+        let gray_score =
+            hybrid_similarity(Some(0.75), Some(0.72), Some(0.70), gray_dominant, settings);
 
         assert!(colored_score > gray_score);
     }
 
     #[test]
+    fn custom_weights_change_ranking_influence() {
+        let mut texture_only = SimilaritySettings::default();
+        texture_only.color_distribution_weight = 0.0;
+        texture_only.texture_weight = 100.0;
+        texture_only.clip_weight = 0.0;
+        texture_only.dominant_color_weight = 0.0;
+        texture_only.strict_color_rejection = false;
+
+        let texture_score =
+            hybrid_similarity(Some(0.92), Some(0.05), Some(0.10), 0.10, texture_only);
+        assert!((texture_score - 0.92).abs() < 1e-6);
+
+        let mut clip_only = texture_only;
+        clip_only.texture_weight = 0.0;
+        clip_only.clip_weight = 100.0;
+        let clip_score = hybrid_similarity(Some(0.92), Some(0.05), Some(0.77), 0.10, clip_only);
+        assert!((clip_score - 0.77).abs() < 1e-6);
+    }
+
+    #[test]
+    fn strict_color_gate_rejects_weak_histogram_match() {
+        let mut settings = SimilaritySettings::default();
+        settings.min_color_distribution_match = 40.0;
+        settings.max_dominant_color_difference = 100.0;
+        assert!(!passes_color_gate(Some(0.25), 0.95, settings));
+        assert!(passes_color_gate(Some(0.60), 0.95, settings));
+    }
+
+    #[test]
+    fn all_zero_weights_are_safe() {
+        let settings = SimilaritySettings {
+            color_distribution_weight: 0.0,
+            texture_weight: 0.0,
+            clip_weight: 0.0,
+            dominant_color_weight: 0.0,
+            strict_color_rejection: false,
+            min_color_distribution_match: 0.0,
+            max_dominant_color_difference: 100.0,
+        };
+        assert_eq!(
+            hybrid_similarity(Some(1.0), Some(1.0), Some(1.0), 1.0, settings),
+            0.0
+        );
+    }
+
+    #[test]
     fn clip_cannot_outvote_bad_color_and_texture_match() {
         let brown = [150, 82, 38];
-        let good = hybrid_similarity(
-            Some(0.90),
-            Some(0.88),
-            Some(0.62),
-            0.90,
-            brown,
-            [146, 86, 42],
-        );
-        let semantically_close_but_wrong = hybrid_similarity(
-            Some(0.35),
-            Some(0.12),
-            Some(0.95),
-            0.55,
-            brown,
-            [142, 142, 142],
-        );
+        let settings = SimilaritySettings::default();
+        let good = hybrid_similarity(Some(0.90), Some(0.88), Some(0.62), 0.90, settings);
+        let semantically_close_but_wrong =
+            hybrid_similarity(Some(0.35), Some(0.12), Some(0.95), 0.55, settings);
 
         assert!(good > semantically_close_but_wrong);
     }
