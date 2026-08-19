@@ -1,0 +1,54 @@
+name: Validate Rust CI hygiene v0.2.7
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.head_ref == 'chore/rust-ci-hygiene-v0.2.7-main'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: chore/rust-ci-hygiene-v0.2.7-main
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Apply warning cleanup
+        run: python scripts/apply_rust_ci_hygiene_v027.py
+
+      - name: Format
+        run: cargo fmt --all
+
+      - name: Check
+        run: cargo check --all-targets
+
+      - name: Reject future-incompatible warnings
+        env:
+          RUSTFLAGS: -Dfuture-incompatible
+        run: cargo check --all-targets
+
+      - name: Test
+        run: cargo test --all-targets
+
+      - name: Commit validated source and lockfile
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock Cargo.toml .github\workflows\windows-build.yml src\db.rs src\indexer.rs src\ui\collections.rs src\ui\mod.rs src\ui\views.rs
+          if (git status --porcelain -- Cargo.lock Cargo.toml .github\workflows\windows-build.yml src\db.rs src\indexer.rs src\ui\collections.rs src\ui\mod.rs src\ui\views.rs) {
+            git commit -m "chore: clean Rust warnings for v0.2.7"
+          }
+          git fetch origin chore/rust-ci-hygiene-v0.2.7-main
+          git rebase origin/chore/rust-ci-hygiene-v0.2.7-main
+          git push origin HEAD:chore/rust-ci-hygiene-v0.2.7-main
