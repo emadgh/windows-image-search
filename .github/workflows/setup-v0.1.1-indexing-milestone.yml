@@ -1,0 +1,36 @@
+name: Setup v0.1.1 indexing milestone
+
+on:
+  push:
+    branches: [fix/durable-live-indexing]
+    paths:
+      - .github/workflows/setup-v0.1.1-indexing-milestone.yml
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create milestone and attach issues
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TITLE='v0.1.1 Indexing Reliability'
+          NUMBER="$(gh api --paginate "repos/$GITHUB_REPOSITORY/milestones?state=all&per_page=100" --jq ".[] | select(.title == \"$TITLE\") | .number" | head -n1)"
+          if [ -z "$NUMBER" ]; then
+            NUMBER="$(gh api --method POST "repos/$GITHUB_REPOSITORY/milestones" -f title="$TITLE" -f description='Crash-safe incremental indexing, HDD-friendly bounded work, live Results updates, and indexing safety guards.' --jq .number)"
+          fi
+          for ISSUE in 17 18 19 20; do
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/$ISSUE" -F milestone="$NUMBER" >/dev/null
+          done
+          printf '{"milestone_number":%s,"title":"%s"}\n' "$NUMBER" "$TITLE" > milestone-status.json
+          CONTENT="$(base64 -w0 milestone-status.json)"
+          PATH_API="repos/$GITHUB_REPOSITORY/contents/.milestone-v0.1.1-indexing.json"
+          gh api --method PUT "$PATH_API" \
+            -f message='chore: record v0.1.1 indexing milestone' \
+            -f content="$CONTENT" \
+            -f branch='fix/durable-live-indexing' >/dev/null
