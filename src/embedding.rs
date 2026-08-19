@@ -121,9 +121,12 @@ fn embed_paths(
         .as_mut()
         .context("persistent CLIP model was not initialized")?
         .model;
-    let embeddings = model
+    let mut embeddings = model
         .embed(paths, Some(batch_size.max(1)))
         .context("embedding images with persistent CLIP model")?;
+    for embedding in &mut embeddings {
+        normalize_embedding(embedding);
+    }
 
     Ok(EmbeddingResponse {
         embeddings,
@@ -131,9 +134,28 @@ fn embed_paths(
     })
 }
 
+fn normalize_embedding(values: &mut [f32]) {
+    let norm_sq = values.iter().map(|value| value * value).sum::<f32>();
+    if norm_sq <= f32::EPSILON {
+        return;
+    }
+    let inverse = norm_sq.sqrt().recip();
+    for value in values {
+        *value *= inverse;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedding_normalization_produces_unit_vectors() {
+        let mut values = vec![3.0, 4.0];
+        normalize_embedding(&mut values);
+        let norm = values.iter().map(|value| value * value).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-6);
+    }
 
     #[test]
     fn model_is_reused_until_thread_setting_changes() {

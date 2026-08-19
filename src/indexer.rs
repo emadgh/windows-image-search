@@ -12,6 +12,7 @@ use std::time::UNIX_EPOCH;
 use walkdir::WalkDir;
 
 const COLOR_HISTOGRAM_BINS: usize = 64;
+const MAX_SIMILARITY_RESULTS: usize = 2_000;
 
 #[derive(Clone)]
 struct PendingImage {
@@ -522,9 +523,6 @@ fn similarity_search(
     let indexing_settings = indexing_settings.sanitized();
     let conn = db::open(db_path)?;
 
-    // Upgrade existing v0.1.0 indexes on demand. This means a user can install
-    // the fixed build and search immediately; Rescan is still recommended but
-    // deleting/recreating the index is not required.
     let missing_visual = db::paths_missing_visual_descriptor(&conn)?;
     if !missing_visual.is_empty() {
         let _ = tx.send(WorkerMessage::Status(format!(
@@ -560,14 +558,16 @@ fn similarity_search(
     };
 
     let query_key = normalized_path_key(query_path);
-    let mut records = db::load_images(db_path)?;
+    let records = db::load_images(db_path)?;
+    let mut scored = Vec::<(bool, ImageRecord)>::with_capacity(records.len());
 
-    for record in &mut records {
-        if normalized_path_key(&record.path) == query_key {
-            // An exact indexed query file is useful evidence, not noise. v0.1.0
-            // intentionally removed it; keeping it at 100% also gives users a
-            // sanity check that the visual index is behaving correctly.
+    for mut record in records {
+        // Normalize the path exactly once. It is carried as a bool into the
+        // ranking stage instead of reallocating strings inside sort comparisons.
+        let is_exact = normalized_path_key(&record.path) == query_key;
+        if is_exact {
             record.score = Some(1.0);
+            scored.push((true, record));
             continue;
         }
 
@@ -578,18 +578,20 @@ fn similarity_search(
             .color_histogram
             .as_deref()
             .map(|histogram| histogram_intersection(&query_histogram, histogram));
-        let clip_similarity = query_embedding.as_ref().and_then(|query| {
-            record
-                .embedding
-                .as_deref()
-                .map(|embedding| cosine_similarity(query, embedding).clamp(0.0, 1.0))
-        });
         let dominant_similarity = rgb_similarity(query_dominant, record.dominant);
 
+        // Cheap color rejection happens before touching the CLIP vector. This
+        // avoids hundreds of floating-point operations for obvious mismatches.
         if !passes_color_gate(histogram_similarity, dominant_similarity, settings) {
-            record.score = None;
             continue;
         }
+
+        let clip_similarity = query_embedding.as_ref().and_then(|query| {
+            record.embedding.as_deref().map(|embedding| {
+                clip_similarity_with_normalized_query(query, embedding, record.embedding_normalized)
+                    .clamp(0.0, 1.0)
+            })
+        });
 
         record.score = Some(hybrid_similarity(
             hash_similarity,
@@ -598,21 +600,27 @@ fn similarity_search(
             dominant_similarity,
             settings,
         ));
+        scored.push((false, record));
     }
 
-    records
-        .retain(|record| normalized_path_key(&record.path) == query_key || record.score.is_some());
+    if scored.len() > MAX_SIMILARITY_RESULTS {
+        scored.select_nth_unstable_by(MAX_SIMILARITY_RESULTS, compare_ranked_records);
+        scored.truncate(MAX_SIMILARITY_RESULTS);
+    }
+    scored.sort_by(compare_ranked_records);
 
-    records.sort_by(|a, b| {
-        let a_exact = normalized_path_key(&a.path) == query_key;
-        let b_exact = normalized_path_key(&b.path) == query_key;
-        b_exact.cmp(&a_exact).then_with(|| {
-            b.score
-                .unwrap_or(f32::NEG_INFINITY)
-                .total_cmp(&a.score.unwrap_or(f32::NEG_INFINITY))
-        })
-    });
-    Ok(records.into_iter().map(ImageSummary::from).collect())
+    Ok(scored
+        .into_iter()
+        .map(|(_, record)| ImageSummary::from(record))
+        .collect())
+}
+
+fn compare_ranked_records(a: &(bool, ImageRecord), b: &(bool, ImageRecord)) -> std::cmp::Ordering {
+    b.0.cmp(&a.0).then_with(|| {
+        b.1.score
+            .unwrap_or(f32::NEG_INFINITY)
+            .total_cmp(&a.1.score.unwrap_or(f32::NEG_INFINITY))
+    })
 }
 
 fn query_clip_embedding(
@@ -707,23 +715,29 @@ fn histogram_intersection(a: &[f32], b: &[f32]) -> f32 {
         .clamp(0.0, 1.0)
 }
 
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || a.is_empty() {
+fn clip_similarity_with_normalized_query(
+    query: &[f32],
+    candidate: &[f32],
+    candidate_normalized: bool,
+) -> f32 {
+    if query.len() != candidate.len() || query.is_empty() {
         return -1.0;
     }
-    let mut dot = 0.0f32;
-    let mut a2 = 0.0f32;
-    let mut b2 = 0.0f32;
-    for (&x, &y) in a.iter().zip(b.iter()) {
-        dot += x * y;
-        a2 += x * x;
-        b2 += y * y;
+
+    let dot = query
+        .iter()
+        .zip(candidate.iter())
+        .map(|(&x, &y)| x * y)
+        .sum::<f32>();
+    if candidate_normalized {
+        return dot;
     }
-    let denom = a2.sqrt() * b2.sqrt();
-    if denom <= f32::EPSILON {
+
+    let candidate_norm_sq = candidate.iter().map(|value| value * value).sum::<f32>();
+    if candidate_norm_sq <= f32::EPSILON {
         -1.0
     } else {
-        dot / denom
+        dot / candidate_norm_sq.sqrt()
     }
 }
 
@@ -845,6 +859,17 @@ pub fn is_supported_image(path: &Path) -> bool {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn normalized_query_similarity_matches_legacy_candidate_fallback() {
+        let query = [0.6, 0.8];
+        let normalized_candidate = [0.6, 0.8];
+        let legacy_candidate = [3.0, 4.0];
+        let normalized = clip_similarity_with_normalized_query(&query, &normalized_candidate, true);
+        let legacy = clip_similarity_with_normalized_query(&query, &legacy_candidate, false);
+        assert!((normalized - 1.0).abs() < 1e-6);
+        assert!((legacy - 1.0).abs() < 1e-6);
+    }
 
     #[test]
     fn perceptual_hash_prefers_identical_pattern() {
