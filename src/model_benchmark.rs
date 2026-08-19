@@ -189,13 +189,7 @@ pub fn benchmark(db_path: &Path, model_cache: &Path, requested_queries: usize) -
 
     let mut successful_models = 0usize;
     for benchmark_model in MODELS {
-        match benchmark_model_once(
-            benchmark_model,
-            model_cache,
-            &corpus,
-            &queries,
-            cpu_threads,
-        ) {
+        match benchmark_model_once(benchmark_model, model_cache, &corpus, &queries, cpu_threads) {
             Ok(model_report) => {
                 successful_models += 1;
                 append_model_report(&mut report, &model_report, corpus.len(), queries.len())?;
@@ -212,7 +206,11 @@ pub fn benchmark(db_path: &Path, model_cache: &Path, requested_queries: usize) -
         }
     }
     writeln!(report, "successful_models={successful_models}")?;
-    writeln!(report, "model_cache_bytes_after={}", directory_size(model_cache))?;
+    writeln!(
+        report,
+        "model_cache_bytes_after={}",
+        directory_size(model_cache)
+    )?;
     writeln!(
         report,
         "notes=Ground truth is recovery of each transformed query's original indexed source within a deterministic bounded corpus. This compares crop/layout/scale robustness and throughput across models without changing stored production embeddings. Representative same-material labels and manual tile/marble/stone evaluation are still required before changing the production model."
@@ -253,15 +251,30 @@ fn benchmark_model_once(
         normalize(embedding);
     }
     let embedding_dim = corpus_embeddings.first().map(Vec::len).unwrap_or(0);
-    if embedding_dim == 0 || corpus_embeddings.iter().any(|item| item.len() != embedding_dim) {
-        bail!("{} returned inconsistent embedding dimensions", benchmark_model.label());
+    if embedding_dim == 0
+        || corpus_embeddings
+            .iter()
+            .any(|item| item.len() != embedding_dim)
+    {
+        bail!(
+            "{} returned inconsistent embedding dimensions",
+            benchmark_model.label()
+        );
     }
 
-    let query_refs: Vec<&[u8]> = queries.iter().map(|query| query.png_bytes.as_slice()).collect();
+    let query_refs: Vec<&[u8]> = queries
+        .iter()
+        .map(|query| query.png_bytes.as_slice())
+        .collect();
     let query_started = Instant::now();
     let mut query_embeddings = model
         .embed_bytes(&query_refs, Some(BATCH_SIZE))
-        .with_context(|| format!("embedding transformed queries with {}", benchmark_model.label()))?;
+        .with_context(|| {
+            format!(
+                "embedding transformed queries with {}",
+                benchmark_model.label()
+            )
+        })?;
     let query_embed = query_started.elapsed();
     if query_embeddings.len() != queries.len() {
         bail!(
@@ -274,8 +287,14 @@ fn benchmark_model_once(
     for embedding in &mut query_embeddings {
         normalize(embedding);
     }
-    if query_embeddings.iter().any(|item| item.len() != embedding_dim) {
-        bail!("{} query/corpus embedding dimensions differ", benchmark_model.label());
+    if query_embeddings
+        .iter()
+        .any(|item| item.len() != embedding_dim)
+    {
+        bail!(
+            "{} query/corpus embedding dimensions differ",
+            benchmark_model.label()
+        );
     }
 
     let mut overall = RankMetrics::default();
@@ -285,7 +304,8 @@ fn benchmark_model_once(
         .map(|variant| (variant, RankMetrics::default()))
         .collect();
 
-    for (query_index, (query, embedding)) in queries.iter().zip(query_embeddings.iter()).enumerate() {
+    for (query_index, (query, embedding)) in queries.iter().zip(query_embeddings.iter()).enumerate()
+    {
         let rank = rank_for_query(embedding, &corpus_embeddings, query.target_index);
         overall.record(rank);
         let variant_index = query_index % QUERY_VARIANTS.len();
@@ -424,11 +444,13 @@ fn rank_for_query(query: &[f32], corpus: &[Vec<f32>], target_index: usize) -> us
     let better = corpus
         .iter()
         .enumerate()
-        .filter(|(index, candidate)| match dot(query, candidate).total_cmp(&target_score) {
-            Ordering::Greater => true,
-            Ordering::Equal => *index < target_index,
-            Ordering::Less => false,
-        })
+        .filter(
+            |(index, candidate)| match dot(query, candidate).total_cmp(&target_score) {
+                Ordering::Greater => true,
+                Ordering::Equal => *index < target_index,
+                Ordering::Less => false,
+            },
+        )
         .count();
     better + 1
 }
@@ -464,9 +486,7 @@ fn sample_even_indices(len: usize, count: usize) -> Vec<usize> {
         return vec![0];
     }
     let last = len - 1;
-    (0..count)
-        .map(|index| index * last / (count - 1))
-        .collect()
+    (0..count).map(|index| index * last / (count - 1)).collect()
 }
 
 fn benchmark_cpu_threads() -> usize {
