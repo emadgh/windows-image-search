@@ -140,11 +140,7 @@ pub fn benchmark(db_path: &Path, requested_queries: usize) -> Result<String> {
 
     let mut report = String::new();
     writeln!(report, "Windows Image Search ANN Benchmark")?;
-    writeln!(
-        report,
-        "application_version=v{}",
-        env!("CARGO_PKG_VERSION")
-    )?;
+    writeln!(report, "application_version=v{}", env!("CARGO_PKG_VERSION"))?;
     writeln!(report, "vectors={}", entries.len())?;
     writeln!(report, "queries={}", query_indices.len())?;
     writeln!(report, "hnsw_rebuilt={rebuilt}")?;
