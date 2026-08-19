@@ -14,27 +14,52 @@ def replace_once(path: str, old: str, new: str) -> None:
 
 replace_once(
     "src/indexer.rs",
-    "build_visual_descriptors(&conn, &missing_visual, indexing_settings.decode_workers, tx)?;",
-    "build_visual_descriptors(&mut conn, &missing_visual, indexing_settings, tx)?;",
+    '''    let missing_visual = db::paths_missing_visual_descriptor(&conn)?;
+    if !missing_visual.is_empty() {
+        let _ = tx.send(WorkerMessage::Status(format!(
+            "Upgrading visual index: {} image{} need texture/color descriptors…",
+            missing_visual.len(),
+            if missing_visual.len() == 1 { "" } else { "s" }
+        )));
+        build_visual_descriptors(&conn, &missing_visual, indexing_settings.decode_workers, tx)?;
+    }''',
+    '''    let missing_visual = db::paths_missing_visual_descriptor(&conn)?;
+    if !missing_visual.is_empty() {
+        let _ = tx.send(WorkerMessage::Status(format!(
+            "Upgrading visual index: {} image{} need texture/color descriptors…",
+            missing_visual.len(),
+            if missing_visual.len() == 1 { "" } else { "s" }
+        )));
+        build_visual_descriptors(&mut conn, &missing_visual, indexing_settings, tx)?;
+    }''',
 )
 
-# The search path has the same call after a local connection. Change that
-# connection to mutable, then replace the remaining call.
 replace_once(
     "src/indexer.rs",
-    """    let indexing_settings = indexing_settings.sanitized();
+    '''    let indexing_settings = indexing_settings.sanitized();
     let conn = db::open(db_path)?;
 
-    let missing_visual = db::paths_missing_visual_descriptor(&conn)?;""",
-    """    let indexing_settings = indexing_settings.sanitized();
+    let missing_visual = db::paths_missing_visual_descriptor(&conn)?;
+    if !missing_visual.is_empty() {
+        let _ = tx.send(WorkerMessage::Status(format!(
+            "Upgrading texture/color index: {} image{}…",
+            missing_visual.len(),
+            if missing_visual.len() == 1 { "" } else { "s" }
+        )));
+        build_visual_descriptors(&conn, &missing_visual, indexing_settings.decode_workers, tx)?;
+    }''',
+    '''    let indexing_settings = indexing_settings.sanitized();
     let mut conn = db::open(db_path)?;
 
-    let missing_visual = db::paths_missing_visual_descriptor(&conn)?;""",
-)
-replace_once(
-    "src/indexer.rs",
-    "build_visual_descriptors(&conn, &missing_visual, indexing_settings.decode_workers, tx)?;",
-    "build_visual_descriptors(&mut conn, &missing_visual, indexing_settings, tx)?;",
+    let missing_visual = db::paths_missing_visual_descriptor(&conn)?;
+    if !missing_visual.is_empty() {
+        let _ = tx.send(WorkerMessage::Status(format!(
+            "Upgrading texture/color index: {} image{}…",
+            missing_visual.len(),
+            if missing_visual.len() == 1 { "" } else { "s" }
+        )));
+        build_visual_descriptors(&mut conn, &missing_visual, indexing_settings, tx)?;
+    }''',
 )
 
 replace_once(
@@ -94,6 +119,10 @@ replace_once(
 ) -> Result<()> {
     let indexing_settings = indexing_settings.sanitized();
     let total = paths.len();
+    if total == 0 {
+        return Ok(());
+    }
+
     let workers = indexing_settings.decode_workers;
     let batch_size = indexing_settings.batch_size;
     let pool = rayon::ThreadPoolBuilder::new()
@@ -102,6 +131,7 @@ replace_once(
         .build()
         .context("creating visual descriptor worker pool")?;
     let decoded = AtomicUsize::new(0);
+    let failed = AtomicUsize::new(0);
     let mut committed = 0usize;
 
     let _ = tx.send(WorkerMessage::Status(format!(
@@ -111,8 +141,9 @@ replace_once(
     )));
 
     for batch in paths.chunks(batch_size) {
-        // Keep only one batch of decoded descriptors resident. This prevents a
-        // large migration/backfill from accumulating every descriptor in RAM.
+        let committed_before_batch = committed;
+        // Hold only one bounded descriptor batch in memory. Each successfully
+        // decoded batch is committed before the next batch is decoded.
         let descriptors: Vec<(PathBuf, u64, Vec<f32>, Vec<f32>)> = pool.install(|| {
             batch
                 .par_iter()
@@ -121,7 +152,7 @@ replace_once(
                     let current = decoded.fetch_add(1, Ordering::Relaxed) + 1;
                     if current % 16 == 0 || current == total {
                         let _ = tx.send(WorkerMessage::Status(format!(
-                            "Visual descriptor backfill: decoded {current}/{total}; committed {committed}/{total}"
+                            "Visual descriptor backfill: decoded {current}/{total}; committed {committed_before_batch}/{total}"
                         )));
                     }
                     match result {
@@ -129,6 +160,7 @@ replace_once(
                             Some((path.clone(), visual_hash, color_histogram, material_texture))
                         }
                         Err(err) => {
+                            failed.fetch_add(1, Ordering::Relaxed);
                             let _ = tx.send(WorkerMessage::Error(format!(
                                 "Cannot build visual descriptor for {}: {err:#}",
                                 path.display()
@@ -161,6 +193,18 @@ replace_once(
         committed += descriptors.len();
         let _ = tx.send(WorkerMessage::Status(format!(
             "Visual descriptor backfill: committed {committed}/{total} safely stored"
+        )));
+    }
+
+    let failed = failed.load(Ordering::Relaxed);
+    if failed > 0 {
+        let _ = tx.send(WorkerMessage::Status(format!(
+            "Visual descriptor backfill finished: {committed}/{total} committed; {failed} decode failure{} remain eligible for retry",
+            if failed == 1 { "" } else { "s" }
+        )));
+    } else {
+        let _ = tx.send(WorkerMessage::Status(format!(
+            "Visual descriptor backfill finished: {committed}/{total} committed"
         )));
     }
     Ok(())
