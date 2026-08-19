@@ -111,3 +111,19 @@ jobs:
           gh release view v0.1.0 \
             --repo "$GITHUB_REPOSITORY" \
             --json tagName,name,isLatest,url,assets
+
+      - name: Record successful publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          RELEASE_URL="$(gh release view v0.1.0 --repo "$GITHUB_REPOSITORY" --json url --jq .url)"
+          printf '{"status":"published","tag":"v0.1.0","release_url":"%s"}\n' "$RELEASE_URL" > release-status.json
+          CONTENT="$(base64 -w0 release-status.json)"
+          gh api \
+            --method PUT \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/$GITHUB_REPOSITORY/contents/.release-status-v0.1.0.json" \
+            -f message='chore: record v0.1.0 publication' \
+            -f content="$CONTENT" \
+            -f branch='chore/publish-v0.1.0'
