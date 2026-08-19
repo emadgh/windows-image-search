@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
@@ -118,21 +119,37 @@ pub fn remove_root(db_path: &Path, root: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn existing_file_state(conn: &Connection, path: &Path) -> Result<Option<(u64, i64, bool)>> {
-    let path_text = path.to_string_lossy().to_string();
-    let state = conn
-        .query_row(
-            "SELECT size, modified, embedding IS NOT NULL FROM images WHERE path = ?1",
-            params![path_text],
-            |row| {
-                let size: i64 = row.get(0)?;
-                let modified: i64 = row.get(1)?;
-                let has_embedding: bool = row.get(2)?;
-                Ok((size.max(0) as u64, modified, has_embedding))
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileState {
+    pub size: u64,
+    pub modified: i64,
+    pub has_embedding: bool,
+}
+
+pub fn load_file_states(conn: &Connection) -> Result<HashMap<PathBuf, FileState>> {
+    let mut stmt =
+        conn.prepare("SELECT path, size, modified, embedding IS NOT NULL FROM images")?;
+    let rows = stmt.query_map([], |row| {
+        let path = PathBuf::from(row.get::<_, String>(0)?);
+        let size = row.get::<_, i64>(1)?.max(0) as u64;
+        let modified = row.get::<_, i64>(2)?;
+        let has_embedding = row.get::<_, bool>(3)?;
+        Ok((
+            path,
+            FileState {
+                size,
+                modified,
+                has_embedding,
             },
-        )
-        .optional()?;
-    Ok(state)
+        ))
+    })?;
+
+    let mut states = HashMap::new();
+    for row in rows {
+        let (path, state) = row?;
+        states.insert(path, state);
+    }
+    Ok(states)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -346,4 +363,91 @@ fn decode_f32_vec(bytes: &[u8], dim: usize) -> Option<Vec<f32>> {
         return None;
     }
     Some(values)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_db_path(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "windows-image-search-{label}-{}-{nonce}.sqlite3",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn load_file_states_returns_all_persisted_rows() {
+        let db_path = temp_db_path("file-state-cache");
+        let root = std::env::temp_dir().join("windows-image-search-indexed-root");
+        let first = root.join("first.jpg");
+        let second = root.join("second.jpg");
+
+        {
+            let conn = open(&db_path).unwrap();
+            upsert_image(
+                &conn,
+                &first,
+                &root,
+                "first.jpg",
+                "jpg",
+                111,
+                1001,
+                32,
+                32,
+                "",
+                "",
+                [10, 20, 30],
+                0xAA55,
+                &[1.0, 0.0],
+            )
+            .unwrap();
+            upsert_image(
+                &conn,
+                &second,
+                &root,
+                "second.jpg",
+                "jpg",
+                222,
+                2002,
+                64,
+                64,
+                "",
+                "",
+                [40, 50, 60],
+                0x55AA,
+                &[0.0, 1.0],
+            )
+            .unwrap();
+            set_embedding(&conn, &second, &[0.25, 0.75]).unwrap();
+
+            let states = load_file_states(&conn).unwrap();
+            assert_eq!(states.len(), 2);
+            assert_eq!(
+                states.get(&first),
+                Some(&FileState {
+                    size: 111,
+                    modified: 1001,
+                    has_embedding: false,
+                })
+            );
+            assert_eq!(
+                states.get(&second),
+                Some(&FileState {
+                    size: 222,
+                    modified: 2002,
+                    has_embedding: true,
+                })
+            );
+        }
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(format!("{}-wal", db_path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", db_path.display()));
+    }
 }

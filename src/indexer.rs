@@ -121,11 +121,13 @@ fn rescan(
 ) -> Result<()> {
     let indexing_settings = indexing_settings.sanitized();
     let mut conn = db::open(db_path)?;
+    let existing_file_states = db::load_file_states(&conn)?;
     let mut candidates: Vec<(PathBuf, PathBuf)> = Vec::new();
 
-    let _ = tx.send(WorkerMessage::Status(
-        "Scanning folders recursively…".to_owned(),
-    ));
+    let _ = tx.send(WorkerMessage::Status(format!(
+        "Scanning folders recursively… {} persisted file states cached in memory",
+        existing_file_states.len()
+    )));
     let mut traversal_errors = 0usize;
     for root in roots {
         if !root.exists() {
@@ -189,9 +191,9 @@ fn rescan(
             .map(|duration| duration.as_secs() as i64)
             .unwrap_or(0);
 
-        let unchanged = db::existing_file_state(&conn, path)?
-            .map(|(old_size, old_modified, _)| old_size == size && old_modified == modified)
-            .unwrap_or(false);
+        let unchanged = existing_file_states
+            .get(path)
+            .is_some_and(|state| state.size == size && state.modified == modified);
 
         if !unchanged {
             pending.push(PendingImage {
