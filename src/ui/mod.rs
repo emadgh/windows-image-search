@@ -28,6 +28,7 @@ pub struct ImageSearchApp {
     pub(super) model_cache: PathBuf,
     pub(super) roots: Vec<PathBuf>,
     pub(super) images: Vec<ImageRecord>,
+    image_positions: HashMap<PathBuf, usize>,
     pub(super) similarity_results: Option<Vec<ImageRecord>>,
     pub(super) query_image: Option<PathBuf>,
     pub(super) similarity_settings: indexer::SimilaritySettings,
@@ -44,10 +45,13 @@ pub struct ImageSearchApp {
     pub(super) tx: Sender<WorkerMessage>,
     pub(super) rx: Receiver<WorkerMessage>,
     pub(super) busy: bool,
+    pub(super) indexing: bool,
     pub(super) status: String,
     pub(super) progress: Option<(usize, usize)>,
     pub(super) last_error: Option<String>,
     settings_open: bool,
+    close_confirmation_open: bool,
+    allow_close: bool,
 }
 
 impl ImageSearchApp {
@@ -57,9 +61,16 @@ impl ImageSearchApp {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join("thumbnail-cache");
+        let images = db::load_images(&db_path).unwrap_or_default();
+        let image_positions = images
+            .iter()
+            .enumerate()
+            .map(|(index, record)| (record.path.clone(), index))
+            .collect();
         Self {
             roots: db::load_roots(&db_path).unwrap_or_default(),
-            images: db::load_images(&db_path).unwrap_or_default(),
+            images,
+            image_positions,
             db_path,
             model_cache,
             similarity_results: None,
@@ -78,10 +89,13 @@ impl ImageSearchApp {
             tx,
             rx,
             busy: false,
+            indexing: false,
             status: "Ready".into(),
             progress: None,
             last_error: None,
             settings_open: false,
+            close_confirmation_open: false,
+            allow_close: false,
         }
     }
 
@@ -90,9 +104,13 @@ impl ImageSearchApp {
             match message {
                 WorkerMessage::Status(status) => self.status = status,
                 WorkerMessage::Progress { done, total } => self.progress = Some((done, total)),
+                WorkerMessage::IndexedBatch(records) => self.merge_indexed_batch(records),
                 WorkerMessage::Reload => {
                     match db::load_images(&self.db_path) {
-                        Ok(images) => self.images = images,
+                        Ok(images) => {
+                            self.images = images;
+                            self.rebuild_image_positions();
+                        }
                         Err(err) => self.last_error = Some(format!("Reload failed: {err:#}")),
                     }
                     self.progress = None;
@@ -105,7 +123,33 @@ impl ImageSearchApp {
                     self.last_error = Some(error.clone());
                     self.status = error;
                 }
-                WorkerMessage::Idle => self.busy = false,
+                WorkerMessage::Idle => {
+                    self.busy = false;
+                    self.indexing = false;
+                    self.close_confirmation_open = false;
+                }
+            }
+        }
+    }
+
+    fn rebuild_image_positions(&mut self) {
+        self.image_positions.clear();
+        self.image_positions.extend(
+            self.images
+                .iter()
+                .enumerate()
+                .map(|(index, record)| (record.path.clone(), index)),
+        );
+    }
+
+    fn merge_indexed_batch(&mut self, records: Vec<ImageRecord>) {
+        for record in records {
+            if let Some(&index) = self.image_positions.get(&record.path) {
+                self.images[index] = record;
+            } else {
+                let index = self.images.len();
+                self.image_positions.insert(record.path.clone(), index);
+                self.images.push(record);
             }
         }
     }
@@ -140,6 +184,9 @@ impl ImageSearchApp {
             return;
         }
         self.busy = true;
+        self.indexing = true;
+        self.allow_close = false;
+        self.close_confirmation_open = false;
         self.progress = None;
         self.last_error = None;
         self.similarity_results = None;
@@ -154,6 +201,9 @@ impl ImageSearchApp {
     }
 
     fn add_folder(&mut self) {
+        if self.busy {
+            return;
+        }
         let Some(folder) = rfd::FileDialog::new().pick_folder() else {
             return;
         };
@@ -167,10 +217,14 @@ impl ImageSearchApp {
     }
 
     fn remove_folder(&mut self, folder: &Path) {
+        if self.busy {
+            return;
+        }
         match db::remove_root(&self.db_path, folder) {
             Ok(()) => {
                 self.roots = db::load_roots(&self.db_path).unwrap_or_default();
                 self.images = db::load_images(&self.db_path).unwrap_or_default();
+                self.rebuild_image_positions();
                 self.similarity_results = None;
                 self.selected_paths.clear();
             }
@@ -179,7 +233,7 @@ impl ImageSearchApp {
     }
 
     fn choose_similarity_image(&mut self) {
-        if self.busy {
+        if self.busy || self.indexing {
             return;
         }
         let Some(path) = rfd::FileDialog::new()
@@ -198,7 +252,7 @@ impl ImageSearchApp {
     }
 
     fn run_similarity_search(&mut self, path: PathBuf) {
-        if self.busy {
+        if self.busy || self.indexing {
             return;
         }
         self.busy = true;
@@ -295,7 +349,10 @@ impl ImageSearchApp {
                     "Recursive indexing is enabled for every root and includes all subfolders.",
                 );
                 ui.horizontal(|ui| {
-                    if ui.button("＋ Add folder").clicked() {
+                    if ui
+                        .add_enabled(!self.busy, egui::Button::new("＋ Add folder"))
+                        .clicked()
+                    {
                         add_folder = true;
                     }
                     if ui
@@ -315,7 +372,10 @@ impl ImageSearchApp {
                     for root in &self.roots {
                         ui.horizontal(|ui| {
                             ui.label(root.display().to_string());
-                            if ui.small_button("Remove").clicked() {
+                            if ui
+                                .add_enabled(!self.busy, egui::Button::new("Remove").small())
+                                .clicked()
+                            {
                                 remove_folder = Some(root.clone());
                             }
                         });
@@ -368,7 +428,7 @@ impl ImageSearchApp {
                     ui.horizontal(|ui| {
                         if ui
                             .add_enabled(
-                                !self.busy && !self.images.is_empty(),
+                                !self.busy && !self.indexing && !self.images.is_empty(),
                                 egui::Button::new("◉ Search by image"),
                             )
                             .clicked()
@@ -383,6 +443,9 @@ impl ImageSearchApp {
                             self.selected_paths.clear();
                         }
                     });
+                    if self.indexing {
+                        ui.small("Image similarity search is disabled while indexing.");
+                    }
 
                     if let Some(query) = self.query_image.clone() {
                         ui.add_space(8.0);
@@ -471,7 +534,7 @@ impl ImageSearchApp {
                         }
                         if ui
                             .add_enabled(
-                                !self.busy && self.query_image.is_some(),
+                                !self.busy && !self.indexing && self.query_image.is_some(),
                                 egui::Button::new("Apply / re-run"),
                             )
                             .clicked()
@@ -491,12 +554,59 @@ impl ImageSearchApp {
                 });
             });
     }
+
+    fn show_close_confirmation(&mut self, ctx: &egui::Context) {
+        if !self.close_confirmation_open {
+            return;
+        }
+
+        let mut keep_indexing = false;
+        let mut close_anyway = false;
+        egui::Window::new("Indexing in progress")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label("Images are still being indexed and committed in small batches.");
+                ui.label(
+                    "Already committed images are safe. Closing now stops the current batch and remaining work.",
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Keep indexing").clicked() {
+                        keep_indexing = true;
+                    }
+                    if ui.button("Close anyway").clicked() {
+                        close_anyway = true;
+                    }
+                });
+            });
+
+        if keep_indexing {
+            self.close_confirmation_open = false;
+        }
+        if close_anyway {
+            self.allow_close = true;
+            self.close_confirmation_open = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
 }
 
 impl eframe::App for ImageSearchApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_worker_messages();
         self.process_thumbnail_messages(ctx);
+
+        if ctx.input(|input| input.viewport().close_requested())
+            && self.indexing
+            && !self.allow_close
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.close_confirmation_open = true;
+        }
+        self.show_close_confirmation(ctx);
+
         if self.busy {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
@@ -518,6 +628,9 @@ impl eframe::App for ImageSearchApp {
                 }
                 ui.separator();
                 ui.small(format!("{} indexed images", self.images.len()));
+                if self.indexing {
+                    ui.small("Indexing… committed results appear live");
+                }
             });
         });
 
