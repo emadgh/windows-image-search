@@ -1,0 +1,58 @@
+name: Windows build
+
+on:
+  push:
+    branches:
+      - main
+      - feat/v0.1.0-mvp
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Cargo check
+        run: cargo check --all-targets
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Package Windows build
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target\release\windows-image-search.exe dist\windows-image-search.exe
+          Get-ChildItem target\release -Recurse -Filter *.dll -ErrorAction SilentlyContinue |
+            ForEach-Object {
+              $dest = Join-Path dist $_.Name
+              if (-not (Test-Path $dest)) { Copy-Item $_.FullName $dest }
+            }
+          Copy-Item README.md dist\README.md
+          Copy-Item LICENSE dist\LICENSE
+          Compress-Archive -Path dist\* -DestinationPath windows-image-search-win64.zip -Force
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-image-search-win64
+          path: windows-image-search-win64.zip
+          if-no-files-found: error
+          retention-days: 30
