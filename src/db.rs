@@ -54,7 +54,8 @@ pub fn open(db_path: &Path) -> Result<Connection> {
             color_histogram BLOB,
             color_histogram_dim INTEGER,
             embedding BLOB,
-            embedding_dim INTEGER
+            embedding_dim INTEGER,
+            last_seen_scan INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE INDEX IF NOT EXISTS idx_images_root ON images(root);
@@ -68,6 +69,16 @@ pub fn open(db_path: &Path) -> Result<Connection> {
     ensure_column(&conn, "images", "visual_hash", "INTEGER")?;
     ensure_column(&conn, "images", "color_histogram", "BLOB")?;
     ensure_column(&conn, "images", "color_histogram_dim", "INTEGER")?;
+    ensure_column(
+        &conn,
+        "images",
+        "last_seen_scan",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_images_root_scan ON images(root, last_seen_scan)",
+        [],
+    )?;
 
     Ok(conn)
 }
@@ -270,26 +281,42 @@ pub fn paths_missing_embedding(conn: &Connection) -> Result<Vec<PathBuf>> {
     Ok(rows.filter_map(|r| r.ok()).map(PathBuf::from).collect())
 }
 
-pub fn delete_missing_for_root(conn: &Connection, root: &Path, seen: &[PathBuf]) -> Result<usize> {
-    let root_text = root.to_string_lossy().to_string();
-    let mut stmt = conn.prepare("SELECT path FROM images WHERE root = ?1")?;
-    let existing: Vec<String> = stmt
-        .query_map(params![root_text], |row| row.get(0))?
-        .filter_map(|r| r.ok())
-        .collect();
+pub fn next_scan_generation(conn: &Connection) -> Result<i64> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(last_seen_scan), 0) FROM images",
+        [],
+        |row| row.get(0),
+    )?;
+    if current == i64::MAX {
+        conn.execute("UPDATE images SET last_seen_scan = 0", [])?;
+        Ok(1)
+    } else {
+        Ok((current + 1).max(1))
+    }
+}
 
-    let seen_set: std::collections::HashSet<String> = seen
-        .iter()
-        .map(|p| p.to_string_lossy().to_string())
-        .collect();
-
-    let mut removed = 0;
-    for path in existing {
-        if !seen_set.contains(&path) {
-            removed += conn.execute("DELETE FROM images WHERE path = ?1", params![path])?;
+pub fn mark_paths_seen<'a, I>(conn: &mut Connection, generation: i64, paths: I) -> Result<usize>
+where
+    I: IntoIterator<Item = &'a PathBuf>,
+{
+    let tx = conn.transaction()?;
+    let mut updated = 0usize;
+    {
+        let mut stmt = tx.prepare("UPDATE images SET last_seen_scan = ?1 WHERE path = ?2")?;
+        for path in paths {
+            updated += stmt.execute(params![generation, path.to_string_lossy().to_string()])?;
         }
     }
-    Ok(removed)
+    tx.commit()?;
+    Ok(updated)
+}
+
+pub fn delete_stale_for_root(conn: &Connection, root: &Path, generation: i64) -> Result<usize> {
+    let root_text = root.to_string_lossy().to_string();
+    Ok(conn.execute(
+        "DELETE FROM images WHERE root = ?1 AND last_seen_scan <> ?2",
+        params![root_text, generation],
+    )?)
 }
 
 pub fn load_images(db_path: &Path) -> Result<Vec<ImageRecord>> {
@@ -379,6 +406,52 @@ mod tests {
             "windows-image-search-{label}-{}-{nonce}.sqlite3",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn scan_generation_prunes_stale_rows_only_after_explicit_cleanup() {
+        let db_path = temp_db_path("scan-generation");
+        let root = std::env::temp_dir().join("windows-image-search-scan-root");
+        let present = root.join("present.jpg");
+        let stale = root.join("stale.jpg");
+
+        {
+            let mut conn = open(&db_path).unwrap();
+            for (path, name) in [(&present, "present.jpg"), (&stale, "stale.jpg")] {
+                upsert_image(
+                    &conn,
+                    path,
+                    &root,
+                    name,
+                    "jpg",
+                    100,
+                    200,
+                    16,
+                    16,
+                    "",
+                    "",
+                    [1, 2, 3],
+                    42,
+                    &[1.0],
+                )
+                .unwrap();
+            }
+
+            let generation = next_scan_generation(&conn).unwrap();
+            mark_paths_seen(&mut conn, generation, std::iter::once(&present)).unwrap();
+
+            // Simulate an interruption before cleanup: stale data must still exist.
+            assert_eq!(load_file_states(&conn).unwrap().len(), 2);
+
+            assert_eq!(delete_stale_for_root(&conn, &root, generation).unwrap(), 1);
+            let states = load_file_states(&conn).unwrap();
+            assert!(states.contains_key(&present));
+            assert!(!states.contains_key(&stale));
+        }
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(format!("{}-wal", db_path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", db_path.display()));
     }
 
     #[test]
