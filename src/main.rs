@@ -4,6 +4,7 @@ mod embedding;
 mod fs_watch;
 mod indexer;
 mod library_profile;
+mod material_eval;
 mod material_texture;
 mod metadata;
 mod model_benchmark;
@@ -29,6 +30,7 @@ enum StartupMode {
     ClipRuntimeBenchmark(usize),
     ImageModelBenchmark(usize),
     LibraryProfile,
+    MaterialEval(PathBuf),
     MaterialTextureBenchmark(usize),
 }
 
@@ -112,6 +114,16 @@ fn startup_mode() -> StartupMode {
         if arg == "--benchmark-library-profile" {
             return StartupMode::LibraryProfile;
         }
+        if let Some(value) = arg.strip_prefix("--benchmark-material-eval=") {
+            if !value.trim().is_empty() {
+                return StartupMode::MaterialEval(PathBuf::from(value));
+            }
+        }
+        if arg == "--benchmark-material-eval" {
+            if let Some(value) = args.next() {
+                return StartupMode::MaterialEval(PathBuf::from(value));
+            }
+        }
         if let Some(value) = arg.strip_prefix("--benchmark-material-texture=") {
             let samples = value
                 .parse::<usize>()
@@ -149,6 +161,10 @@ fn image_model_benchmark_report_path(db_path: &Path) -> PathBuf {
 
 fn library_profile_report_path(db_path: &Path) -> PathBuf {
     benchmark_report_path(db_path, "library-profile")
+}
+
+fn material_eval_report_path(db_path: &Path) -> PathBuf {
+    benchmark_report_path(db_path, "material-eval")
 }
 
 fn material_texture_benchmark_report_path(db_path: &Path) -> PathBuf {
@@ -192,8 +208,8 @@ fn main() -> eframe::Result<()> {
     });
     let _ = db::open(&db_path);
 
-    if let StartupMode::AnnBenchmark(query_count) = mode {
-        match ann::benchmark(&db_path, query_count) {
+    if let StartupMode::AnnBenchmark(query_count) = &mode {
+        match ann::benchmark(&db_path, *query_count) {
             Ok(report) => {
                 write_benchmark_report(&ann_benchmark_report_path(&db_path), &report, "ANN")
             }
@@ -202,8 +218,8 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
-    if let StartupMode::ClipPreviewBenchmark(sample_count) = mode {
-        match preview_benchmark::benchmark(&db_path, &model_cache, sample_count) {
+    if let StartupMode::ClipPreviewBenchmark(sample_count) = &mode {
+        match preview_benchmark::benchmark(&db_path, &model_cache, *sample_count) {
             Ok(report) => write_benchmark_report(
                 &preview_benchmark_report_path(&db_path),
                 &report,
@@ -214,8 +230,8 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
-    if let StartupMode::ClipRuntimeBenchmark(sample_count) = mode {
-        match runtime_benchmark::benchmark(&db_path, &model_cache, sample_count) {
+    if let StartupMode::ClipRuntimeBenchmark(sample_count) = &mode {
+        match runtime_benchmark::benchmark(&db_path, &model_cache, *sample_count) {
             Ok(report) => write_benchmark_report(
                 &runtime_benchmark_report_path(&db_path),
                 &report,
@@ -226,8 +242,8 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
-    if let StartupMode::ImageModelBenchmark(query_count) = mode {
-        match model_benchmark::benchmark(&db_path, &model_cache, query_count) {
+    if let StartupMode::ImageModelBenchmark(query_count) = &mode {
+        match model_benchmark::benchmark(&db_path, &model_cache, *query_count) {
             Ok(report) => write_benchmark_report(
                 &image_model_benchmark_report_path(&db_path),
                 &report,
@@ -250,8 +266,20 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
-    if let StartupMode::MaterialTextureBenchmark(sample_count) = mode {
-        match texture_benchmark::benchmark(&db_path, sample_count) {
+    if let StartupMode::MaterialEval(manifest_path) = &mode {
+        match material_eval::benchmark(&db_path, &model_cache, manifest_path) {
+            Ok(report) => write_benchmark_report(
+                &material_eval_report_path(&db_path),
+                &report,
+                "labeled material evaluation",
+            ),
+            Err(err) => eprintln!("Labeled material evaluation failed: {err:#}"),
+        }
+        return Ok(());
+    }
+
+    if let StartupMode::MaterialTextureBenchmark(sample_count) = &mode {
+        match texture_benchmark::benchmark(&db_path, *sample_count) {
             Ok(report) => write_benchmark_report(
                 &material_texture_benchmark_report_path(&db_path),
                 &report,
