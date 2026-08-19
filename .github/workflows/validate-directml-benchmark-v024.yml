@@ -1,0 +1,44 @@
+name: Validate DirectML benchmark v0.2.4
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.head_ref == 'perf/directml-batch-benchmark-v0.2.4'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/directml-batch-benchmark-v0.2.4
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all
+
+      - name: Check
+        run: cargo check --all-targets
+
+      - name: Test
+        run: cargo test --all-targets
+
+      - name: Commit validated source and lockfile
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock src\main.rs src\runtime_benchmark.rs
+          if (git status --porcelain -- Cargo.lock src\main.rs src\runtime_benchmark.rs) {
+            git commit -m "chore: sync v0.2.4 DirectML benchmark"
+            git push origin HEAD:perf/directml-batch-benchmark-v0.2.4
+          }
