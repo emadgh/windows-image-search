@@ -1,0 +1,35 @@
+name: Setup v0.2.0 performance roadmap
+
+on:
+  push:
+    branches: [chore/setup-v0.2.0-performance-roadmap]
+    paths:
+      - .github/workflows/setup-v0.2.0-performance-roadmap.yml
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create milestone and attach optimization issues
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TITLE='v0.2.0 Performance & Search Engine'
+          NUMBER="$(gh api --paginate "repos/$GITHUB_REPOSITORY/milestones?state=all&per_page=100" --jq ".[] | select(.title == \"$TITLE\") | .number" | head -n1)"
+          if [ -z "$NUMBER" ]; then
+            NUMBER="$(gh api --method POST "repos/$GITHUB_REPOSITORY/milestones" -f title="$TITLE" -f description='Performance roadmap: rescan state caching, scan generations, persistent embedding service, optimized hybrid scoring, lightweight UI records, FTS5, filesystem watching, thumbnail reuse, ANN/HNSW, hardware/model benchmarking, two-stage retrieval, and stronger material texture descriptors.' --jq .number)"
+          fi
+          for ISSUE in 21 22 23 24 25 26 27 28 29 30 31 32; do
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/$ISSUE" -F milestone="$NUMBER" >/dev/null
+          done
+          printf '{"milestone_number":%s,"title":"%s"}\n' "$NUMBER" "$TITLE" > milestone-status.json
+          CONTENT="$(base64 -w0 milestone-status.json)"
+          gh api --method PUT "repos/$GITHUB_REPOSITORY/contents/.milestone-v0.2.0-performance.json" \
+            -f message='chore: record v0.2.0 performance milestone' \
+            -f content="$CONTENT" \
+            -f branch='chore/setup-v0.2.0-performance-roadmap' >/dev/null
