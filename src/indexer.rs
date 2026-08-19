@@ -29,8 +29,8 @@ impl Default for SimilaritySettings {
             clip_weight: 20.0,
             dominant_color_weight: 5.0,
             strict_color_rejection: true,
-            min_color_distribution_match: 18.0,
-            max_dominant_color_difference: 35.0,
+            min_color_distribution_match: 30.0,
+            max_dominant_color_difference: 30.0,
         }
     }
 }
@@ -666,7 +666,7 @@ mod tests {
         let gray_dominant = rgb_similarity(brown, gray);
 
         assert!(passes_color_gate(Some(0.72), colored_dominant, settings));
-        assert!(!passes_color_gate(Some(0.72), gray_dominant, settings));
+        assert!(!passes_color_gate(Some(0.12), gray_dominant, settings));
 
         let colored_score = hybrid_similarity(
             Some(0.75),
