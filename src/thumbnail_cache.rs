@@ -11,6 +11,8 @@ use std::time::UNIX_EPOCH;
 
 pub const CACHE_EDGE: u32 = 512;
 const JPEG_QUALITY: u8 = 84;
+const PORTABLE_FNV_OFFSET: u64 = 0xcbf29ce484222325;
+const PORTABLE_FNV_PRIME: u64 = 0x100000001b3;
 
 pub fn cache_dir_for_db(db_path: &Path) -> PathBuf {
     db_path
@@ -19,13 +21,15 @@ pub fn cache_dir_for_db(db_path: &Path) -> PathBuf {
         .join("thumbnail-cache")
 }
 
+/// Legacy AppData cache identity. Keep the v0.2.9 DefaultHasher behavior so
+/// migration can still locate and copy existing thumbnail entries.
 pub fn cache_path(cache_dir: &Path, source: &Path) -> PathBuf {
-    cache_path_with_identity(cache_dir, source, source)
+    legacy_cache_path_with_identity(cache_dir, source, source)
 }
 
 pub fn cache_path_for_root(root: &Path, source: &Path) -> Result<PathBuf> {
     let relative = portable::relative_source_path(root, source)?;
-    Ok(cache_path_with_identity(
+    Ok(portable_cache_path_with_identity(
         &portable::thumbnail_dir(root),
         &relative,
         source,
@@ -74,7 +78,7 @@ pub fn load_or_build_for_root(root: &Path, source: &Path) -> Option<DynamicImage
     build_and_store(cache_path, source)
 }
 
-fn cache_path_with_identity(cache_dir: &Path, identity: &Path, source: &Path) -> PathBuf {
+fn legacy_cache_path_with_identity(cache_dir: &Path, identity: &Path, source: &Path) -> PathBuf {
     let mut hasher = DefaultHasher::new();
     identity.to_string_lossy().hash(&mut hasher);
     if let Ok(meta) = std::fs::metadata(source) {
@@ -89,19 +93,48 @@ fn cache_path_with_identity(cache_dir: &Path, identity: &Path, source: &Path) ->
     cache_dir.join(format!("{:016x}.jpg", hasher.finish()))
 }
 
-#[cfg(test)]
+fn portable_cache_path_with_identity(cache_dir: &Path, identity: &Path, source: &Path) -> PathBuf {
+    let (size, modified_secs, modified_nanos) = std::fs::metadata(source)
+        .ok()
+        .map(|meta| {
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok());
+            (
+                meta.len(),
+                modified.as_ref().map_or(0, |value| value.as_secs()),
+                modified.map_or(0, |value| value.subsec_nanos()),
+            )
+        })
+        .unwrap_or((0, 0, 0));
+    let key = portable_key_for_state(identity, size, modified_secs, modified_nanos);
+    cache_dir.join(format!("{key:016x}.jpg"))
+}
+
 fn portable_key_for_state(
     identity: &Path,
     size: u64,
     modified_secs: u64,
     modified_nanos: u32,
 ) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    identity.to_string_lossy().hash(&mut hasher);
-    size.hash(&mut hasher);
-    modified_secs.hash(&mut hasher);
-    modified_nanos.hash(&mut hasher);
-    hasher.finish()
+    let normalized = identity
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+    let mut hash = PORTABLE_FNV_OFFSET;
+    fn write(hash: &mut u64, bytes: &[u8]) {
+        for &byte in bytes {
+            *hash ^= byte as u64;
+            *hash = hash.wrapping_mul(PORTABLE_FNV_PRIME);
+        }
+    }
+    write(&mut hash, normalized.as_bytes());
+    write(&mut hash, &[0]);
+    write(&mut hash, &size.to_le_bytes());
+    write(&mut hash, &modified_secs.to_le_bytes());
+    write(&mut hash, &modified_nanos.to_le_bytes());
+    hash
 }
 
 fn load_cached_path(path: PathBuf) -> Option<DynamicImage> {
@@ -186,6 +219,21 @@ mod tests {
         assert_ne!(
             first,
             portable_key_for_state(Path::new("tiles/stone/other.jpg"), 12345, 55, 9)
+        );
+    }
+
+    #[test]
+    fn portable_key_normalizes_windows_separator_and_ascii_case() {
+        let first = portable_key_for_state(Path::new("Tiles\\Stone\\Face.JPG"), 123, 45, 6);
+        let second = portable_key_for_state(Path::new("tiles/stone/face.jpg"), 123, 45, 6);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn portable_key_has_a_stable_known_value() {
+        assert_eq!(
+            portable_key_for_state(Path::new("tiles/stone/face.jpg"), 12345, 55, 9),
+            0xe209b97304ad0b05
         );
     }
 
