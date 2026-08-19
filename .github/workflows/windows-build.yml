@@ -39,6 +39,22 @@ jobs:
           Write-Host "Application version: $version"
           Write-Host "Artifact: $artifact"
 
+      - name: PowerShell benchmark runner syntax
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          $scriptPath = (Resolve-Path "scripts\run-v0.2-benchmark-gate.ps1").Path
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            $scriptPath,
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Host $_ -ForegroundColor Red }
+            throw "Benchmark gate runner has PowerShell syntax errors"
+          }
+
       - name: Format check
         run: cargo fmt --all -- --check
 
@@ -60,6 +76,7 @@ jobs:
           Copy-Item target\release\windows-image-search.exe dist\windows-image-search.exe
           Get-ChildItem target\release -File -Filter *.dll -ErrorAction SilentlyContinue |
             ForEach-Object { Copy-Item $_.FullName (Join-Path dist $_.Name) }
+          Copy-Item scripts\run-v0.2-benchmark-gate.ps1 dist\run-v0.2-benchmark-gate.ps1
           Copy-Item README.md dist\README.md
           Copy-Item LICENSE dist\LICENSE
           Set-Content -Path dist\VERSION.txt -Value "v$version" -Encoding ascii
