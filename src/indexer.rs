@@ -129,16 +129,18 @@ fn rescan(
         existing_file_states.len()
     )));
     let mut traversal_errors = 0usize;
+    let mut prunable_roots = Vec::<PathBuf>::new();
     for root in roots {
         if !root.exists() {
             traversal_errors += 1;
             let _ = tx.send(WorkerMessage::Error(format!(
-                "Indexed root does not exist: {}",
+                "Indexed root does not exist; stale cleanup skipped for {}",
                 root.display()
             )));
             continue;
         }
 
+        let root_errors_before = traversal_errors;
         for entry in WalkDir::new(root).follow_links(false).into_iter() {
             match entry {
                 Ok(entry) => {
@@ -157,22 +159,24 @@ fn rescan(
                 }
             }
         }
+
+        if traversal_errors == root_errors_before {
+            prunable_roots.push(root.clone());
+        } else {
+            let _ = tx.send(WorkerMessage::Status(format!(
+                "Stale cleanup skipped for {} because traversal was incomplete",
+                root.display()
+            )));
+        }
     }
 
     let total = candidates.len();
-    let mut seen_by_root: std::collections::HashMap<PathBuf, Vec<PathBuf>> =
-        std::collections::HashMap::new();
     let mut pending = Vec::<PendingImage>::new();
 
     // Keep filesystem/SQLite state checks cheap and serialized, but move image
     // decoding + metadata extraction to a small worker pool below. Completed
     // batches are committed immediately so a crash does not discard the whole run.
     for (index, (root, path)) in candidates.iter().enumerate() {
-        seen_by_root
-            .entry(root.clone())
-            .or_default()
-            .push(path.clone());
-
         let meta = match std::fs::metadata(path) {
             Ok(meta) => meta,
             Err(err) => {
@@ -321,11 +325,21 @@ fn rescan(
         )));
     }
 
+    let scan_generation = db::next_scan_generation(&conn)?;
+    let marked = db::mark_paths_seen(
+        &mut conn,
+        scan_generation,
+        candidates.iter().map(|(_, path)| path),
+    )?;
     let mut removed = 0usize;
-    for root in roots {
-        let seen = seen_by_root.get(root).cloned().unwrap_or_default();
-        removed += db::delete_missing_for_root(&conn, root, &seen)?;
+    for root in &prunable_roots {
+        removed += db::delete_stale_for_root(&conn, root, scan_generation)?;
     }
+    let _ = tx.send(WorkerMessage::Status(format!(
+        "Scan generation {scan_generation}: {marked} persisted paths marked present; {removed} stale rows removed across {}/{} safe roots",
+        prunable_roots.len(),
+        roots.len()
+    )));
 
     let missing_visual = db::paths_missing_visual_descriptor(&conn)?;
     if !missing_visual.is_empty() {
