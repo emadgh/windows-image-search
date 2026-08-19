@@ -480,26 +480,6 @@ impl ImageSearchApp {
                         }
                     });
 
-                    ui.add_space(10.0);
-                    ui.separator();
-                    ui.strong("View");
-                    ui.horizontal(|ui| {
-                        ui.selectable_value(&mut self.view_mode, ViewMode::Grid, "▦ Grid");
-                        ui.selectable_value(&mut self.view_mode, ViewMode::Details, "☷ Details");
-                    });
-                    if self.view_mode == ViewMode::Grid {
-                        ui.add(
-                            egui::Slider::new(&mut self.thumb_size, 96.0..=512.0)
-                                .text("Thumbnail")
-                                .suffix(" px"),
-                        );
-                    }
-                    ui.horizontal(|ui| {
-                        ui.label("Image fit:");
-                        ui.selectable_value(&mut self.thumb_fit, ThumbnailFit::Contain, "Contain");
-                        ui.selectable_value(&mut self.thumb_fit, ThumbnailFit::Cover, "Cover");
-                    });
-
                     if !self.selected_paths.is_empty() {
                         ui.add_space(8.0);
                         ui.small(format!("{} selected", self.selected_paths.len()));
@@ -571,6 +551,36 @@ impl eframe::App for ImageSearchApp {
                 if self.similarity_results.is_some() {
                     ui.small("Hybrid similarity order using current weights");
                 }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let view_label = match self.view_mode {
+                        ViewMode::Grid => "▦ Grid",
+                        ViewMode::Details => "☷ Details",
+                    };
+                    if ui.button(view_label).clicked() {
+                        self.view_mode = match self.view_mode {
+                            ViewMode::Grid => ViewMode::Details,
+                            ViewMode::Details => ViewMode::Grid,
+                        };
+                    }
+
+                    let fit_label = match self.thumb_fit {
+                        ThumbnailFit::Contain => "Contain",
+                        ThumbnailFit::Cover => "Cover",
+                    };
+                    if ui.button(fit_label).clicked() {
+                        self.thumb_fit = match self.thumb_fit {
+                            ThumbnailFit::Contain => ThumbnailFit::Cover,
+                            ThumbnailFit::Cover => ThumbnailFit::Contain,
+                        };
+                    }
+
+                    ui.add(
+                        egui::Slider::new(&mut self.thumb_size, 96.0..=512.0)
+                            .text("Thumbnail")
+                            .suffix(" px"),
+                    );
+                });
             });
             ui.separator();
             if visible.is_empty() {
