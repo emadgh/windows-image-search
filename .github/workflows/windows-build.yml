@@ -39,9 +39,31 @@ jobs:
           $lines = $match.Groups[1].Value -split "`r?`n"
           $python = ($lines | ForEach-Object { $_ -replace '^          ', '' }) -join "`n"
           $python = $python.Replace("if count != 1:", "if count < 1:")
+          $python = $python -replace 'if count < 1:\n        raise SystemExit', "if count < 1:`n        if label == 'embedding batch size':`n            return text`n        raise SystemExit"
           $python | Set-Content -Encoding UTF8 patch_settings.py
           python patch_settings.py
           Remove-Item patch_settings.py
+
+          @'
+          from pathlib import Path
+          path = Path("src/indexer.rs")
+          text = path.read_text(encoding="utf-8")
+          if "let batch_size = indexing_settings.batch_size;" not in text:
+              needle = "    let total = paths.len();\n    for (batch_index, batch) in paths.chunks(16).enumerate() {\n"
+              replacement = "    let total = paths.len();\n    let batch_size = indexing_settings.batch_size;\n    for (batch_index, batch) in paths.chunks(batch_size).enumerate() {\n"
+              if needle not in text:
+                  raise SystemExit("cannot locate CLIP chunks(16) block")
+              text = text.replace(needle, replacement, 1)
+          if ".embed(batch_paths, Some(16))" in text:
+              text = text.replace(
+                  ".embed(batch_paths, Some(16))",
+                  ".embed(batch_paths, Some(batch_size))",
+                  1,
+              )
+          path.write_text(text, encoding="utf-8")
+          '@ | Set-Content -Encoding UTF8 fix_embedding_batch.py
+          python fix_embedding_batch.py
+          Remove-Item fix_embedding_batch.py
 
       - name: Format check
         run: |
