@@ -5,6 +5,7 @@ use crate::settings::IndexingSettings;
 use anyhow::{bail, Context, Result};
 use image::{imageops::FilterType, DynamicImage, GenericImageView, Pixel};
 use rayon::prelude::*;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
@@ -88,6 +89,7 @@ pub enum WorkerMessage {
     Progress { done: usize, total: usize },
     Reload,
     IndexedBatch(Vec<ImageSummary>),
+    RemovedPaths(Vec<PathBuf>),
     SimilarityResults(Vec<ImageSummary>),
     Error(String),
     Idle,
@@ -108,6 +110,248 @@ pub fn spawn_rescan(
         let _ = tx.send(WorkerMessage::Reload);
         let _ = tx.send(WorkerMessage::Idle);
     });
+}
+
+pub fn spawn_incremental_update(
+    db_path: PathBuf,
+    roots: Vec<PathBuf>,
+    changed_paths: Vec<PathBuf>,
+    indexing_settings: IndexingSettings,
+    embedding_service: EmbeddingService,
+    tx: Sender<WorkerMessage>,
+) {
+    std::thread::spawn(move || {
+        let result = incremental_update(
+            &db_path,
+            &roots,
+            &changed_paths,
+            indexing_settings,
+            &embedding_service,
+            &tx,
+        );
+        if let Err(err) = result {
+            let _ = tx.send(WorkerMessage::Error(format!(
+                "Live indexing failed: {err:#}"
+            )));
+        }
+        let _ = tx.send(WorkerMessage::Idle);
+    });
+}
+
+fn incremental_update(
+    db_path: &Path,
+    roots: &[PathBuf],
+    changed_paths: &[PathBuf],
+    indexing_settings: IndexingSettings,
+    embedding_service: &EmbeddingService,
+    tx: &Sender<WorkerMessage>,
+) -> Result<()> {
+    let indexing_settings = indexing_settings.sanitized();
+    let mut conn = db::open(db_path)?;
+    let existing_states = db::load_file_states(&conn)?;
+    let unique_paths: HashSet<PathBuf> = changed_paths.iter().cloned().collect();
+    let mut candidates = HashMap::<PathBuf, PathBuf>::new();
+    let mut removed_targets = Vec::<PathBuf>::new();
+
+    for changed in unique_paths {
+        let Some(root) = indexed_root_for_path(&changed, roots) else {
+            continue;
+        };
+        if changed.exists() {
+            if changed.is_file() {
+                if is_supported_image(&changed) {
+                    candidates.insert(changed, root.clone());
+                }
+            } else if changed.is_dir() {
+                for entry in WalkDir::new(&changed).follow_links(false).into_iter() {
+                    match entry {
+                        Ok(entry)
+                            if entry.file_type().is_file() && is_supported_image(entry.path()) =>
+                        {
+                            candidates.insert(entry.into_path(), root.clone());
+                        }
+                        Ok(_) => {}
+                        Err(err) => {
+                            let _ = tx.send(WorkerMessage::Error(format!(
+                                "Live subtree scan could not access {}: {err}",
+                                changed.display()
+                            )));
+                        }
+                    }
+                }
+            }
+        } else {
+            removed_targets.push(changed);
+        }
+    }
+
+    let mut removed_paths = Vec::<PathBuf>::new();
+    for target in removed_targets {
+        removed_paths.extend(db::delete_path_tree(&conn, &target)?);
+    }
+    removed_paths.sort();
+    removed_paths.dedup();
+    if !removed_paths.is_empty() {
+        let _ = tx.send(WorkerMessage::RemovedPaths(removed_paths.clone()));
+    }
+
+    let mut pending = Vec::<PendingImage>::new();
+    for (path, root) in candidates {
+        let meta = match std::fs::metadata(&path) {
+            Ok(meta) => meta,
+            Err(_) => continue,
+        };
+        let size = meta.len();
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs() as i64)
+            .unwrap_or(0);
+        let unchanged = existing_states
+            .get(&path)
+            .is_some_and(|state| state.size == size && state.modified == modified);
+        if !unchanged {
+            pending.push(PendingImage {
+                root,
+                path,
+                size,
+                modified,
+            });
+        }
+    }
+
+    if pending.is_empty() {
+        let _ = tx.send(WorkerMessage::Status(format!(
+            "Live index synchronized: 0 changed, {} removed",
+            removed_paths.len()
+        )));
+        return Ok(());
+    }
+
+    let workers = indexing_settings.decode_workers;
+    let batch_size = indexing_settings.batch_size;
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .thread_name(|index| format!("live-image-index-{index}"))
+        .build()
+        .context("creating live image indexing worker pool")?;
+    let mut committed_paths = Vec::<PathBuf>::new();
+    let total = pending.len();
+    let done = AtomicUsize::new(0);
+
+    for batch in pending.chunks(batch_size) {
+        let prepared: Vec<PreparedImage> = pool.install(|| {
+            batch
+                .par_iter()
+                .filter_map(|item| {
+                    let result = inspect_image(&item.path).map(
+                        |(width, height, dominant, visual_hash, color_histogram)| {
+                            let text = metadata::extract(&item.path);
+                            PreparedImage {
+                                root: item.root.clone(),
+                                path: item.path.clone(),
+                                file_name: item
+                                    .path
+                                    .file_name()
+                                    .and_then(|name| name.to_str())
+                                    .unwrap_or_default()
+                                    .to_owned(),
+                                extension: item
+                                    .path
+                                    .extension()
+                                    .and_then(|ext| ext.to_str())
+                                    .unwrap_or_default()
+                                    .to_ascii_lowercase(),
+                                size: item.size,
+                                modified: item.modified,
+                                width,
+                                height,
+                                description: text.description,
+                                keywords: text.keywords,
+                                dominant,
+                                visual_hash,
+                                color_histogram,
+                            }
+                        },
+                    );
+                    let current = done.fetch_add(1, Ordering::Relaxed) + 1;
+                    if current == total || current % 8 == 0 {
+                        let _ = tx.send(WorkerMessage::Status(format!(
+                            "Live indexing changed files: {current}/{total}"
+                        )));
+                    }
+                    match result {
+                        Ok(value) => Some(value),
+                        Err(err) => {
+                            let _ = tx.send(WorkerMessage::Error(format!(
+                                "Cannot decode changed image {}: {err:#}",
+                                item.path.display()
+                            )));
+                            None
+                        }
+                    }
+                })
+                .collect()
+        });
+
+        if prepared.is_empty() {
+            continue;
+        }
+        {
+            let transaction = conn.transaction()?;
+            for item in &prepared {
+                db::upsert_image(
+                    &transaction,
+                    &item.path,
+                    &item.root,
+                    &item.file_name,
+                    &item.extension,
+                    item.size,
+                    item.modified,
+                    item.width,
+                    item.height,
+                    &item.description,
+                    &item.keywords,
+                    item.dominant,
+                    item.visual_hash,
+                    &item.color_histogram,
+                )?;
+                committed_paths.push(item.path.clone());
+            }
+            transaction.commit()?;
+        }
+        let live_records = prepared.iter().map(PreparedImage::to_summary).collect();
+        let _ = tx.send(WorkerMessage::IndexedBatch(live_records));
+    }
+
+    if !committed_paths.is_empty() {
+        if let Err(err) = build_embeddings(
+            &mut conn,
+            &committed_paths,
+            indexing_settings,
+            embedding_service,
+            tx,
+        ) {
+            let _ = tx.send(WorkerMessage::Error(format!(
+                "Live metadata/visual index is ready, but CLIP update failed: {err:#}"
+            )));
+        }
+    }
+
+    let _ = tx.send(WorkerMessage::Status(format!(
+        "Live index synchronized: {} changed, {} removed",
+        committed_paths.len(),
+        removed_paths.len()
+    )));
+    Ok(())
+}
+
+fn indexed_root_for_path<'a>(path: &Path, roots: &'a [PathBuf]) -> Option<&'a PathBuf> {
+    roots
+        .iter()
+        .filter(|root| path.starts_with(root))
+        .max_by_key(|root| root.components().count())
 }
 
 fn rescan(

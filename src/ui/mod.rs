@@ -3,6 +3,7 @@ mod views;
 
 use crate::db::{self, ImageSummary};
 use crate::embedding::EmbeddingService;
+use crate::fs_watch::{FsWatchMessage, FsWatchService};
 use crate::indexer::{self, WorkerMessage};
 use crate::settings::{self, IndexingSettings};
 use crate::text_search::TextSearchService;
@@ -29,6 +30,9 @@ pub(super) enum ThumbnailFit {
 pub struct ImageSearchApp {
     pub(super) db_path: PathBuf,
     embedding_service: EmbeddingService,
+    fs_watch_service: FsWatchService,
+    pending_fs_paths: HashSet<PathBuf>,
+    watcher_reconcile_required: Option<String>,
     pub(super) roots: Vec<PathBuf>,
     pub(super) images: Vec<ImageSummary>,
     image_positions: HashMap<PathBuf, usize>,
@@ -74,6 +78,8 @@ impl ImageSearchApp {
         let indexing_settings = settings::load(&settings_path);
         let embedding_service = EmbeddingService::new(model_cache);
         let text_search_service = TextSearchService::new(db_path.clone());
+        let roots = db::load_roots(&db_path).unwrap_or_default();
+        let fs_watch_service = FsWatchService::new(roots.clone());
         let images = db::load_image_summaries(&db_path).unwrap_or_default();
         let image_positions = images
             .iter()
@@ -81,11 +87,14 @@ impl ImageSearchApp {
             .map(|(index, record)| (record.path.clone(), index))
             .collect();
         Self {
-            roots: db::load_roots(&db_path).unwrap_or_default(),
+            roots,
             images,
             image_positions,
             db_path,
             embedding_service,
+            fs_watch_service,
+            pending_fs_paths: HashSet::new(),
+            watcher_reconcile_required: None,
             similarity_results: None,
             query_image: None,
             similarity_settings: indexer::SimilaritySettings::default(),
@@ -129,6 +138,10 @@ impl ImageSearchApp {
                     self.merge_indexed_batch(records);
                     self.refresh_text_search_after_data_change();
                 }
+                WorkerMessage::RemovedPaths(paths) => {
+                    self.remove_indexed_paths(paths);
+                    self.refresh_text_search_after_data_change();
+                }
                 WorkerMessage::Reload => {
                     match db::load_image_summaries(&self.db_path) {
                         Ok(images) => {
@@ -155,6 +168,11 @@ impl ImageSearchApp {
                 }
             }
         }
+
+        if !self.busy && !self.pending_fs_paths.is_empty() {
+            let paths: Vec<PathBuf> = self.pending_fs_paths.drain().collect();
+            self.start_incremental_update(paths);
+        }
     }
 
     fn rebuild_image_positions(&mut self) {
@@ -169,6 +187,7 @@ impl ImageSearchApp {
 
     fn merge_indexed_batch(&mut self, records: Vec<ImageSummary>) {
         for record in records {
+            self.textures.remove(&record.path);
             if let Some(&index) = self.image_positions.get(&record.path) {
                 self.images[index] = record;
             } else {
@@ -177,6 +196,71 @@ impl ImageSearchApp {
                 self.images.push(record);
             }
         }
+    }
+
+    fn remove_indexed_paths(&mut self, paths: Vec<PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        let removed: HashSet<PathBuf> = paths.into_iter().collect();
+        self.images.retain(|record| !removed.contains(&record.path));
+        if let Some(results) = &mut self.similarity_results {
+            results.retain(|record| !removed.contains(&record.path));
+        }
+        for path in &removed {
+            self.textures.remove(path);
+            self.selected_paths.remove(path);
+        }
+        self.rebuild_image_positions();
+    }
+
+    fn process_fs_watch_messages(&mut self) {
+        while let Some(message) = self.fs_watch_service.try_recv() {
+            match message {
+                FsWatchMessage::PathsChanged(paths) => {
+                    if self.busy {
+                        self.pending_fs_paths.extend(paths);
+                    } else {
+                        self.start_incremental_update(paths);
+                    }
+                }
+                FsWatchMessage::ReconcileRequired(reason) => {
+                    self.watcher_reconcile_required = Some(reason.clone());
+                    self.status = reason;
+                }
+                FsWatchMessage::Status(status) => self.status = status,
+            }
+        }
+    }
+
+    fn start_incremental_update(&mut self, paths: Vec<PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        if self.busy {
+            self.pending_fs_paths.extend(paths);
+            return;
+        }
+        self.busy = true;
+        self.indexing = true;
+        self.watcher_reconcile_required = None;
+        self.allow_close = false;
+        self.close_confirmation_open = false;
+        self.similarity_results = None;
+        self.selected_paths.clear();
+        self.status = format!(
+            "Live filesystem update: {} changed path{} queued",
+            paths.len(),
+            if paths.len() == 1 { "" } else { "s" }
+        );
+        indexer::spawn_incremental_update(
+            self.db_path.clone(),
+            self.roots.clone(),
+            paths,
+            self.indexing_settings,
+            self.embedding_service.clone(),
+            self.tx.clone(),
+        );
     }
 
     fn process_thumbnail_messages(&mut self, ctx: &egui::Context) {
@@ -236,6 +320,7 @@ impl ImageSearchApp {
         match db::add_root(&self.db_path, &folder) {
             Ok(()) => {
                 self.roots = db::load_roots(&self.db_path).unwrap_or_default();
+                self.fs_watch_service.set_roots(self.roots.clone());
                 self.status = format!("Added {}", folder.display());
             }
             Err(err) => self.last_error = Some(format!("Cannot add folder: {err:#}")),
@@ -251,8 +336,10 @@ impl ImageSearchApp {
                 self.roots = db::load_roots(&self.db_path).unwrap_or_default();
                 self.images = db::load_image_summaries(&self.db_path).unwrap_or_default();
                 self.rebuild_image_positions();
+                self.fs_watch_service.set_roots(self.roots.clone());
                 self.similarity_results = None;
                 self.selected_paths.clear();
+                self.refresh_text_search_after_data_change();
             }
             Err(err) => self.last_error = Some(format!("Cannot remove folder: {err:#}")),
         }
@@ -463,6 +550,17 @@ impl ImageSearchApp {
                             }
                         });
                     }
+                }
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.heading("Live indexing");
+                ui.label(
+                    "Filesystem watching is ON. Create, modify, rename and delete events are debounced and indexed without a full root rescan.",
+                );
+                ui.small("Manual Rescan remains the reconciliation fallback for missed watcher events.");
+                if let Some(reason) = &self.watcher_reconcile_required {
+                    ui.colored_label(egui::Color32::LIGHT_RED, reason);
                 }
 
                 ui.add_space(12.0);
@@ -751,6 +849,7 @@ impl ImageSearchApp {
 impl eframe::App for ImageSearchApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_worker_messages();
+        self.process_fs_watch_messages();
         self.process_thumbnail_messages(ctx);
         self.observe_text_search_input();
         self.dispatch_text_search_if_due();
