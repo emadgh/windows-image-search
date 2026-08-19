@@ -1,4 +1,4 @@
-use crate::db;
+use crate::{ann, db, thumbnail_cache};
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
@@ -52,14 +52,21 @@ pub fn is_internal_path(root: &Path, path: &Path) -> bool {
 }
 
 pub fn relative_source_path(root: &Path, source: &Path) -> Result<PathBuf> {
-    let relative = source
-        .strip_prefix(root)
-        .with_context(|| format!("{} is outside indexed root {}", source.display(), root.display()))?;
+    let relative = source.strip_prefix(root).with_context(|| {
+        format!(
+            "{} is outside indexed root {}",
+            source.display(),
+            root.display()
+        )
+    })?;
     if relative.as_os_str().is_empty() {
         bail!("indexed source path cannot be the root directory itself");
     }
     if relative.components().any(|component| {
-        matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_))
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
     }) {
         bail!("indexed source path is not a safe root-relative path");
     }
@@ -69,10 +76,16 @@ pub fn relative_source_path(root: &Path, source: &Path) -> Result<PathBuf> {
 pub fn absolute_source_path(root: &Path, relative: &Path) -> Result<PathBuf> {
     if relative.is_absolute()
         || relative.components().any(|component| {
-            matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_))
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
         })
     {
-        bail!("portable index contains an unsafe source path: {}", relative.display());
+        bail!(
+            "portable index contains an unsafe source path: {}",
+            relative.display()
+        );
     }
     Ok(root.join(relative))
 }
@@ -92,7 +105,10 @@ pub fn prepare_registered_roots(session_db_path: &Path, roots: &[PathBuf]) -> Ve
             continue;
         }
         if let Err(err) = attach_root(session_db_path, root) {
-            warnings.push(format!("Cannot attach portable index {}: {err:#}", root.display()));
+            warnings.push(format!(
+                "Cannot attach portable index {}: {err:#}",
+                root.display()
+            ));
         }
     }
     warnings
@@ -117,6 +133,7 @@ pub fn attach_root(session_db_path: &Path, root: &Path) -> Result<AttachOutcome>
     if !ready {
         if legacy_count > 0 {
             replace_root_from_session(session_db_path, root)?;
+            migrate_legacy_thumbnails(session_db_path, root);
             migrated = true;
         } else if portable_count > 0 {
             // Protect a populated portable DB if metadata was lost/upgraded.
@@ -127,6 +144,9 @@ pub fn attach_root(session_db_path: &Path, root: &Path) -> Result<AttachOutcome>
     }
 
     let images = import_root_into_session(session_db_path, root, &library_id)?;
+    // ANN is a derived cache; a missing/stale dump must never make attachment
+    // fail because exact search can still use stored embeddings.
+    let _ = refresh_ann(root);
     Ok(AttachOutcome {
         library_id,
         images,
@@ -161,6 +181,44 @@ pub fn sync_paths_from_session(conn: &mut Connection, paths: &[PathBuf]) -> Resu
         mirror_paths_for_root(conn, &root, &root_paths)?;
     }
     Ok(())
+}
+
+pub fn refresh_ann(root: &Path) -> Result<bool> {
+    ann::prepare_index(&index_db_path(root))
+}
+
+fn migrate_legacy_thumbnails(session_db_path: &Path, root: &Path) {
+    let fallback = thumbnail_cache::cache_dir_for_db(session_db_path);
+    let Ok(conn) = db::open(session_db_path) else {
+        return;
+    };
+    let Ok(mut stmt) = conn.prepare("SELECT path FROM images WHERE root = ?1") else {
+        return;
+    };
+    let Ok(rows) = stmt.query_map(params![root.to_string_lossy().to_string()], |row| {
+        row.get::<_, String>(0)
+    }) else {
+        return;
+    };
+    let sources: Vec<PathBuf> = rows.filter_map(|row| row.ok()).map(PathBuf::from).collect();
+    drop(stmt);
+
+    for source in sources {
+        let old = thumbnail_cache::cache_path(&fallback, &source);
+        if !old.is_file() {
+            continue;
+        }
+        let Ok(new) = thumbnail_cache::cache_path_for_root(root, &source) else {
+            continue;
+        };
+        if new.exists() {
+            continue;
+        }
+        if let Some(parent) = new.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::copy(old, new);
+    }
 }
 
 pub fn remove_absolute_paths(roots: &[PathBuf], paths: &[PathBuf]) -> Result<()> {
@@ -205,7 +263,8 @@ pub fn replace_root_from_session(session_db_path: &Path, root: &Path) -> Result<
                 "INSERT INTO {ATTACHED_DB}.images({}) \
                  SELECT CASE WHEN path = ?1 THEN '' ELSE substr(path, length(?2) + 1) END, '', {} \
                  FROM main.images WHERE root = ?1",
-                image_columns_with_path(), image_columns_without_path_root()
+                image_columns_with_path(),
+                image_columns_without_path_root()
             ),
             params![root_text, prefix],
         )?;
@@ -238,9 +297,14 @@ fn mirror_paths_for_root(conn: &mut Connection, root: &Path, paths: &[PathBuf]) 
                 &format!(
                     "INSERT INTO {ATTACHED_DB}.images({}) \
                      SELECT ?1, '', {} FROM main.images WHERE path = ?2 AND root = ?3",
-                    image_columns_with_path(), image_columns_without_path_root()
+                    image_columns_with_path(),
+                    image_columns_without_path_root()
                 ),
-                params![relative.to_string_lossy().to_string(), absolute_text, root_text],
+                params![
+                    relative.to_string_lossy().to_string(),
+                    absolute_text,
+                    root_text
+                ],
             )?;
         }
         set_attached_meta(&tx, "schema_version", &PORTABLE_SCHEMA_VERSION.to_string())?;
@@ -252,7 +316,11 @@ fn mirror_paths_for_root(conn: &mut Connection, root: &Path, paths: &[PathBuf]) 
     result
 }
 
-fn import_root_into_session(session_db_path: &Path, root: &Path, library_id: &str) -> Result<usize> {
+fn import_root_into_session(
+    session_db_path: &Path,
+    root: &Path,
+    library_id: &str,
+) -> Result<usize> {
     let portable_path = index_db_path(root);
     let mut conn = db::open(session_db_path)?;
     ensure_session_registry(&conn)?;
@@ -263,14 +331,18 @@ fn import_root_into_session(session_db_path: &Path, root: &Path, library_id: &st
     let prefix = root_prefix(root);
     let result = (|| -> Result<usize> {
         let tx = conn.transaction()?;
-        tx.execute("INSERT OR IGNORE INTO roots(path) VALUES(?1)", params![root_text])?;
+        tx.execute(
+            "INSERT OR IGNORE INTO roots(path) VALUES(?1)",
+            params![root_text],
+        )?;
         tx.execute("DELETE FROM images WHERE root = ?1", params![root_text])?;
         let copied = tx.execute(
             &format!(
                 "INSERT INTO main.images({}) \
                  SELECT CASE WHEN path = '' THEN ?1 ELSE ?2 || path END, ?1, {} \
                  FROM {ATTACHED_DB}.images",
-                image_columns_with_path(), image_columns_without_path_root()
+                image_columns_with_path(),
+                image_columns_without_path_root()
             ),
             params![root_text, prefix],
         )?;
@@ -337,9 +409,7 @@ fn relocate_collection_table(
         };
         let relocated = new_root.join(relative).to_string_lossy().to_string();
         conn.execute(
-            &format!(
-                "INSERT OR IGNORE INTO {table}(collection_id, {path_column}) VALUES(?1, ?2)"
-            ),
+            &format!("INSERT OR IGNORE INTO {table}(collection_id, {path_column}) VALUES(?1, ?2)"),
             params![collection_id, relocated],
         )?;
         conn.execute(
@@ -366,15 +436,22 @@ fn ensure_portable_layout(root: &Path) -> Result<()> {
     if meta_value(&conn, "library_id")?.is_none() {
         set_meta(&conn, "library_id", &new_library_id(root))?;
     }
-    set_meta(&conn, "schema_version", &PORTABLE_SCHEMA_VERSION.to_string())?;
+    set_meta(
+        &conn,
+        "schema_version",
+        &PORTABLE_SCHEMA_VERSION.to_string(),
+    )?;
     Ok(())
 }
 
 fn portable_identity(root: &Path) -> Result<(String, bool, usize)> {
     let conn = db::open(&index_db_path(root))?;
-    let library_id = meta_value(&conn, "library_id")?.context("portable index has no library id")?;
+    let library_id =
+        meta_value(&conn, "library_id")?.context("portable index has no library id")?;
     let ready = meta_value(&conn, "migration_complete")?.as_deref() == Some("1");
-    let count = conn.query_row("SELECT COUNT(*) FROM images", [], |row| row.get::<_, i64>(0))?;
+    let count = conn.query_row("SELECT COUNT(*) FROM images", [], |row| {
+        row.get::<_, i64>(0)
+    })?;
     Ok((library_id, ready, count.max(0) as usize))
 }
 
@@ -488,7 +565,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("wis-portable-{label}-{}-{nonce}", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "wis-portable-{label}-{}-{nonce}",
+            std::process::id()
+        ))
     }
 
     #[test]
@@ -496,14 +576,20 @@ mod tests {
         let root = temp_dir("relative");
         let source = root.join("tiles").join("stone").join("face-01.jpg");
         let relative = relative_source_path(&root, &source).unwrap();
-        assert_eq!(relative, PathBuf::from("tiles").join("stone").join("face-01.jpg"));
+        assert_eq!(
+            relative,
+            PathBuf::from("tiles").join("stone").join("face-01.jpg")
+        );
         assert_eq!(absolute_source_path(&root, &relative).unwrap(), source);
     }
 
     #[test]
     fn internal_imagesearch_paths_are_never_source_images() {
         let root = temp_dir("internal");
-        assert!(is_internal_path(&root, &root.join(".imagesearch").join("thumbnails").join("a.jpg")));
+        assert!(is_internal_path(
+            &root,
+            &root.join(".imagesearch").join("thumbnails").join("a.jpg")
+        ));
         assert!(!is_internal_path(&root, &root.join("photos").join("a.jpg")));
     }
 
@@ -516,12 +602,18 @@ mod tests {
         let first_session = first_root.parent().unwrap().join(format!(
             "wis-portable-session-a-{}-{}.sqlite3",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         let second_session = first_session.with_file_name(format!(
             "wis-portable-session-b-{}-{}.sqlite3",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         let source = first_root.join("material").join("face.jpg");
 
@@ -557,7 +649,10 @@ mod tests {
         assert_eq!(second.images, 1);
         let summaries = db::load_image_summaries(&second_session).unwrap();
         assert_eq!(summaries.len(), 1);
-        assert_eq!(summaries[0].path, second_root.join("material").join("face.jpg"));
+        assert_eq!(
+            summaries[0].path,
+            second_root.join("material").join("face.jpg")
+        );
         assert_eq!(summaries[0].root, second_root);
         assert_eq!(db::load_ann_embeddings(&second_session).unwrap().len(), 1);
 

@@ -182,6 +182,12 @@ pub fn default_benchmark_queries() -> usize {
     DEFAULT_BENCHMARK_QUERIES
 }
 
+pub fn prepare_index(db_path: &Path) -> Result<bool> {
+    let index_dir = index_dir_for_db(db_path);
+    let (_, rebuilt) = ensure_manifest(db_path, &index_dir)?;
+    Ok(rebuilt)
+}
+
 fn ensure_manifest(db_path: &Path, index_dir: &Path) -> Result<(Manifest, bool)> {
     let signature = db::ann_index_signature(db_path)?;
     match load_manifest(index_dir) {

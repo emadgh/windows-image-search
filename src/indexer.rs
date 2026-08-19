@@ -9,8 +9,7 @@ use crate::thumbnail_cache;
 use anyhow::{bail, Context, Result};
 use image::{imageops::FilterType, DynamicImage, GenericImageView, Pixel};
 use rayon::prelude::*;
-use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
-use std::hash::Hasher;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
@@ -341,10 +340,13 @@ fn incremental_update(
                 )?;
                 db::set_material_texture(&transaction, &item.path, &item.material_texture)?;
                 db::set_content_fingerprint(&transaction, &item.path, item.content_fingerprint)?;
+                db::set_content_fingerprint(&transaction, &item.path, item.content_fingerprint)?;
                 committed_paths.push(item.path.clone());
             }
             transaction.commit()?;
         }
+        let prepared_paths: Vec<PathBuf> = prepared.iter().map(|item| item.path.clone()).collect();
+        portable::sync_paths_from_session(&mut conn, &prepared_paths)?;
         let live_records = prepared.iter().map(PreparedImage::to_summary).collect();
         let _ = tx.send(WorkerMessage::IndexedBatch(live_records));
     }
@@ -595,9 +597,12 @@ fn rescan(
                 )?;
                 db::set_material_texture(&transaction, &item.path, &item.material_texture)?;
                 db::set_content_fingerprint(&transaction, &item.path, item.content_fingerprint)?;
+                db::set_content_fingerprint(&transaction, &item.path, item.content_fingerprint)?;
             }
             transaction.commit()?;
         }
+        let prepared_paths: Vec<PathBuf> = prepared.iter().map(|item| item.path.clone()).collect();
+        portable::sync_paths_from_session(&mut conn, &prepared_paths)?;
 
         changed += prepared.len();
         let live_records = prepared.iter().map(PreparedImage::to_summary).collect();
@@ -699,11 +704,15 @@ fn build_visual_descriptors(
         let committed_before_batch = committed;
         // Hold only one bounded descriptor batch in memory. Each successfully
         // decoded batch is committed before the next batch is decoded.
-        let descriptors: Vec<(PathBuf, u64, Vec<f32>, Vec<f32>)> = pool.install(|| {
+        let descriptors: Vec<(PathBuf, u64, Vec<f32>, Vec<f32>, u64)> = pool.install(|| {
             batch
                 .par_iter()
                 .filter_map(|path| {
-                    let result = decode_image(path).map(|image| visual_descriptor(&image));
+                    let result = decode_image(path).map(|image| {
+                        let fingerprint = decoded_content_fingerprint(&image);
+                        let (_, visual_hash, color_histogram, material_texture) = visual_descriptor(&image);
+                        (visual_hash, color_histogram, material_texture, fingerprint)
+                    });
                     let current = decoded.fetch_add(1, Ordering::Relaxed) + 1;
                     if current % 16 == 0 || current == total {
                         let _ = tx.send(WorkerMessage::Status(format!(
@@ -711,9 +720,13 @@ fn build_visual_descriptors(
                         )));
                     }
                     match result {
-                        Ok((_, visual_hash, color_histogram, material_texture)) => {
-                            Some((path.clone(), visual_hash, color_histogram, material_texture))
-                        }
+                        Ok((visual_hash, color_histogram, material_texture, fingerprint)) => Some((
+                            path.clone(),
+                            visual_hash,
+                            color_histogram,
+                            material_texture,
+                            fingerprint,
+                        )),
                         Err(err) => {
                             failed.fetch_add(1, Ordering::Relaxed);
                             let _ = tx.send(WorkerMessage::Error(format!(
@@ -733,12 +746,19 @@ fn build_visual_descriptors(
 
         {
             let transaction = conn.transaction()?;
-            for (path, visual_hash, color_histogram, material_texture) in &descriptors {
+            for (path, visual_hash, color_histogram, material_texture, fingerprint) in &descriptors
+            {
                 db::set_visual_descriptor(&transaction, path, *visual_hash, color_histogram)?;
                 db::set_material_texture(&transaction, path, material_texture)?;
+                db::set_content_fingerprint(&transaction, path, *fingerprint)?;
             }
             transaction.commit()?;
         }
+        let descriptor_paths: Vec<PathBuf> = descriptors
+            .iter()
+            .map(|(path, _, _, _, _)| path.clone())
+            .collect();
+        portable::sync_paths_from_session(conn, &descriptor_paths)?;
 
         committed += descriptors.len();
         let _ = tx.send(WorkerMessage::Status(format!(
@@ -1385,11 +1405,23 @@ fn inspect_image(
 }
 
 fn decoded_content_fingerprint(image: &DynamicImage) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    hasher.write_u32(image.width());
-    hasher.write_u32(image.height());
-    hasher.write(image.as_bytes());
-    hasher.finish()
+    // Stable FNV-1a fingerprint. Unlike DefaultHasher, this value is defined by
+    // us and remains comparable across Rust/application upgrades. Hash decoded
+    // pixels while they are already resident so verification adds no HDD read.
+    const OFFSET: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+    let mut hash = OFFSET;
+    for byte in image
+        .width()
+        .to_le_bytes()
+        .into_iter()
+        .chain(image.height().to_le_bytes())
+        .chain(image.as_bytes().iter().copied())
+    {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
 }
 
 fn decode_image(path: &Path) -> Result<DynamicImage> {
