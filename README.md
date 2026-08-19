@@ -41,23 +41,57 @@ Enable the explicit color filter, choose a target color and adjust tolerance. Co
 
 Click **Search by image**, choose a query image, and use the similarity sliders to control color distribution, texture/pattern, CLIP semantic and dominant-color influence. Large libraries use bounded candidate generation and HNSW semantic retrieval before exact hybrid reranking.
 
-## ANN benchmark
+## Diagnostic benchmarks
 
-v0.2.1 and later include a diagnostic benchmark for comparing persisted HNSW retrieval against exact brute-force CLIP ranking on the currently indexed library.
+Benchmarks are opt-in CLI diagnostics. They do not change normal GUI/indexing/search behavior and write timestamped reports beside the application database in the `WindowsImageSearch` local-data directory.
+
+### ANN retrieval
+
+Compare persisted HNSW retrieval against exact brute-force CLIP ranking on the current indexed library:
 
 ```powershell
 .\windows-image-search.exe --benchmark-ann 32
 ```
 
-The optional number controls how many indexed embeddings are sampled as queries. The default is 32. The benchmark reports:
+The benchmark reports HNSW prepare/load time, ANN and exact latency, speedup, and Recall@10/50/100.
 
-- HNSW index prepare/load time
-- ANN average, p50 and p95 query latency
-- exact brute-force average, p50 and p95 latency
-- warm-query speedup
-- Recall@10, Recall@50 and Recall@100
+### Cached-preview CLIP quality
 
-A timestamped report such as `ann-benchmark-v0.2.1-YYYYMMDD-HHMMSS.txt` is also saved beside the application database in the `WindowsImageSearch` local-data directory.
+Measure the quality and speed impact of embedding cached image previews instead of full source images:
+
+```powershell
+.\windows-image-search.exe --benchmark-clip-preview 64
+```
+
+This diagnostic reports pair cosine similarity, retrieval agreement/recall and timing without changing production CLIP input behavior.
+
+### CLIP CPU vs DirectML runtime
+
+Compare available CLIP runtime backends and batch sizes on local hardware:
+
+```powershell
+.\windows-image-search.exe --benchmark-clip-runtime 64
+```
+
+Production inference remains unchanged; the command is intended to collect evidence before changing backend defaults.
+
+### Material texture robustness
+
+Evaluate the compact material descriptor against 64-bit dHash on the current indexed corpus:
+
+```powershell
+.\windows-image-search.exe --benchmark-material-texture 24
+```
+
+The benchmark deterministically samples indexed images and creates center-crop, off-center crop/layout-shift and reduced-resolution queries. It compares:
+
+- 64-bit dHash
+- multi-scale gradient/HOG-like descriptor component
+- rotation-normalized LBP component
+- combined material descriptor
+- the current production material + dHash blend
+
+It reports Recall@1/5/10, MRR, mean source-image rank, descriptor-computation latency and full-corpus ranking latency, including per-transform results. The transformed query's original indexed image is the automated ground truth; representative same-material tests across different tile/marble/stone faces are still required before considering the material-texture roadmap complete.
 
 To print the application version:
 
@@ -74,7 +108,7 @@ cargo test --all-targets
 cargo run --release
 ```
 
-Windows CI reads the package version from `Cargo.toml` and uploads a versioned artifact such as `windows-image-search-v0.2.1-win64`. The ZIP contains the stable executable name `windows-image-search.exe`, `README.md`, `LICENSE` and `VERSION.txt`.
+Windows CI reads the package version from `Cargo.toml` and uploads a versioned artifact such as `windows-image-search-v0.2.4-win64`. The ZIP contains the stable executable name `windows-image-search.exe`, `README.md`, `LICENSE` and `VERSION.txt`.
 
 ## Privacy
 
