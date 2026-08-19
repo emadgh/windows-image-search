@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use rusqlite::{params, params_from_iter, Connection};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -66,6 +66,7 @@ pub fn open(db_path: &Path) -> Result<Connection> {
         .with_context(|| format!("opening database {}", db_path.display()))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS roots (
@@ -97,6 +98,30 @@ pub fn open(db_path: &Path) -> Result<Connection> {
 
         CREATE INDEX IF NOT EXISTS idx_images_root ON images(root);
         CREATE INDEX IF NOT EXISTS idx_images_file_name ON images(file_name);
+
+        CREATE TABLE IF NOT EXISTS collections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL COLLATE NOCASE UNIQUE
+        );
+
+        CREATE TABLE IF NOT EXISTS collection_folders (
+            collection_id INTEGER NOT NULL,
+            folder_path TEXT NOT NULL COLLATE NOCASE,
+            PRIMARY KEY(collection_id, folder_path),
+            FOREIGN KEY(collection_id) REFERENCES collections(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS collection_files (
+            collection_id INTEGER NOT NULL,
+            file_path TEXT NOT NULL COLLATE NOCASE,
+            PRIMARY KEY(collection_id, file_path),
+            FOREIGN KEY(collection_id) REFERENCES collections(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_collection_folders_collection
+            ON collection_folders(collection_id);
+        CREATE INDEX IF NOT EXISTS idx_collection_files_collection
+            ON collection_files(collection_id);
         "#,
     )?;
 
@@ -275,6 +300,173 @@ pub fn remove_root(db_path: &Path, root: &Path) -> Result<()> {
     tx.execute("DELETE FROM images WHERE root = ?1", params![root_text])?;
     tx.commit()?;
     Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Collection {
+    pub id: i64,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CollectionMembership {
+    pub folders: Vec<PathBuf>,
+    pub files: Vec<PathBuf>,
+}
+
+pub fn load_collections(db_path: &Path) -> Result<Vec<Collection>> {
+    let conn = open(db_path)?;
+    let mut stmt = conn.prepare("SELECT id, name FROM collections ORDER BY name COLLATE NOCASE")?;
+    let rows = stmt.query_map([], |row| {
+        Ok(Collection {
+            id: row.get(0)?,
+            name: row.get(1)?,
+        })
+    })?;
+    Ok(rows.filter_map(|row| row.ok()).collect())
+}
+
+pub fn create_collection(db_path: &Path, name: &str) -> Result<Collection> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("collection name cannot be empty");
+    }
+    let conn = open(db_path)?;
+    conn.execute("INSERT INTO collections(name) VALUES(?1)", params![name])?;
+    Ok(Collection {
+        id: conn.last_insert_rowid(),
+        name: name.to_owned(),
+    })
+}
+
+pub fn rename_collection(db_path: &Path, collection_id: i64, name: &str) -> Result<()> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("collection name cannot be empty");
+    }
+    let conn = open(db_path)?;
+    let changed = conn.execute(
+        "UPDATE collections SET name = ?2 WHERE id = ?1",
+        params![collection_id, name],
+    )?;
+    if changed == 0 {
+        bail!("collection no longer exists");
+    }
+    Ok(())
+}
+
+pub fn delete_collection(db_path: &Path, collection_id: i64) -> Result<()> {
+    let conn = open(db_path)?;
+    conn.execute(
+        "DELETE FROM collections WHERE id = ?1",
+        params![collection_id],
+    )?;
+    Ok(())
+}
+
+pub fn add_collection_folders(
+    db_path: &Path,
+    collection_id: i64,
+    folders: &[PathBuf],
+) -> Result<usize> {
+    let mut conn = open(db_path)?;
+    let tx = conn.transaction()?;
+    let mut inserted = 0usize;
+    {
+        let mut stmt = tx.prepare(
+            "INSERT OR IGNORE INTO collection_folders(collection_id, folder_path) VALUES(?1, ?2)",
+        )?;
+        for folder in folders {
+            inserted +=
+                stmt.execute(params![collection_id, folder.to_string_lossy().to_string()])?;
+        }
+    }
+    tx.commit()?;
+    Ok(inserted)
+}
+
+pub fn add_collection_files(
+    db_path: &Path,
+    collection_id: i64,
+    files: &[PathBuf],
+) -> Result<usize> {
+    let mut conn = open(db_path)?;
+    let tx = conn.transaction()?;
+    let mut inserted = 0usize;
+    {
+        let mut stmt = tx.prepare(
+            "INSERT OR IGNORE INTO collection_files(collection_id, file_path) VALUES(?1, ?2)",
+        )?;
+        for file in files {
+            inserted += stmt.execute(params![collection_id, file.to_string_lossy().to_string()])?;
+        }
+    }
+    tx.commit()?;
+    Ok(inserted)
+}
+
+pub fn remove_collection_folder(db_path: &Path, collection_id: i64, folder: &Path) -> Result<()> {
+    let conn = open(db_path)?;
+    conn.execute(
+        "DELETE FROM collection_folders WHERE collection_id = ?1 AND folder_path = ?2",
+        params![collection_id, folder.to_string_lossy().to_string()],
+    )?;
+    Ok(())
+}
+
+pub fn remove_collection_file(db_path: &Path, collection_id: i64, file: &Path) -> Result<()> {
+    let conn = open(db_path)?;
+    conn.execute(
+        "DELETE FROM collection_files WHERE collection_id = ?1 AND file_path = ?2",
+        params![collection_id, file.to_string_lossy().to_string()],
+    )?;
+    Ok(())
+}
+
+pub fn load_collection_membership(
+    db_path: &Path,
+    collection_id: i64,
+) -> Result<CollectionMembership> {
+    let conn = open(db_path)?;
+    let folders = {
+        let mut stmt = conn.prepare(
+            "SELECT folder_path FROM collection_folders WHERE collection_id = ?1 ORDER BY folder_path COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map(params![collection_id], |row| row.get::<_, String>(0))?;
+        rows.filter_map(|row| row.ok()).map(PathBuf::from).collect()
+    };
+    let files = {
+        let mut stmt = conn.prepare(
+            "SELECT file_path FROM collection_files WHERE collection_id = ?1 ORDER BY file_path COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map(params![collection_id], |row| row.get::<_, String>(0))?;
+        rows.filter_map(|row| row.ok()).map(PathBuf::from).collect()
+    };
+    Ok(CollectionMembership { folders, files })
+}
+
+pub fn load_collection_effective_paths(
+    db_path: &Path,
+    collection_id: i64,
+) -> Result<std::collections::HashSet<PathBuf>> {
+    let membership = load_collection_membership(db_path, collection_id)?;
+    let manual: std::collections::HashSet<&Path> =
+        membership.files.iter().map(PathBuf::as_path).collect();
+    let conn = open(db_path)?;
+    let mut stmt = conn.prepare("SELECT path FROM images")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let mut effective = std::collections::HashSet::new();
+    for path in rows.filter_map(|row| row.ok()).map(PathBuf::from) {
+        if manual.contains(path.as_path())
+            || membership
+                .folders
+                .iter()
+                .any(|folder| path.starts_with(folder))
+        {
+            effective.insert(path);
+        }
+    }
+    Ok(effective)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -638,6 +830,73 @@ mod tests {
             "windows-image-search-{label}-{}-{nonce}.sqlite3",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn collections_persist_deduplicate_recursive_membership_and_delete_safely() {
+        let db_path = temp_db_path("collections");
+        let root = std::env::temp_dir().join("windows-image-search-collection-root");
+        let assigned = root.join("assigned");
+        let first = assigned.join("first.jpg");
+        let nested = assigned.join("nested").join("second.jpg");
+        let manual = root.join("manual.jpg");
+
+        {
+            let conn = open(&db_path).unwrap();
+            for path in [&first, &nested, &manual] {
+                let name = path.file_name().unwrap().to_string_lossy();
+                upsert_image(
+                    &conn,
+                    path,
+                    &root,
+                    &name,
+                    "jpg",
+                    1,
+                    1,
+                    8,
+                    8,
+                    "",
+                    "",
+                    [1, 2, 3],
+                    1,
+                    &[1.0],
+                )
+                .unwrap();
+            }
+        }
+
+        let collection = create_collection(&db_path, "Materials").unwrap();
+        add_collection_folders(&db_path, collection.id, std::slice::from_ref(&assigned)).unwrap();
+        add_collection_files(&db_path, collection.id, &[first.clone(), manual.clone()]).unwrap();
+
+        let persisted = load_collections(&db_path).unwrap();
+        assert_eq!(persisted, vec![collection.clone()]);
+        let membership = load_collection_membership(&db_path, collection.id).unwrap();
+        assert_eq!(membership.folders, vec![assigned.clone()]);
+        assert_eq!(membership.files.len(), 2);
+
+        // first.jpg belongs both through the folder and explicitly, but appears once.
+        let effective = load_collection_effective_paths(&db_path, collection.id).unwrap();
+        assert_eq!(effective.len(), 3);
+        assert!(effective.contains(&first));
+        assert!(effective.contains(&nested));
+        assert!(effective.contains(&manual));
+
+        rename_collection(&db_path, collection.id, "Stone Library").unwrap();
+        assert_eq!(load_collections(&db_path).unwrap()[0].name, "Stone Library");
+
+        delete_collection(&db_path, collection.id).unwrap();
+        assert!(load_collections(&db_path).unwrap().is_empty());
+        assert!(load_collection_membership(&db_path, collection.id)
+            .unwrap()
+            .folders
+            .is_empty());
+        // Deleting a collection must never delete indexed/source image records.
+        assert_eq!(load_file_states(&open(&db_path).unwrap()).unwrap().len(), 3);
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(format!("{}-wal", db_path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", db_path.display()));
     }
 
     #[test]
