@@ -5,11 +5,11 @@ def patch_file(path: str, replacements):
     p = Path(path)
     text = p.read_text(encoding="utf-8")
     for old, new in replacements:
-        if new in text:
-            continue
         count = text.count(old)
-        if count != 1:
-            raise SystemExit(f"{path}: expected one match, found {count}: {old[:100]!r}")
+        if count < 1:
+            if new in text:
+                continue
+            raise SystemExit(f"{path}: expected at least one match, found 0: {old[:100]!r}")
         text = text.replace(old, new, 1)
     p.write_text(text, encoding="utf-8")
 
