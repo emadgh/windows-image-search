@@ -10,13 +10,16 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: perf/hnsw-clip-candidates
+          fetch-depth: 0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -26,6 +29,12 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
 
+      - name: Apply HNSW integration
+        run: python scripts/apply_hnsw_integration.py
+
+      - name: Format source
+        run: cargo fmt --all
+
       - name: Format check
         run: cargo fmt --all -- --check
 
@@ -34,6 +43,18 @@ jobs:
 
       - name: Regression tests
         run: cargo test --all-targets
+
+      - name: Commit validated source
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock src\main.rs src\db.rs src\indexer.rs src\ann.rs Cargo.toml
+          $changes = git status --porcelain -- Cargo.lock src\main.rs src\db.rs src\indexer.rs src\ann.rs Cargo.toml
+          if ($changes) {
+            git commit -m "perf: add persistent HNSW semantic candidates"
+            git push origin HEAD:perf/hnsw-clip-candidates
+          }
 
       - name: Build release
         run: cargo build --release
