@@ -43,5 +43,7 @@ jobs:
           git add Cargo.lock Cargo.toml src\indexer.rs
           if (git status --porcelain -- Cargo.lock Cargo.toml src\indexer.rs) {
             git commit -m "perf: bound visual descriptor backfill batches"
-            git push origin HEAD:perf/bounded-visual-backfill-v0.2.6
           }
+          git fetch origin perf/bounded-visual-backfill-v0.2.6
+          git rebase origin/perf/bounded-visual-backfill-v0.2.6
+          git push origin HEAD:perf/bounded-visual-backfill-v0.2.6
