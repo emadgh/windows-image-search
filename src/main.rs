@@ -8,6 +8,7 @@ mod material_eval;
 mod material_texture;
 mod metadata;
 mod model_benchmark;
+mod portable;
 mod preview_benchmark;
 mod runtime_benchmark;
 mod settings;

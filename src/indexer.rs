@@ -3,12 +3,14 @@ use crate::db::{self, ImageRecord, ImageSummary};
 use crate::embedding::EmbeddingService;
 use crate::material_texture;
 use crate::metadata;
+use crate::portable;
 use crate::settings::{ClipExecutionProvider, IndexingSettings};
 use crate::thumbnail_cache;
 use anyhow::{bail, Context, Result};
 use image::{imageops::FilterType, DynamicImage, GenericImageView, Pixel};
 use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
+use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
@@ -43,6 +45,7 @@ struct PreparedImage {
     visual_hash: u64,
     color_histogram: Vec<f32>,
     material_texture: Vec<f32>,
+    content_fingerprint: u64,
 }
 
 impl PreparedImage {
@@ -170,7 +173,11 @@ fn incremental_update(
                     candidates.insert(changed, root.clone());
                 }
             } else if changed.is_dir() {
-                for entry in WalkDir::new(&changed).follow_links(false).into_iter() {
+                for entry in WalkDir::new(&changed)
+                    .follow_links(false)
+                    .into_iter()
+                    .filter_entry(|entry| entry.file_name() != portable::INDEX_DIR_NAME)
+                {
                     match entry {
                         Ok(entry)
                             if entry.file_type().is_file() && is_supported_image(entry.path()) =>
@@ -199,6 +206,7 @@ fn incremental_update(
     removed_paths.sort();
     removed_paths.dedup();
     if !removed_paths.is_empty() {
+        portable::remove_absolute_paths(roots, &removed_paths)?;
         let _ = tx.send(WorkerMessage::RemovedPaths(removed_paths.clone()));
     }
 
@@ -215,17 +223,14 @@ fn incremental_update(
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
             .map(|duration| duration.as_secs() as i64)
             .unwrap_or(0);
-        let unchanged = existing_states
-            .get(&path)
-            .is_some_and(|state| state.size == size && state.modified == modified);
-        if !unchanged {
-            pending.push(PendingImage {
-                root,
-                path,
-                size,
-                modified,
-            });
-        }
+        // A filesystem watcher explicitly reported this path. Reindex it even when
+        // size/mtime were preserved by a copy/replace operation.
+        pending.push(PendingImage {
+            root,
+            path,
+            size,
+            modified,
+        });
     }
 
     if pending.is_empty() {
@@ -252,7 +257,7 @@ fn incremental_update(
             batch
                 .par_iter()
                 .filter_map(|item| {
-                    let result = inspect_image(&item.path, &thumbnail_cache_dir).map(
+                    let result = inspect_image(&item.path, &item.root).map(
                         |(
                             width,
                             height,
@@ -260,6 +265,7 @@ fn incremental_update(
                             visual_hash,
                             color_histogram,
                             material_texture,
+                            content_fingerprint,
                         )| {
                             let text = metadata::extract(&item.path);
                             PreparedImage {
@@ -287,6 +293,7 @@ fn incremental_update(
                                 visual_hash,
                                 color_histogram,
                                 material_texture,
+                                content_fingerprint,
                             }
                         },
                     );
@@ -333,6 +340,7 @@ fn incremental_update(
                     &item.color_histogram,
                 )?;
                 db::set_material_texture(&transaction, &item.path, &item.material_texture)?;
+                db::set_content_fingerprint(&transaction, &item.path, item.content_fingerprint)?;
                 committed_paths.push(item.path.clone());
             }
             transaction.commit()?;
@@ -355,6 +363,8 @@ fn incremental_update(
         }
     }
 
+    portable::sync_paths_from_session(&mut conn, &committed_paths)?;
+
     let _ = tx.send(WorkerMessage::Status(format!(
         "Live index synchronized: {} changed, {} removed",
         committed_paths.len(),
@@ -364,10 +374,7 @@ fn incremental_update(
 }
 
 fn indexed_root_for_path<'a>(path: &Path, roots: &'a [PathBuf]) -> Option<&'a PathBuf> {
-    roots
-        .iter()
-        .filter(|root| path.starts_with(root))
-        .max_by_key(|root| root.components().count())
+    portable::indexed_root_for_path(path, roots)
 }
 
 fn rescan(
@@ -400,7 +407,11 @@ fn rescan(
         }
 
         let root_errors_before = traversal_errors;
-        for entry in WalkDir::new(root).follow_links(false).into_iter() {
+        for entry in WalkDir::new(root)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|entry| entry.file_name() != portable::INDEX_DIR_NAME)
+        {
             match entry {
                 Ok(entry) => {
                     if entry.file_type().is_file() && is_supported_image(entry.path()) {
@@ -497,7 +508,7 @@ fn rescan(
             batch
                 .par_iter()
                 .filter_map(|item| {
-                    let result = inspect_image(&item.path, &thumbnail_cache_dir).map(
+                    let result = inspect_image(&item.path, &item.root).map(
                         |(
                             width,
                             height,
@@ -505,6 +516,7 @@ fn rescan(
                             visual_hash,
                             color_histogram,
                             material_texture,
+                            content_fingerprint,
                         )| {
                             let text = metadata::extract(&item.path);
                             PreparedImage {
@@ -532,6 +544,7 @@ fn rescan(
                                 visual_hash,
                                 color_histogram,
                                 material_texture,
+                                content_fingerprint,
                             }
                         },
                     );
@@ -581,6 +594,7 @@ fn rescan(
                     &item.color_histogram,
                 )?;
                 db::set_material_texture(&transaction, &item.path, &item.material_texture)?;
+                db::set_content_fingerprint(&transaction, &item.path, item.content_fingerprint)?;
             }
             transaction.commit()?;
         }
@@ -635,6 +649,12 @@ fn rescan(
             let _ = tx.send(WorkerMessage::Error(format!(
                 "Texture/color index is ready, but CLIP indexing is unavailable: {err:#}"
             )));
+        }
+    }
+
+    for root in roots {
+        if root.exists() {
+            portable::replace_root_from_session(db_path, root)?;
         }
     }
 
@@ -797,6 +817,7 @@ fn build_embeddings(
             }
             transaction.commit()?;
         }
+        portable::sync_paths_from_session(conn, batch)?;
         let done = ((batch_index + 1) * batch_size).min(total);
         let _ = tx.send(WorkerMessage::Status(format!(
             "Building CLIP index: {done}/{total} (committed; persistent model)"
@@ -1340,16 +1361,17 @@ fn normalized_path_key(path: &Path) -> String {
 
 fn inspect_image(
     path: &Path,
-    thumbnail_cache_dir: &Path,
-) -> Result<(u32, u32, [u8; 3], u64, Vec<f32>, Vec<f32>)> {
+    root: &Path,
+) -> Result<(u32, u32, [u8; 3], u64, Vec<f32>, Vec<f32>, u64)> {
     let image = decode_image(path)?;
     let (width, height) = image.dimensions();
 
-    // Seed the exact same persistent cache used by the UI while the original
-    // file is already decoded. Thumbnail cache failures never invalidate the
-    // authoritative image index; the UI can still rebuild the preview later.
-    let _ = thumbnail_cache::store_from_decoded(thumbnail_cache_dir, path, &image);
+    // Seed the portable cache while the original file is already decoded. The
+    // cache identity uses the root-relative path, so changing drive letters does
+    // not invalidate thumbnails.
+    let _ = thumbnail_cache::store_from_decoded_for_root(root, path, &image);
 
+    let content_fingerprint = decoded_content_fingerprint(&image);
     let (dominant, visual_hash, color_histogram, material_texture) = visual_descriptor(&image);
     Ok((
         width,
@@ -1358,7 +1380,16 @@ fn inspect_image(
         visual_hash,
         color_histogram,
         material_texture,
+        content_fingerprint,
     ))
+}
+
+fn decoded_content_fingerprint(image: &DynamicImage) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    hasher.write_u32(image.width());
+    hasher.write_u32(image.height());
+    hasher.write(image.as_bytes());
+    hasher.finish()
 }
 
 fn decode_image(path: &Path) -> Result<DynamicImage> {

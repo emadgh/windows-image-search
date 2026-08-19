@@ -7,6 +7,7 @@ use crate::db::{self, ImageSummary};
 use crate::embedding::EmbeddingService;
 use crate::fs_watch::{FsWatchMessage, FsWatchService};
 use crate::indexer::{self, WorkerMessage};
+use crate::portable;
 use crate::settings::{self, ClipExecutionProvider, IndexingSettings};
 use crate::text_search::TextSearchService;
 use crate::thumbnail_cache;
@@ -85,6 +86,7 @@ impl ImageSearchApp {
         let embedding_service = EmbeddingService::new(model_cache);
         let text_search_service = TextSearchService::new(db_path.clone());
         let roots = db::load_roots(&db_path).unwrap_or_default();
+        let portable_warnings = portable::prepare_registered_roots(&db_path, &roots);
         let fs_watch_service = FsWatchService::new(roots.clone());
         let images = db::load_image_summaries(&db_path).unwrap_or_default();
         let image_positions = images
@@ -94,6 +96,11 @@ impl ImageSearchApp {
             .collect();
         let collections =
             collections::CollectionsState::load(&db_path, &images).unwrap_or_default();
+        let thumb_pool = ThumbnailPool::new(thumbnail_cache, roots.clone());
+        let initial_status = portable_warnings
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "Ready".to_owned());
         Self {
             roots,
             images,
@@ -125,12 +132,12 @@ impl ImageSearchApp {
             textures: HashMap::new(),
             texture_lru: TextureLru::new(DEFAULT_GPU_TEXTURE_CAPACITY),
             selected_paths: HashSet::new(),
-            thumb_pool: ThumbnailPool::new(thumbnail_cache),
+            thumb_pool,
             tx,
             rx,
             busy: false,
             indexing: false,
-            status: "Ready".into(),
+            status: initial_status,
             progress: None,
             last_error: None,
             settings_open: false,
@@ -352,13 +359,35 @@ impl ImageSearchApp {
         let Some(folder) = rfd::FileDialog::new().pick_folder() else {
             return;
         };
-        match db::add_root(&self.db_path, &folder) {
-            Ok(()) => {
+        match portable::attach_root(&self.db_path, &folder) {
+            Ok(outcome) => {
                 self.roots = db::load_roots(&self.db_path).unwrap_or_default();
+                self.thumb_pool.set_roots(self.roots.clone());
                 self.fs_watch_service.set_roots(self.roots.clone());
-                self.status = format!("Added {}", folder.display());
+                self.images = db::load_image_summaries(&self.db_path).unwrap_or_default();
+                self.rebuild_image_positions();
+                self.refresh_collection_effective_membership();
+                self.refresh_text_search_after_data_change();
+                self.status = if outcome.reused_existing_index {
+                    format!(
+                        "Attached portable index: {} ({} cached image records; no rescan required)",
+                        folder.display(),
+                        outcome.images
+                    )
+                } else if outcome.migrated_legacy_rows {
+                    format!(
+                        "Migrated {} image records into {}/.imagesearch",
+                        outcome.images,
+                        folder.display()
+                    )
+                } else {
+                    format!(
+                        "Portable index initialized: {} — run Rescan to index images",
+                        folder.display()
+                    )
+                };
             }
-            Err(err) => self.last_error = Some(format!("Cannot add folder: {err:#}")),
+            Err(err) => self.last_error = Some(format!("Cannot attach folder: {err:#}")),
         }
     }
 
@@ -369,6 +398,7 @@ impl ImageSearchApp {
         match db::remove_root(&self.db_path, folder) {
             Ok(()) => {
                 self.roots = db::load_roots(&self.db_path).unwrap_or_default();
+                self.thumb_pool.set_roots(self.roots.clone());
                 self.images = db::load_image_summaries(&self.db_path).unwrap_or_default();
                 self.rebuild_image_positions();
                 self.fs_watch_service.set_roots(self.roots.clone());
@@ -583,6 +613,9 @@ impl ImageSearchApp {
                     for root in &self.roots {
                         ui.horizontal(|ui| {
                             ui.label(root.display().to_string());
+                            if portable::is_indexed_root(root) {
+                                ui.small("✓ .imagesearch");
+                            }
                             if ui
                                 .add_enabled(!self.busy, egui::Button::new("Remove").small())
                                 .clicked()
