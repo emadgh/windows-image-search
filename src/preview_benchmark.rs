@@ -59,21 +59,13 @@ pub fn benchmark(db_path: &Path, model_cache: &Path, requested_samples: usize) -
 
     let original_started = Instant::now();
     let original_response = service
-        .embed(
-            source_paths.clone(),
-            EMBEDDING_BATCH_SIZE,
-            clip_threads,
-        )
+        .embed(source_paths.clone(), EMBEDDING_BATCH_SIZE, clip_threads)
         .context("embedding original images for CLIP preview benchmark")?;
     let original_elapsed = original_started.elapsed();
 
     let preview_started = Instant::now();
     let preview_response = service
-        .embed(
-            preview_paths.clone(),
-            EMBEDDING_BATCH_SIZE,
-            clip_threads,
-        )
+        .embed(preview_paths.clone(), EMBEDDING_BATCH_SIZE, clip_threads)
         .context("embedding cached previews for CLIP preview benchmark")?;
     let preview_elapsed = preview_started.elapsed();
 
