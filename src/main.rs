@@ -1,5 +1,6 @@
 mod db;
 mod embedding;
+mod fs_watch;
 mod indexer;
 mod metadata;
 mod settings;

@@ -430,6 +430,43 @@ pub fn paths_missing_embedding(conn: &Connection) -> Result<Vec<PathBuf>> {
     Ok(rows.filter_map(|r| r.ok()).map(PathBuf::from).collect())
 }
 
+fn like_prefix_pattern(path: &Path) -> String {
+    let mut text = path.to_string_lossy().to_string();
+    if !text.ends_with(std::path::MAIN_SEPARATOR) {
+        text.push(std::path::MAIN_SEPARATOR);
+    }
+    let escaped = text
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("{escaped}%")
+}
+
+pub fn delete_path_tree(conn: &Connection, target: &Path) -> Result<Vec<PathBuf>> {
+    let target_text = target.to_string_lossy().to_string();
+    let prefix = like_prefix_pattern(target);
+    let mut stmt = conn.prepare(
+        "SELECT path FROM images WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\' COLLATE NOCASE",
+    )?;
+    let paths: Vec<PathBuf> = stmt
+        .query_map(params![target_text, prefix], |row| row.get::<_, String>(0))?
+        .filter_map(|row| row.ok())
+        .map(PathBuf::from)
+        .collect();
+    drop(stmt);
+
+    if !paths.is_empty() {
+        conn.execute(
+            "DELETE FROM images WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\' COLLATE NOCASE",
+            params![
+                target.to_string_lossy().to_string(),
+                like_prefix_pattern(target)
+            ],
+        )?;
+    }
+    Ok(paths)
+}
+
 pub fn next_scan_generation(conn: &Connection) -> Result<i64> {
     let current: i64 = conn.query_row(
         "SELECT COALESCE(MAX(last_seen_scan), 0) FROM images",
@@ -601,6 +638,49 @@ mod tests {
             "windows-image-search-{label}-{}-{nonce}.sqlite3",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn delete_path_tree_removes_only_the_requested_subtree() {
+        let db_path = temp_db_path("delete-path-tree");
+        let root = std::env::temp_dir().join("windows-image-search-delete-root");
+        let folder = root.join("folder");
+        let first = folder.join("first.jpg");
+        let second = folder.join("nested").join("second.jpg");
+        let keep = root.join("keep.jpg");
+
+        {
+            let conn = open(&db_path).unwrap();
+            for path in [&first, &second, &keep] {
+                let name = path.file_name().unwrap().to_string_lossy();
+                upsert_image(
+                    &conn,
+                    path,
+                    &root,
+                    &name,
+                    "jpg",
+                    1,
+                    1,
+                    8,
+                    8,
+                    "",
+                    "",
+                    [1, 2, 3],
+                    1,
+                    &[1.0],
+                )
+                .unwrap();
+            }
+            let removed = delete_path_tree(&conn, &folder).unwrap();
+            assert_eq!(removed.len(), 2);
+            let states = load_file_states(&conn).unwrap();
+            assert_eq!(states.len(), 1);
+            assert!(states.contains_key(&keep));
+        }
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(format!("{}-wal", db_path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", db_path.display()));
     }
 
     #[test]
