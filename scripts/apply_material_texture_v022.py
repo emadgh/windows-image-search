@@ -16,12 +16,10 @@ def patch_file(path: str, replacements):
 
 patch_file(
     "src/main.rs",
-    [
-        (
-            "mod metadata;\nmod settings;",
-            "mod metadata;\nmod material_texture;\nmod settings;",
-        ),
-    ],
+    [(
+        "mod metadata;\nmod settings;",
+        "mod metadata;\nmod material_texture;\nmod settings;",
+    )],
 )
 
 patch_file(
@@ -32,8 +30,7 @@ patch_file(
             "use crate::material_texture;\nuse anyhow::{bail, Context, Result};",
         ),
         (
-            "    pub color_histogram: Option<Vec<f32>>,\n    pub embedding: Option<Vec<f32>>,
-",
+            "    pub color_histogram: Option<Vec<f32>>,\n    pub embedding: Option<Vec<f32>>,\n",
             "    pub color_histogram: Option<Vec<f32>>,\n    pub material_texture: Option<Vec<f32>>,\n    pub embedding: Option<Vec<f32>>,\n",
         ),
         (
@@ -41,8 +38,8 @@ patch_file(
             "            color_histogram BLOB,\n            color_histogram_dim INTEGER,\n            material_texture BLOB,\n            material_texture_dim INTEGER,\n            material_texture_version INTEGER NOT NULL DEFAULT 0,\n            embedding BLOB,",
         ),
         (
-            '    ensure_column(&conn, "images", "color_histogram_dim", "INTEGER")?;\n    ensure_column(\n        &conn,\n        "images",\n        "embedding_normalized",',
-            '    ensure_column(&conn, "images", "color_histogram_dim", "INTEGER")?;\n    ensure_column(&conn, "images", "material_texture", "BLOB")?;\n    ensure_column(&conn, "images", "material_texture_dim", "INTEGER")?;\n    ensure_column(\n        &conn,\n        "images",\n        "material_texture_version",\n        "INTEGER NOT NULL DEFAULT 0",\n    )?;\n    ensure_column(\n        &conn,\n        "images",\n        "embedding_normalized",',
+            "    ensure_column(&conn, \"images\", \"color_histogram_dim\", \"INTEGER\")?;\n    ensure_column(\n        &conn,\n        \"images\",\n        \"embedding_normalized\",",
+            "    ensure_column(&conn, \"images\", \"color_histogram_dim\", \"INTEGER\")?;\n    ensure_column(&conn, \"images\", \"material_texture\", \"BLOB\")?;\n    ensure_column(&conn, \"images\", \"material_texture_dim\", \"INTEGER\")?;\n    ensure_column(\n        &conn,\n        \"images\",\n        \"material_texture_version\",\n        \"INTEGER NOT NULL DEFAULT 0\",\n    )?;\n    ensure_column(\n        &conn,\n        \"images\",\n        \"embedding_normalized\",",
         ),
         (
             "            color_histogram_dim = excluded.color_histogram_dim,\n            embedding = NULL,",
