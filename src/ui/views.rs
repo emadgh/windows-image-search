@@ -80,7 +80,7 @@ impl ImageSearchApp {
                                             response.rect,
                                             4.0,
                                             egui::Stroke::new(
-                                                2.0,
+                                                2.0_f32,
                                                 ui.visuals().selection.stroke.color,
                                             ),
                                             egui::StrokeKind::Inside,
@@ -378,7 +378,7 @@ fn thumbnail_widget(
         ui.painter().rect_stroke(
             rect,
             4.0,
-            egui::Stroke::new(3.0, ui.visuals().selection.stroke.color),
+            egui::Stroke::new(3.0_f32, ui.visuals().selection.stroke.color),
             egui::StrokeKind::Inside,
         );
     }

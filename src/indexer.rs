@@ -1009,7 +1009,7 @@ fn similarity_search(
     };
 
     let query_key = normalized_path_key(query_path);
-    let mut records = db::load_search_images(db_path)?;
+    let records = db::load_search_images(db_path)?;
     let compute_hash = settings.texture_weight > 0.0;
     let compute_histogram =
         settings.color_distribution_weight > 0.0 || settings.strict_color_rejection;
@@ -1815,7 +1815,7 @@ mod tests {
             }
         }
 
-        let records = db::load_images(&db_path).unwrap();
+        let records = db::load_image_summaries(&db_path).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].path, first);
 
