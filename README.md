@@ -53,7 +53,11 @@ The Windows build includes `run-v0.2-benchmark-gate.ps1` beside the executable. 
 .\run-v0.2-benchmark-gate.ps1 -Executable .\windows-image-search.exe
 ```
 
-The runner records the application version, exact benchmark commands/sample counts, timestamps, exit codes and wall time. It also records Windows, CPU, total RAM, GPU/driver and Windows-reported adapter RAM, plus disk model/media information using built-in CIM queries. It then runs ANN, cached-preview CLIP, CPU-vs-DirectML, alternative image-model and material-texture diagnostics and writes each result to its own file.
+The runner records the application version, exact benchmark commands/sample counts, timestamps, exit codes and wall time. It also records Windows, CPU, total RAM, GPU/driver and Windows-reported adapter RAM, plus disk model/media information using built-in CIM queries.
+
+Each diagnostic runs as a child process. The runner records peak process working set, sampled private memory, and—when Windows exposes the `GPU Process Memory` performance counters—sampled dedicated and shared GPU memory for that benchmark process. GPU-process memory is recorded as unavailable/null instead of failing the gate when those counters are unsupported or no matching process sample is exposed.
+
+The gate runs the library profile, ANN, cached-preview CLIP, CPU-vs-DirectML, alternative image-model and material-texture diagnostics. Each benchmark gets separate stdout/stderr files plus a combined text file; `manifest.json` contains timing and memory telemetry, `system-info.json` contains hardware context, and `summary.txt` contains the compact result overview.
 
 Results are saved under a timestamped `benchmark-results` directory and compressed into a ZIP suitable for attaching to the performance roadmap issues. Sample counts can be overridden, for example:
 
@@ -67,7 +71,17 @@ Results are saved under a timestamped `benchmark-results` directory and compress
   -TextureSamples 48
 ```
 
-`Win32_VideoController.AdapterRAM` is recorded exactly as Windows/WMI reports it; some drivers do not expose exact dedicated VRAM through this field, so treat it as hardware context rather than a precise GPU-memory profiler.
+Peak working set is process-level resident RAM. Private-memory and GPU-memory values are sampled while the benchmark runs rather than being allocator-level exact maxima. `Win32_VideoController.AdapterRAM` in `system-info.json` is the capacity reported by Windows/WMI and can differ from exact dedicated VRAM on some drivers.
+
+### Library profile
+
+Record the composition of the currently indexed library before interpreting benchmark results:
+
+```powershell
+.\windows-image-search.exe --benchmark-library-profile
+```
+
+The report includes indexed image count, source files that currently exist or are missing, persisted total source bytes, database size, extension distribution, width/height min/median/P90/max, megapixel min/P50/P90/P95/max, megapixel buckets, and landscape/portrait/square counts. The command uses the current local SQLite index and does not modify production search settings.
 
 ### ANN retrieval
 
@@ -144,7 +158,7 @@ cargo test --all-targets
 cargo run --release
 ```
 
-Windows CI reads the package version from `Cargo.toml` and uploads a versioned artifact such as `windows-image-search-v0.2.4-win64`. The ZIP contains `windows-image-search.exe`, `run-v0.2-benchmark-gate.ps1`, `README.md`, `LICENSE` and `VERSION.txt`.
+Windows CI reads the package version from `Cargo.toml` and uploads a versioned artifact such as `windows-image-search-v0.2.8-win64`. The ZIP contains `windows-image-search.exe`, `run-v0.2-benchmark-gate.ps1`, `README.md`, `LICENSE` and `VERSION.txt`.
 
 ## Privacy
 

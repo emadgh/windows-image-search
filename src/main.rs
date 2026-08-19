@@ -3,6 +3,7 @@ mod db;
 mod embedding;
 mod fs_watch;
 mod indexer;
+mod library_profile;
 mod material_texture;
 mod metadata;
 mod model_benchmark;
@@ -27,6 +28,7 @@ enum StartupMode {
     ClipPreviewBenchmark(usize),
     ClipRuntimeBenchmark(usize),
     ImageModelBenchmark(usize),
+    LibraryProfile,
     MaterialTextureBenchmark(usize),
 }
 
@@ -107,6 +109,9 @@ fn startup_mode() -> StartupMode {
                 .max(1);
             return StartupMode::ImageModelBenchmark(queries);
         }
+        if arg == "--benchmark-library-profile" {
+            return StartupMode::LibraryProfile;
+        }
         if let Some(value) = arg.strip_prefix("--benchmark-material-texture=") {
             let samples = value
                 .parse::<usize>()
@@ -140,6 +145,10 @@ fn runtime_benchmark_report_path(db_path: &Path) -> PathBuf {
 
 fn image_model_benchmark_report_path(db_path: &Path) -> PathBuf {
     benchmark_report_path(db_path, "image-models")
+}
+
+fn library_profile_report_path(db_path: &Path) -> PathBuf {
+    benchmark_report_path(db_path, "library-profile")
 }
 
 fn material_texture_benchmark_report_path(db_path: &Path) -> PathBuf {
@@ -225,6 +234,18 @@ fn main() -> eframe::Result<()> {
                 "image models",
             ),
             Err(err) => eprintln!("Image model benchmark failed: {err:#}"),
+        }
+        return Ok(());
+    }
+
+    if matches!(mode, StartupMode::LibraryProfile) {
+        match library_profile::benchmark(&db_path) {
+            Ok(report) => write_benchmark_report(
+                &library_profile_report_path(&db_path),
+                &report,
+                "library profile",
+            ),
+            Err(err) => eprintln!("Library profile benchmark failed: {err:#}"),
         }
         return Ok(());
     }
