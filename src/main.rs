@@ -211,10 +211,14 @@ fn main() -> eframe::Result<()> {
         (fallback.join("index.sqlite3"), fallback.join("models"))
     });
     let _ = db::open(&db_path);
-    // The AppData database is only the attached multi-root session/catalog cache.
-    // Hydrate it from every available portable root before GUI or CLI diagnostics.
-    let registered_roots = db::load_roots(&db_path).unwrap_or_default();
-    let _ = portable::prepare_registered_roots(&db_path, &registered_roots);
+
+    // GUI startup performs portable-root hydration in ImageSearchApp::new so it
+    // can surface unavailable-drive warnings. CLI diagnostics have no UI layer,
+    // so hydrate the rebuildable aggregate session here exactly once for them.
+    if !matches!(&mode, StartupMode::Gui) {
+        let registered_roots = db::load_roots(&db_path).unwrap_or_default();
+        let _ = portable::prepare_registered_roots(&db_path, &registered_roots);
+    }
 
     if let StartupMode::AnnBenchmark(query_count) = &mode {
         match ann::benchmark(&db_path, *query_count) {
