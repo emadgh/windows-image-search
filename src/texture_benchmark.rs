@@ -259,10 +259,11 @@ fn scores_for_record(
     record: &BenchmarkRecord,
 ) -> [f32; 5] {
     let dhash = perceptual_hash_similarity(query_hash, record.visual_hash);
-    let gradient = material_texture::gradient_similarity(query_descriptor, &record.descriptor)
-        .unwrap_or(0.0);
+    let gradient =
+        material_texture::gradient_similarity(query_descriptor, &record.descriptor).unwrap_or(0.0);
     let lbp = material_texture::lbp_similarity(query_descriptor, &record.descriptor).unwrap_or(0.0);
-    let material = material_texture::similarity(query_descriptor, &record.descriptor).unwrap_or(0.0);
+    let material =
+        material_texture::similarity(query_descriptor, &record.descriptor).unwrap_or(0.0);
     let hybrid = material_texture::combine_with_dhash(Some(dhash), Some(material)).unwrap_or(0.0);
     [dhash, gradient, lbp, material, hybrid]
 }
@@ -427,7 +428,10 @@ mod tests {
             let (width, height) = transformed.dimensions();
             assert!(width >= 1);
             assert!(height >= 1);
-            assert_eq!(material_texture::descriptor(&transformed).len(), material_texture::DIM);
+            assert_eq!(
+                material_texture::descriptor(&transformed).len(),
+                material_texture::DIM
+            );
         }
     }
 
