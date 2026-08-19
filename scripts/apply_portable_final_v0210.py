@@ -39,6 +39,6 @@ replace_exact(
 
 replace_exact(
     "src/thumbnail_cache.rs",
-    '''fn portable_key_for_state(\n    identity: &Path,''',
-    '''#[cfg(test)]\nfn portable_key_for_state(\n    identity: &Path,''',
+    '''fn portable_key_for_state(identity: &Path, size: u64, modified_secs: u64, modified_nanos: u32) -> u64 {''',
+    '''#[cfg(test)]\nfn portable_key_for_state(identity: &Path, size: u64, modified_secs: u64, modified_nanos: u32) -> u64 {''',
 )
