@@ -1,0 +1,113 @@
+name: Publish v0.1.0 release
+
+on:
+  push:
+    branches: [chore/publish-v0.1.0]
+    paths:
+      - .github/workflows/publish-v0.1.0.yml
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download verified Windows CI artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifact
+          gh run download 32223868354 \
+            --repo "$GITHUB_REPOSITORY" \
+            --name windows-image-search-win64 \
+            --dir artifact
+
+      - name: Prepare clean release assets
+        run: |
+          set -euo pipefail
+          INNER_ZIP="$(find artifact -type f -name 'windows-image-search-win64.zip' -print -quit)"
+          test -n "$INNER_ZIP"
+          mkdir -p unpacked clean
+          unzip -q "$INNER_ZIP" -d unpacked
+
+          EXE="$(find unpacked -type f -name 'windows-image-search.exe' -print -quit)"
+          README="$(find unpacked -type f -name 'README.md' -print -quit)"
+          LICENSE="$(find unpacked -type f -name 'LICENSE' -print -quit)"
+          test -n "$EXE"
+          test -n "$README"
+          test -n "$LICENSE"
+
+          cp "$EXE" clean/windows-image-search.exe
+          cp "$README" clean/README.md
+          cp "$LICENSE" clean/LICENSE
+          cp "$EXE" Windows-Image-Search-v0.1.0-win64.exe
+          (cd clean && zip -9 -q ../Windows-Image-Search-v0.1.0-win64.zip windows-image-search.exe README.md LICENSE)
+
+          sha256sum Windows-Image-Search-v0.1.0-win64.exe Windows-Image-Search-v0.1.0-win64.zip > SHA256SUMS.txt
+
+      - name: Write release notes
+        run: |
+          cat > release-notes.md <<'EOF'
+          # Windows Image Search v0.1.0
+
+          First public Windows build of Windows Image Search.
+
+          Highlights:
+          - recursive indexing for JPG, JPEG, PNG, TIFF and TIF image libraries
+          - filename, path, description, keyword and metadata search
+          - hybrid image-similarity search using color distribution, texture/pattern, CLIP and dominant color controls
+          - strict color mismatch rejection controls
+          - persistent 512 px thumbnail cache generated on background workers
+          - Grid and Details result views with compact top-right view controls
+          - Contain/Cover thumbnail toggle and 96–512 px thumbnail sizing
+          - responsive Details table with separate Metadata and Score columns
+          - similarity query preview
+          - multi-selection, right-click Explorer actions and double-click open
+          - background/multi-threaded thumbnail and indexing work to reduce UI stalls
+
+          The Windows assets attached to this release are produced from the CI-verified v0.1.0 source state. `SHA256SUMS.txt` contains checksums for both downloadable assets.
+          EOF
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v0.1.0"
+          TITLE="Windows Image Search v0.1.0"
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              Windows-Image-Search-v0.1.0-win64.exe \
+              Windows-Image-Search-v0.1.0-win64.zip \
+              SHA256SUMS.txt \
+              --clobber \
+              --repo "$GITHUB_REPOSITORY"
+            gh release edit "$TAG" \
+              --title "$TITLE" \
+              --notes-file release-notes.md \
+              --latest \
+              --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" \
+              Windows-Image-Search-v0.1.0-win64.exe \
+              Windows-Image-Search-v0.1.0-win64.zip \
+              SHA256SUMS.txt \
+              --target main \
+              --title "$TITLE" \
+              --notes-file release-notes.md \
+              --latest \
+              --repo "$GITHUB_REPOSITORY"
+          fi
+
+      - name: Verify published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release view v0.1.0 \
+            --repo "$GITHUB_REPOSITORY" \
+            --json tagName,name,isLatest,url,assets
