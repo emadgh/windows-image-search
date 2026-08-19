@@ -3,6 +3,7 @@ mod views;
 
 use crate::db::{self, ImageRecord};
 use crate::indexer::{self, WorkerMessage};
+use crate::settings::{self, IndexingSettings};
 use eframe::egui;
 use egui::{ColorImage, TextureHandle, TextureOptions};
 use std::collections::{HashMap, HashSet};
@@ -32,6 +33,8 @@ pub struct ImageSearchApp {
     pub(super) similarity_results: Option<Vec<ImageRecord>>,
     pub(super) query_image: Option<PathBuf>,
     pub(super) similarity_settings: indexer::SimilaritySettings,
+    pub(super) indexing_settings: IndexingSettings,
+    settings_path: PathBuf,
     pub(super) search_text: String,
     pub(super) color_enabled: bool,
     pub(super) target_color: [u8; 3],
@@ -57,10 +60,10 @@ pub struct ImageSearchApp {
 impl ImageSearchApp {
     pub fn new(db_path: PathBuf, model_cache: PathBuf) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
-        let thumbnail_cache = db_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("thumbnail-cache");
+        let app_data_dir = db_path.parent().unwrap_or_else(|| Path::new("."));
+        let thumbnail_cache = app_data_dir.join("thumbnail-cache");
+        let settings_path = app_data_dir.join("performance-settings.ini");
+        let indexing_settings = settings::load(&settings_path);
         let images = db::load_images(&db_path).unwrap_or_default();
         let image_positions = images
             .iter()
@@ -76,6 +79,8 @@ impl ImageSearchApp {
             similarity_results: None,
             query_image: None,
             similarity_settings: indexer::SimilaritySettings::default(),
+            indexing_settings,
+            settings_path,
             search_text: String::new(),
             color_enabled: false,
             target_color: [128, 128, 128],
@@ -196,6 +201,7 @@ impl ImageSearchApp {
             self.db_path.clone(),
             self.model_cache.clone(),
             self.roots.clone(),
+            self.indexing_settings,
             self.tx.clone(),
         );
     }
@@ -265,6 +271,7 @@ impl ImageSearchApp {
             self.model_cache.clone(),
             path,
             self.similarity_settings,
+            self.indexing_settings,
             self.tx.clone(),
         );
     }
@@ -338,6 +345,7 @@ impl ImageSearchApp {
         let mut add_folder = false;
         let mut remove_folder = None;
         let mut clear_cache = false;
+        let mut save_performance_settings = false;
 
         egui::Window::new("Settings")
             .open(&mut open)
@@ -384,6 +392,59 @@ impl ImageSearchApp {
 
                 ui.add_space(12.0);
                 ui.separator();
+                ui.heading("Indexing performance");
+                ui.label(
+                    "Tune disk/CPU pressure. Changes are saved immediately and apply to the next indexing or image-search operation.",
+                );
+                let logical_threads = settings::logical_parallelism();
+                ui.small(format!(
+                    "Detected {logical_threads} logical CPU thread{}. Safe defaults: Decode 2 / CLIP up to 4 / Batch 16.",
+                    if logical_threads == 1 { "" } else { "s" }
+                ));
+                ui.add_enabled_ui(!self.busy, |ui| {
+                    let decode_changed = ui
+                        .add(
+                            egui::Slider::new(
+                                &mut self.indexing_settings.decode_workers,
+                                1..=settings::max_decode_workers(),
+                            )
+                            .text("Image decode workers"),
+                        )
+                        .changed();
+                    let clip_changed = ui
+                        .add(
+                            egui::Slider::new(
+                                &mut self.indexing_settings.clip_threads,
+                                1..=settings::max_clip_threads(),
+                            )
+                            .text("CLIP CPU threads"),
+                        )
+                        .changed();
+                    let batch_changed = ui
+                        .add(
+                            egui::Slider::new(
+                                &mut self.indexing_settings.batch_size,
+                                1..=settings::MAX_BATCH_SIZE,
+                            )
+                            .text("Index / embedding batch size"),
+                        )
+                        .changed();
+
+                    if decode_changed || clip_changed || batch_changed {
+                        self.indexing_settings = self.indexing_settings.sanitized();
+                        save_performance_settings = true;
+                    }
+                    if ui.button("Reset safe defaults").clicked() {
+                        self.indexing_settings = IndexingSettings::default();
+                        save_performance_settings = true;
+                    }
+                });
+                if self.busy {
+                    ui.small("Performance controls are locked while a worker operation is active.");
+                }
+
+                ui.add_space(12.0);
+                ui.separator();
                 ui.heading("Thumbnail cache");
                 ui.label(format!(
                     "Location: {}",
@@ -406,6 +467,22 @@ impl ImageSearchApp {
         }
         if clear_cache {
             self.clear_thumbnail_cache();
+        }
+        if save_performance_settings {
+            self.indexing_settings = self.indexing_settings.sanitized();
+            match settings::save(&self.settings_path, self.indexing_settings) {
+                Ok(()) => {
+                    self.status = format!(
+                        "Performance settings saved: decode {}, CLIP {}, batch {}",
+                        self.indexing_settings.decode_workers,
+                        self.indexing_settings.clip_threads,
+                        self.indexing_settings.batch_size
+                    );
+                }
+                Err(err) => {
+                    self.last_error = Some(format!("Cannot save performance settings: {err:#}"));
+                }
+            }
         }
     }
 
