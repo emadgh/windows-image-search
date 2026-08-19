@@ -46,8 +46,7 @@ impl TextureLru {
         protected: &HashSet<PathBuf>,
     ) -> Vec<PathBuf> {
         let resident_set: HashSet<&PathBuf> = residents.iter().collect();
-        self.last_used
-            .retain(|path, _| resident_set.contains(path));
+        self.last_used.retain(|path, _| resident_set.contains(path));
         for path in residents {
             self.last_used.entry(path.clone()).or_insert(0);
         }
@@ -131,8 +130,6 @@ mod tests {
             lru.register(path);
         }
 
-        assert!(lru
-            .eviction_victims(&resident, &HashSet::new())
-            .is_empty());
+        assert!(lru.eviction_victims(&resident, &HashSet::new()).is_empty());
     }
 }
