@@ -1,0 +1,44 @@
+name: Validate CLIP preview benchmark v0.2.3
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.head_ref == 'perf/clip-preview-benchmark-v0.2.3'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/clip-preview-benchmark-v0.2.3
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all
+
+      - name: Check
+        run: cargo check --all-targets
+
+      - name: Test
+        run: cargo test --all-targets
+
+      - name: Commit validated source and lockfile
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock src\main.rs src\preview_benchmark.rs
+          if (git status --porcelain -- Cargo.lock src\main.rs src\preview_benchmark.rs) {
+            git commit -m "chore: sync v0.2.3 benchmark build"
+            git push origin HEAD:perf/clip-preview-benchmark-v0.2.3
+          }
