@@ -24,7 +24,10 @@ param(
 
     [Parameter()]
     [ValidateRange(1, 128)]
-    [int]$TextureSamples = 24
+    [int]$TextureSamples = 24,
+
+    [Parameter()]
+    [string]$MaterialEvalManifest = ""
 )
 
 Set-StrictMode -Version Latest
@@ -194,7 +197,9 @@ function Invoke-DiagnosticBenchmark {
 
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = $ExecutablePath
-    $startInfo.Arguments = ($Arguments -join ' ')
+    foreach ($argument in $Arguments) {
+        [void]$startInfo.ArgumentList.Add($argument)
+    }
     $startInfo.UseShellExecute = $false
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
@@ -320,6 +325,16 @@ $benchmarks = @(
     [pscustomobject]@{ Name = "material-texture"; Arguments = @("--benchmark-material-texture", [string]$TextureSamples) }
 )
 
+$materialEvalRequested = -not [string]::IsNullOrWhiteSpace($MaterialEvalManifest)
+$resolvedMaterialEvalManifest = $null
+if ($materialEvalRequested) {
+    $resolvedMaterialEvalManifest = (Resolve-Path -LiteralPath $MaterialEvalManifest -ErrorAction Stop).Path
+    $benchmarks += [pscustomobject]@{
+        Name = "material-eval"
+        Arguments = @("--benchmark-material-eval", $resolvedMaterialEvalManifest)
+    }
+}
+
 $results = @()
 foreach ($benchmark in $benchmarks) {
     try {
@@ -370,6 +385,11 @@ $manifest = [pscustomobject]@{
     executable = $executablePath
     application_version = $appVersion
     version_exit_code = $versionExitCode
+    material_eval = [pscustomobject]@{
+        requested = $materialEvalRequested
+        manifest = $resolvedMaterialEvalManifest
+        status = if ($materialEvalRequested) { "included" } else { "not_run_no_manifest" }
+    }
     memory_sampling = [pscustomobject]@{
         process_poll_interval_ms = 200
         gpu_poll_interval_seconds = 1
@@ -401,6 +421,7 @@ $summaryLines = @(
     "  CLIP runtime samples: $RuntimeSamples",
     "  Image-model query sources: $ImageModelQueries",
     "  Material-texture samples: $TextureSamples",
+    "  Labeled material eval: $(if ($materialEvalRequested) { $resolvedMaterialEvalManifest } else { 'not run (no -MaterialEvalManifest)' })",
     "",
     "Benchmark results:"
 )

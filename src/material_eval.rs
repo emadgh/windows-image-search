@@ -103,8 +103,15 @@ impl RankMetrics {
 }
 
 pub fn benchmark(db_path: &Path, model_cache: &Path, manifest_path: &Path) -> Result<String> {
-    let manifest_text = std::fs::read_to_string(manifest_path)
-        .with_context(|| format!("reading material evaluation manifest {}", manifest_path.display()))?;
+    if manifest_path.as_os_str().is_empty() {
+        bail!("--benchmark-material-eval requires a TSV manifest path");
+    }
+    let manifest_text = std::fs::read_to_string(manifest_path).with_context(|| {
+        format!(
+            "reading material evaluation manifest {}",
+            manifest_path.display()
+        )
+    })?;
     let base_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
     let manifest = parse_manifest_text(&manifest_text, base_dir)?;
     validate_group_sizes(&manifest)?;
@@ -162,7 +169,10 @@ pub fn benchmark(db_path: &Path, model_cache: &Path, manifest_path: &Path) -> Re
     let all_indices: Vec<usize> = (0..items.len()).collect();
 
     let dhash = evaluate_scores(&items, &all_indices, |query, candidate| {
-        Some(perceptual_hash_similarity(query.visual_hash, candidate.visual_hash))
+        Some(perceptual_hash_similarity(
+            query.visual_hash,
+            candidate.visual_hash,
+        ))
     });
     let gradient = evaluate_scores(&items, &all_indices, |query, candidate| {
         material_texture::gradient_similarity(&query.material_texture, &candidate.material_texture)
@@ -218,17 +228,30 @@ pub fn benchmark(db_path: &Path, model_cache: &Path, manifest_path: &Path) -> Re
     writeln!(report, "production_behavior_changed=false")?;
     writeln!(report, "groups={}", group_sizes.len())?;
     writeln!(report, "images={}", items.len())?;
-    writeln!(report, "group_size_min={}", group_size_values.iter().min().copied().unwrap_or(0))?;
+    writeln!(
+        report,
+        "group_size_min={}",
+        group_size_values.iter().min().copied().unwrap_or(0)
+    )?;
     writeln!(
         report,
         "group_size_p50={}",
         percentile_usize(&group_size_values, 0.50)
     )?;
-    writeln!(report, "group_size_max={}", group_size_values.iter().max().copied().unwrap_or(0))?;
+    writeln!(
+        report,
+        "group_size_max={}",
+        group_size_values.iter().max().copied().unwrap_or(0)
+    )?;
     for (group, size) in &group_sizes {
         writeln!(report, "group.{}.images={size}", report_key(group))?;
     }
-    writeln!(report, "descriptor_coverage={}/{}", items.len(), items.len())?;
+    writeln!(
+        report,
+        "descriptor_coverage={}/{}",
+        items.len(),
+        items.len()
+    )?;
     writeln!(
         report,
         "stored_production_clip_coverage={}/{}",
@@ -247,7 +270,10 @@ pub fn benchmark(db_path: &Path, model_cache: &Path, manifest_path: &Path) -> Re
     if production_clip.queries() > 0 {
         append_metrics(&mut report, "stored_production_clip", &production_clip)?;
     } else {
-        writeln!(report, "stored_production_clip.status=insufficient_coverage")?;
+        writeln!(
+            report,
+            "stored_production_clip.status=insufficient_coverage"
+        )?;
     }
 
     let paths: Vec<PathBuf> = items.iter().map(|item| item.path.clone()).collect();
@@ -319,14 +345,26 @@ fn benchmark_model(
         normalize(embedding);
     }
     let embedding_dim = embeddings.first().map(Vec::len).unwrap_or(0);
-    if embedding_dim == 0 || embeddings.iter().any(|embedding| embedding.len() != embedding_dim) {
-        bail!("{} returned inconsistent embedding dimensions", eval_model.label());
+    if embedding_dim == 0
+        || embeddings
+            .iter()
+            .any(|embedding| embedding.len() != embedding_dim)
+    {
+        bail!(
+            "{} returned inconsistent embedding dimensions",
+            eval_model.label()
+        );
     }
 
     let all_indices: Vec<usize> = (0..items.len()).collect();
+    let embedding_index: HashMap<usize, usize> = items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| (item.rowid, index))
+        .collect();
     let metrics = evaluate_scores(items, &all_indices, |query, candidate| {
-        let query_index = items.iter().position(|item| item.rowid == query.rowid)?;
-        let candidate_index = items.iter().position(|item| item.rowid == candidate.rowid)?;
+        let query_index = *embedding_index.get(&query.rowid)?;
+        let candidate_index = *embedding_index.get(&candidate.rowid)?;
         Some(dot(&embeddings[query_index], &embeddings[candidate_index]))
     });
 
@@ -351,36 +389,17 @@ fn append_model_report(report: &mut String, model: &ModelReport, image_count: us
     writeln!(report, "{prefix}.embedding_dim={}", model.embedding_dim)?;
     writeln!(report, "{prefix}.init_ms={:.3}", ms(model.init))?;
     writeln!(report, "{prefix}.embed_ms={embed_ms:.3}")?;
-    writeln!(
-        report,
-        "{prefix}.images_per_second={images_per_second:.3}"
-    )?;
+    writeln!(report, "{prefix}.images_per_second={images_per_second:.3}")?;
     append_metrics(report, &prefix, &model.metrics)?;
     Ok(())
 }
 
 fn append_metrics(report: &mut String, prefix: &str, metrics: &RankMetrics) -> Result<()> {
     writeln!(report, "{prefix}.queries={}", metrics.queries())?;
-    writeln!(
-        report,
-        "{prefix}.recall_at_1={:.4}",
-        metrics.recall_at(1)
-    )?;
-    writeln!(
-        report,
-        "{prefix}.recall_at_5={:.4}",
-        metrics.recall_at(5)
-    )?;
-    writeln!(
-        report,
-        "{prefix}.recall_at_10={:.4}",
-        metrics.recall_at(10)
-    )?;
-    writeln!(
-        report,
-        "{prefix}.recall_at_25={:.4}",
-        metrics.recall_at(25)
-    )?;
+    writeln!(report, "{prefix}.recall_at_1={:.4}", metrics.recall_at(1))?;
+    writeln!(report, "{prefix}.recall_at_5={:.4}", metrics.recall_at(5))?;
+    writeln!(report, "{prefix}.recall_at_10={:.4}", metrics.recall_at(10))?;
+    writeln!(report, "{prefix}.recall_at_25={:.4}", metrics.recall_at(25))?;
     writeln!(report, "{prefix}.mrr={:.4}", metrics.mrr())?;
     writeln!(
         report,
@@ -443,7 +462,13 @@ where
     }
     candidates
         .into_iter()
-        .filter(|&index| counts.get(items[index].group.as_str()).copied().unwrap_or(0) >= 2)
+        .filter(|&index| {
+            counts
+                .get(items[index].group.as_str())
+                .copied()
+                .unwrap_or(0)
+                >= 2
+        })
         .collect()
 }
 
@@ -462,7 +487,8 @@ fn parse_manifest_text(text: &str, base_dir: &Path) -> Result<Vec<ManifestItem>>
         };
         let group = group_raw.trim();
         let path_text = path_raw.trim();
-        if line_number == 1
+        if output.is_empty()
+            && path_groups.is_empty()
             && group.eq_ignore_ascii_case("group")
             && path_text.eq_ignore_ascii_case("path")
         {
@@ -641,6 +667,17 @@ mod tests {
     }
 
     #[test]
+    fn empty_manifest_path_reports_required_argument() {
+        let error = benchmark(
+            Path::new("unused.sqlite3"),
+            Path::new("models"),
+            Path::new(""),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("requires a TSV manifest path"));
+    }
+
+    #[test]
     fn manifest_supports_header_comments_relative_paths_and_same_group_dedup() {
         let parsed = parse_manifest_text(
             "group\tpath\n# comment\na\tone.jpg\na\tone.jpg\na\ttwo.jpg\nb\tthree.jpg\nb\tfour.jpg\n",
@@ -655,11 +692,9 @@ mod tests {
 
     #[test]
     fn manifest_rejects_path_assigned_to_different_groups() {
-        let error = parse_manifest_text(
-            "a\tone.jpg\nb\tone.jpg\nb\ttwo.jpg\n",
-            Path::new("C:/eval"),
-        )
-        .unwrap_err();
+        let error =
+            parse_manifest_text("a\tone.jpg\nb\tone.jpg\nb\ttwo.jpg\n", Path::new("C:/eval"))
+                .unwrap_err();
         assert!(error.to_string().contains("multiple groups"));
     }
 

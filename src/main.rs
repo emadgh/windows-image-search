@@ -120,9 +120,7 @@ fn startup_mode() -> StartupMode {
             }
         }
         if arg == "--benchmark-material-eval" {
-            if let Some(value) = args.next() {
-                return StartupMode::MaterialEval(PathBuf::from(value));
-            }
+            return StartupMode::MaterialEval(args.next().map(PathBuf::from).unwrap_or_default());
         }
         if let Some(value) = arg.strip_prefix("--benchmark-material-texture=") {
             let samples = value
@@ -195,9 +193,14 @@ fn write_benchmark_report(destination: &Path, report: &str, label: &str) {
     }
 }
 
+fn benchmark_failed(label: &str, err: &anyhow::Error) -> ! {
+    eprintln!("{label} failed: {err:#}");
+    std::process::exit(1);
+}
+
 fn main() -> eframe::Result<()> {
     let mode = startup_mode();
-    if matches!(mode, StartupMode::Version) {
+    if matches!(&mode, StartupMode::Version) {
         println!("{APP_TITLE}");
         return Ok(());
     }
@@ -213,7 +216,7 @@ fn main() -> eframe::Result<()> {
             Ok(report) => {
                 write_benchmark_report(&ann_benchmark_report_path(&db_path), &report, "ANN")
             }
-            Err(err) => eprintln!("ANN benchmark failed: {err:#}"),
+            Err(err) => benchmark_failed("ANN benchmark", &err),
         }
         return Ok(());
     }
@@ -225,7 +228,7 @@ fn main() -> eframe::Result<()> {
                 &report,
                 "CLIP preview",
             ),
-            Err(err) => eprintln!("CLIP preview benchmark failed: {err:#}"),
+            Err(err) => benchmark_failed("CLIP preview benchmark", &err),
         }
         return Ok(());
     }
@@ -237,7 +240,7 @@ fn main() -> eframe::Result<()> {
                 &report,
                 "CLIP runtime",
             ),
-            Err(err) => eprintln!("CLIP runtime benchmark failed: {err:#}"),
+            Err(err) => benchmark_failed("CLIP runtime benchmark", &err),
         }
         return Ok(());
     }
@@ -249,19 +252,19 @@ fn main() -> eframe::Result<()> {
                 &report,
                 "image models",
             ),
-            Err(err) => eprintln!("Image model benchmark failed: {err:#}"),
+            Err(err) => benchmark_failed("Image model benchmark", &err),
         }
         return Ok(());
     }
 
-    if matches!(mode, StartupMode::LibraryProfile) {
+    if matches!(&mode, StartupMode::LibraryProfile) {
         match library_profile::benchmark(&db_path) {
             Ok(report) => write_benchmark_report(
                 &library_profile_report_path(&db_path),
                 &report,
                 "library profile",
             ),
-            Err(err) => eprintln!("Library profile benchmark failed: {err:#}"),
+            Err(err) => benchmark_failed("Library profile benchmark", &err),
         }
         return Ok(());
     }
@@ -273,7 +276,7 @@ fn main() -> eframe::Result<()> {
                 &report,
                 "labeled material evaluation",
             ),
-            Err(err) => eprintln!("Labeled material evaluation failed: {err:#}"),
+            Err(err) => benchmark_failed("Labeled material evaluation", &err),
         }
         return Ok(());
     }
@@ -285,7 +288,7 @@ fn main() -> eframe::Result<()> {
                 &report,
                 "material texture",
             ),
-            Err(err) => eprintln!("Material texture benchmark failed: {err:#}"),
+            Err(err) => benchmark_failed("Material texture benchmark", &err),
         }
         return Ok(());
     }
