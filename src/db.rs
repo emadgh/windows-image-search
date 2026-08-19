@@ -22,6 +22,41 @@ pub struct ImageRecord {
     pub score: Option<f32>,
 }
 
+#[derive(Clone, Debug)]
+pub struct ImageSummary {
+    pub path: PathBuf,
+    pub root: PathBuf,
+    pub file_name: String,
+    pub extension: String,
+    pub size: u64,
+    pub modified: i64,
+    pub width: u32,
+    pub height: u32,
+    pub description: String,
+    pub keywords: String,
+    pub dominant: [u8; 3],
+    pub score: Option<f32>,
+}
+
+impl From<ImageRecord> for ImageSummary {
+    fn from(record: ImageRecord) -> Self {
+        Self {
+            path: record.path,
+            root: record.root,
+            file_name: record.file_name,
+            extension: record.extension,
+            size: record.size,
+            modified: record.modified,
+            width: record.width,
+            height: record.height,
+            description: record.description,
+            keywords: record.keywords,
+            dominant: record.dominant,
+            score: record.score,
+        }
+    }
+}
+
 pub fn open(db_path: &Path) -> Result<Connection> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -319,6 +354,41 @@ pub fn delete_stale_for_root(conn: &Connection, root: &Path, generation: i64) ->
     )?)
 }
 
+pub fn load_image_summaries(db_path: &Path) -> Result<Vec<ImageSummary>> {
+    let conn = open(db_path)?;
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT path, root, file_name, extension, size, modified, width, height,
+               description, keywords, dominant_r, dominant_g, dominant_b
+        FROM images
+        ORDER BY file_name COLLATE NOCASE
+        "#,
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(ImageSummary {
+            path: PathBuf::from(row.get::<_, String>(0)?),
+            root: PathBuf::from(row.get::<_, String>(1)?),
+            file_name: row.get(2)?,
+            extension: row.get(3)?,
+            size: row.get::<_, i64>(4)?.max(0) as u64,
+            modified: row.get(5)?,
+            width: row.get::<_, i64>(6)?.max(0) as u32,
+            height: row.get::<_, i64>(7)?.max(0) as u32,
+            description: row.get(8)?,
+            keywords: row.get(9)?,
+            dominant: [
+                row.get::<_, i64>(10)?.clamp(0, 255) as u8,
+                row.get::<_, i64>(11)?.clamp(0, 255) as u8,
+                row.get::<_, i64>(12)?.clamp(0, 255) as u8,
+            ],
+            score: None,
+        })
+    })?;
+
+    Ok(rows.filter_map(|row| row.ok()).collect())
+}
+
 pub fn load_images(db_path: &Path) -> Result<Vec<ImageRecord>> {
     let conn = open(db_path)?;
     let mut stmt = conn.prepare(
@@ -448,6 +518,50 @@ mod tests {
             assert!(states.contains_key(&present));
             assert!(!states.contains_key(&stale));
         }
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(format!("{}-wal", db_path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", db_path.display()));
+    }
+
+    #[test]
+    fn lightweight_summaries_match_metadata_without_feature_blobs() {
+        let db_path = temp_db_path("lightweight-summary");
+        let root = std::env::temp_dir().join("windows-image-search-summary-root");
+        let image = root.join("sample.jpg");
+
+        {
+            let conn = open(&db_path).unwrap();
+            upsert_image(
+                &conn,
+                &image,
+                &root,
+                "sample.jpg",
+                "jpg",
+                1234,
+                5678,
+                320,
+                240,
+                "description",
+                "keyword",
+                [12, 34, 56],
+                0x1234,
+                &[0.2, 0.8],
+            )
+            .unwrap();
+            set_embedding(&conn, &image, &[0.1, 0.2, 0.3, 0.4]).unwrap();
+        }
+
+        let full = load_images(&db_path).unwrap();
+        let summaries = load_image_summaries(&db_path).unwrap();
+        assert_eq!(full.len(), 1);
+        assert_eq!(summaries.len(), 1);
+        assert!(full[0].embedding.is_some());
+        assert!(full[0].color_histogram.is_some());
+        assert_eq!(summaries[0].path, full[0].path);
+        assert_eq!(summaries[0].file_name, full[0].file_name);
+        assert_eq!(summaries[0].description, full[0].description);
+        assert_eq!(summaries[0].dominant, full[0].dominant);
 
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(format!("{}-wal", db_path.display()));

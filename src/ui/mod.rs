@@ -1,7 +1,7 @@
 mod thumbnails;
 mod views;
 
-use crate::db::{self, ImageRecord};
+use crate::db::{self, ImageSummary};
 use crate::embedding::EmbeddingService;
 use crate::indexer::{self, WorkerMessage};
 use crate::settings::{self, IndexingSettings};
@@ -29,9 +29,9 @@ pub struct ImageSearchApp {
     pub(super) db_path: PathBuf,
     embedding_service: EmbeddingService,
     pub(super) roots: Vec<PathBuf>,
-    pub(super) images: Vec<ImageRecord>,
+    pub(super) images: Vec<ImageSummary>,
     image_positions: HashMap<PathBuf, usize>,
-    pub(super) similarity_results: Option<Vec<ImageRecord>>,
+    pub(super) similarity_results: Option<Vec<ImageSummary>>,
     pub(super) query_image: Option<PathBuf>,
     pub(super) similarity_settings: indexer::SimilaritySettings,
     pub(super) indexing_settings: IndexingSettings,
@@ -66,7 +66,7 @@ impl ImageSearchApp {
         let settings_path = app_data_dir.join("performance-settings.ini");
         let indexing_settings = settings::load(&settings_path);
         let embedding_service = EmbeddingService::new(model_cache);
-        let images = db::load_images(&db_path).unwrap_or_default();
+        let images = db::load_image_summaries(&db_path).unwrap_or_default();
         let image_positions = images
             .iter()
             .enumerate()
@@ -113,7 +113,7 @@ impl ImageSearchApp {
                 WorkerMessage::Progress { done, total } => self.progress = Some((done, total)),
                 WorkerMessage::IndexedBatch(records) => self.merge_indexed_batch(records),
                 WorkerMessage::Reload => {
-                    match db::load_images(&self.db_path) {
+                    match db::load_image_summaries(&self.db_path) {
                         Ok(images) => {
                             self.images = images;
                             self.rebuild_image_positions();
@@ -149,7 +149,7 @@ impl ImageSearchApp {
         );
     }
 
-    fn merge_indexed_batch(&mut self, records: Vec<ImageRecord>) {
+    fn merge_indexed_batch(&mut self, records: Vec<ImageSummary>) {
         for record in records {
             if let Some(&index) = self.image_positions.get(&record.path) {
                 self.images[index] = record;
@@ -231,7 +231,7 @@ impl ImageSearchApp {
         match db::remove_root(&self.db_path, folder) {
             Ok(()) => {
                 self.roots = db::load_roots(&self.db_path).unwrap_or_default();
-                self.images = db::load_images(&self.db_path).unwrap_or_default();
+                self.images = db::load_image_summaries(&self.db_path).unwrap_or_default();
                 self.rebuild_image_positions();
                 self.similarity_results = None;
                 self.selected_paths.clear();
@@ -278,7 +278,7 @@ impl ImageSearchApp {
         );
     }
 
-    pub(super) fn source(&self) -> &[ImageRecord] {
+    pub(super) fn source(&self) -> &[ImageSummary] {
         self.similarity_results.as_deref().unwrap_or(&self.images)
     }
 
