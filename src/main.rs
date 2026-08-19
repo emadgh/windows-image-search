@@ -143,11 +143,9 @@ fn main() -> eframe::Result<()> {
 
     if let StartupMode::AnnBenchmark(query_count) = mode {
         match ann::benchmark(&db_path, query_count) {
-            Ok(report) => write_benchmark_report(
-                &ann_benchmark_report_path(&db_path),
-                &report,
-                "ANN",
-            ),
+            Ok(report) => {
+                write_benchmark_report(&ann_benchmark_report_path(&db_path), &report, "ANN")
+            }
             Err(err) => eprintln!("ANN benchmark failed: {err:#}"),
         }
         return Ok(());

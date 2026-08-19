@@ -65,18 +65,8 @@ pub fn benchmark(db_path: &Path, model_cache: &Path, requested_samples: usize) -
         .with_context(|| format!("creating model cache {}", model_cache.display()))?;
 
     let cpu_threads = benchmark_cpu_threads();
-    let cpu = benchmark_backend(
-        Backend::Cpu,
-        model_cache,
-        &samples,
-        cpu_threads,
-    )?;
-    let directml = benchmark_backend(
-        Backend::DirectMl,
-        model_cache,
-        &samples,
-        cpu_threads,
-    );
+    let cpu = benchmark_backend(Backend::Cpu, model_cache, &samples, cpu_threads)?;
+    let directml = benchmark_backend(Backend::DirectMl, model_cache, &samples, cpu_threads);
 
     let mut report = String::new();
     writeln!(report, "Windows Image Search CLIP Runtime Benchmark")?;
@@ -107,7 +97,11 @@ pub fn benchmark(db_path: &Path, model_cache: &Path, requested_samples: usize) -
         }
         Err(err) => {
             writeln!(report, "directml_available=false")?;
-            writeln!(report, "directml_error={}", one_line_error(&format!("{err:#}")))?;
+            writeln!(
+                report,
+                "directml_error={}",
+                one_line_error(&format!("{err:#}"))
+            )?;
         }
     }
 
@@ -234,16 +228,16 @@ fn append_backend_report(
         .min_by(|left, right| left.median.cmp(&right.median))
     {
         writeln!(report, "{prefix}_best_batch_size={}", best.batch_size)?;
-        writeln!(
-            report,
-            "{prefix}_best_median_ms={:.3}",
-            ms(best.median)
-        )?;
+        writeln!(report, "{prefix}_best_median_ms={:.3}", ms(best.median))?;
     }
     Ok(())
 }
 
-fn append_speedups(report: &mut String, cpu: &BackendReport, directml: &BackendReport) -> Result<()> {
+fn append_speedups(
+    report: &mut String,
+    cpu: &BackendReport,
+    directml: &BackendReport,
+) -> Result<()> {
     for cpu_measurement in &cpu.measurements {
         let Some(dml_measurement) = directml
             .measurements

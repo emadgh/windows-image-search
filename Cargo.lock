@@ -6017,7 +6017,7 @@ dependencies = [
 
 [[package]]
 name = "windows-image-search"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6030,6 +6030,7 @@ dependencies = [
  "kamadak-exif",
  "notify",
  "open",
+ "ort",
  "rayon",
  "rfd",
  "rusqlite",
