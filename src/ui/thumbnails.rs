@@ -73,8 +73,8 @@ impl SchedulerState {
         let mut enqueue = None;
 
         if let Some(pending) = self.pending.get_mut(path) {
-            let was_stale = sequence.saturating_sub(pending.last_seen_sequence)
-                > STALE_REQUEST_DISTANCE;
+            let was_stale =
+                sequence.saturating_sub(pending.last_seen_sequence) > STALE_REQUEST_DISTANCE;
             pending.last_seen_sequence = sequence;
 
             // If a path returns to the viewport after being stale, promote it
