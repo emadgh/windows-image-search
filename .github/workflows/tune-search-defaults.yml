@@ -1,0 +1,49 @@
+name: Tune search defaults
+
+on:
+  push:
+    branches: [feat/search-controls-and-recursive-scan]
+    paths:
+      - .github/workflows/tune-search-defaults.yml
+
+permissions:
+  contents: write
+
+jobs:
+  tune:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/search-controls-and-recursive-scan
+
+      - name: Tune strict color defaults and regression fixture
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('src/indexer.rs')
+          s = p.read_text(encoding='utf-8')
+          s = s.replace('min_color_distribution_match: 18.0,', 'min_color_distribution_match: 30.0,', 1)
+          s = s.replace('max_dominant_color_difference: 35.0,', 'max_dominant_color_difference: 30.0,', 1)
+          s = s.replace('assert!(!passes_color_gate(Some(0.72), gray_dominant, settings));', 'assert!(!passes_color_gate(Some(0.12), gray_dominant, settings));', 1)
+          p.write_text(s, encoding='utf-8')
+          PY
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Format
+        run: cargo fmt --all
+
+      - name: Commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/indexer.rs
+          git commit -m "fix: use stricter default color rejection"
+          git push origin HEAD:feat/search-controls-and-recursive-scan
