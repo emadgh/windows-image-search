@@ -1,0 +1,30 @@
+[package]
+name = "windows-image-search"
+version = "0.1.0"
+edition = "2021"
+description = "Local image indexing and visual search for Windows"
+license = "MIT"
+repository = "https://github.com/emadgh/windows-image-search"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = true }
+dirs = "6"
+eframe = { version = "0.32", default-features = true }
+egui = "0.32"
+fastembed = "5.17.4"
+image = { version = "0.25", features = ["jpeg", "png", "tiff"] }
+kamadak-exif = "0.6"
+open = "5"
+rfd = "0.15"
+rusqlite = { version = "0.37", features = ["bundled"] }
+walkdir = "2.5"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[package.metadata.bundle]
+name = "Windows Image Search"
+identifier = "com.emadgh.windows-image-search"
