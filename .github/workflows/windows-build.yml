@@ -30,6 +30,9 @@ jobs:
       - name: Apply Collections implementation
         run: python scripts/apply_collections.py
 
+      - name: Format source
+        run: cargo fmt --all
+
       - name: Format check
         run: cargo fmt --all -- --check
 
