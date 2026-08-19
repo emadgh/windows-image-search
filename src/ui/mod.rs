@@ -2,6 +2,7 @@ mod thumbnails;
 mod views;
 
 use crate::db::{self, ImageRecord};
+use crate::embedding::EmbeddingService;
 use crate::indexer::{self, WorkerMessage};
 use crate::settings::{self, IndexingSettings};
 use eframe::egui;
@@ -26,7 +27,7 @@ pub(super) enum ThumbnailFit {
 
 pub struct ImageSearchApp {
     pub(super) db_path: PathBuf,
-    pub(super) model_cache: PathBuf,
+    embedding_service: EmbeddingService,
     pub(super) roots: Vec<PathBuf>,
     pub(super) images: Vec<ImageRecord>,
     image_positions: HashMap<PathBuf, usize>,
@@ -64,6 +65,7 @@ impl ImageSearchApp {
         let thumbnail_cache = app_data_dir.join("thumbnail-cache");
         let settings_path = app_data_dir.join("performance-settings.ini");
         let indexing_settings = settings::load(&settings_path);
+        let embedding_service = EmbeddingService::new(model_cache);
         let images = db::load_images(&db_path).unwrap_or_default();
         let image_positions = images
             .iter()
@@ -75,7 +77,7 @@ impl ImageSearchApp {
             images,
             image_positions,
             db_path,
-            model_cache,
+            embedding_service,
             similarity_results: None,
             query_image: None,
             similarity_settings: indexer::SimilaritySettings::default(),
@@ -199,9 +201,9 @@ impl ImageSearchApp {
         self.status = "Starting recursive rescan…".into();
         indexer::spawn_rescan(
             self.db_path.clone(),
-            self.model_cache.clone(),
             self.roots.clone(),
             self.indexing_settings,
+            self.embedding_service.clone(),
             self.tx.clone(),
         );
     }
@@ -268,10 +270,10 @@ impl ImageSearchApp {
         self.status = "Starting image search with current controls…".into();
         indexer::spawn_similarity_search(
             self.db_path.clone(),
-            self.model_cache.clone(),
             path,
             self.similarity_settings,
             self.indexing_settings,
+            self.embedding_service.clone(),
             self.tx.clone(),
         );
     }

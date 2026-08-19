@@ -1,8 +1,8 @@
 use crate::db::{self, ImageRecord};
+use crate::embedding::EmbeddingService;
 use crate::metadata;
 use crate::settings::IndexingSettings;
-use anyhow::{Context, Result};
-use fastembed::{ImageEmbedding, ImageEmbeddingModel, ImageInitOptions};
+use anyhow::{bail, Context, Result};
 use image::{imageops::FilterType, DynamicImage, GenericImageView, Pixel};
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
@@ -97,13 +97,13 @@ pub enum WorkerMessage {
 
 pub fn spawn_rescan(
     db_path: PathBuf,
-    model_cache: PathBuf,
     roots: Vec<PathBuf>,
     indexing_settings: IndexingSettings,
+    embedding_service: EmbeddingService,
     tx: Sender<WorkerMessage>,
 ) {
     std::thread::spawn(move || {
-        let result = rescan(&db_path, &model_cache, &roots, indexing_settings, &tx);
+        let result = rescan(&db_path, &roots, indexing_settings, &embedding_service, &tx);
         if let Err(err) = result {
             let _ = tx.send(WorkerMessage::Error(format!("Indexing failed: {err:#}")));
         }
@@ -114,9 +114,9 @@ pub fn spawn_rescan(
 
 fn rescan(
     db_path: &Path,
-    model_cache: &Path,
     roots: &[PathBuf],
     indexing_settings: IndexingSettings,
+    embedding_service: &EmbeddingService,
     tx: &Sender<WorkerMessage>,
 ) -> Result<()> {
     let indexing_settings = indexing_settings.sanitized();
@@ -357,8 +357,13 @@ fn rescan(
 
     let missing = db::paths_missing_embedding(&conn)?;
     if !missing.is_empty() {
-        if let Err(err) = build_embeddings(&mut conn, model_cache, &missing, indexing_settings, tx)
-        {
+        if let Err(err) = build_embeddings(
+            &mut conn,
+            &missing,
+            indexing_settings,
+            embedding_service,
+            tx,
+        ) {
             let _ = tx.send(WorkerMessage::Error(format!(
                 "Texture/color index is ready, but CLIP indexing is unavailable: {err:#}"
             )));
@@ -422,39 +427,51 @@ fn build_visual_descriptors(
 
 fn build_embeddings(
     conn: &mut rusqlite::Connection,
-    model_cache: &Path,
     paths: &[PathBuf],
     indexing_settings: IndexingSettings,
+    embedding_service: &EmbeddingService,
     tx: &Sender<WorkerMessage>,
 ) -> Result<()> {
     let indexing_settings = indexing_settings.sanitized();
-    std::fs::create_dir_all(model_cache)?;
     let _ = tx.send(WorkerMessage::Status(
-        "Loading CLIP model (first use may download it)…".to_owned(),
+        "Using persistent CLIP embedding service…".to_owned(),
     ));
-    let options = ImageInitOptions::new(ImageEmbeddingModel::ClipVitB32)
-        .with_cache_dir(model_cache.to_path_buf())
-        .with_show_download_progress(true)
-        .with_intra_threads(indexing_settings.clip_threads);
-    let mut model = ImageEmbedding::try_new(options).context("loading CLIP image model")?;
 
     let total = paths.len();
     let batch_size = indexing_settings.batch_size;
     for (batch_index, batch) in paths.chunks(batch_size).enumerate() {
-        let batch_paths = batch.to_vec();
-        let embeddings = model
-            .embed(batch_paths, Some(batch_size))
+        let response = embedding_service
+            .embed(batch.to_vec(), batch_size, indexing_settings.clip_threads)
             .with_context(|| format!("embedding image batch {}", batch_index + 1))?;
+        if response.embeddings.len() != batch.len() {
+            bail!(
+                "CLIP returned {} embeddings for {} input images",
+                response.embeddings.len(),
+                batch.len()
+            );
+        }
+        if batch_index == 0 {
+            let _ = tx.send(WorkerMessage::Status(if response.model_reloaded {
+                format!(
+                    "CLIP model initialized with {} CPU thread{}; subsequent batches/searches will reuse it",
+                    indexing_settings.clip_threads,
+                    if indexing_settings.clip_threads == 1 { "" } else { "s" }
+                )
+            } else {
+                "Reusing the already-loaded CLIP model".to_owned()
+            }));
+        }
+
         {
             let transaction = conn.transaction()?;
-            for (path, embedding) in batch.iter().zip(embeddings.iter()) {
+            for (path, embedding) in batch.iter().zip(response.embeddings.iter()) {
                 db::set_embedding(&transaction, path, embedding)?;
             }
             transaction.commit()?;
         }
         let done = ((batch_index + 1) * batch_size).min(total);
         let _ = tx.send(WorkerMessage::Status(format!(
-            "Building CLIP index: {done}/{total} (committed)"
+            "Building CLIP index: {done}/{total} (committed; persistent model)"
         )));
     }
     Ok(())
@@ -462,10 +479,10 @@ fn build_embeddings(
 
 pub fn spawn_similarity_search(
     db_path: PathBuf,
-    model_cache: PathBuf,
     query_path: PathBuf,
     settings: SimilaritySettings,
     indexing_settings: IndexingSettings,
+    embedding_service: EmbeddingService,
     tx: Sender<WorkerMessage>,
 ) {
     std::thread::spawn(move || {
@@ -474,10 +491,10 @@ pub fn spawn_similarity_search(
         ));
         match similarity_search(
             &db_path,
-            &model_cache,
             &query_path,
             settings,
             indexing_settings,
+            &embedding_service,
             &tx,
         ) {
             Ok(results) => {
@@ -499,10 +516,10 @@ pub fn spawn_similarity_search(
 
 fn similarity_search(
     db_path: &Path,
-    model_cache: &Path,
     query_path: &Path,
     settings: SimilaritySettings,
     indexing_settings: IndexingSettings,
+    embedding_service: &EmbeddingService,
     tx: &Sender<WorkerMessage>,
 ) -> Result<Vec<ImageRecord>> {
     let indexing_settings = indexing_settings.sanitized();
@@ -524,16 +541,26 @@ fn similarity_search(
     let query_image = decode_image(query_path)?;
     let (query_dominant, query_hash, query_histogram) = visual_descriptor(&query_image);
 
-    let query_embedding =
-        match query_clip_embedding(model_cache, query_path, indexing_settings.clip_threads) {
-            Ok(embedding) => Some(embedding),
-            Err(err) => {
-                let _ = tx.send(WorkerMessage::Status(format!(
-                    "CLIP unavailable; using texture/color similarity only ({err})"
-                )));
-                None
-            }
-        };
+    let query_embedding = match query_clip_embedding(
+        embedding_service,
+        query_path,
+        indexing_settings.clip_threads,
+    ) {
+        Ok((embedding, model_reloaded)) => {
+            let _ = tx.send(WorkerMessage::Status(if model_reloaded {
+                "CLIP model initialized for this query; future searches will reuse it".to_owned()
+            } else {
+                "Reusing loaded CLIP model for query".to_owned()
+            }));
+            Some(embedding)
+        }
+        Err(err) => {
+            let _ = tx.send(WorkerMessage::Status(format!(
+                "CLIP unavailable; using texture/color similarity only ({err})"
+            )));
+            None
+        }
+    };
 
     let query_key = normalized_path_key(query_path);
     let mut records = db::load_images(db_path)?;
@@ -592,23 +619,18 @@ fn similarity_search(
 }
 
 fn query_clip_embedding(
-    model_cache: &Path,
+    embedding_service: &EmbeddingService,
     query_path: &Path,
     clip_threads: usize,
-) -> Result<Vec<f32>> {
-    std::fs::create_dir_all(model_cache)?;
-    let options = ImageInitOptions::new(ImageEmbeddingModel::ClipVitB32)
-        .with_cache_dir(model_cache.to_path_buf())
-        .with_show_download_progress(true)
-        .with_intra_threads(clip_threads.max(1));
-    let mut model = ImageEmbedding::try_new(options).context("loading CLIP image model")?;
-    let query_vecs = model
-        .embed(vec![query_path.to_path_buf()], Some(1))
-        .context("embedding query image")?;
-    query_vecs
+) -> Result<(Vec<f32>, bool)> {
+    let response = embedding_service.embed(vec![query_path.to_path_buf()], 1, clip_threads)?;
+    let model_reloaded = response.model_reloaded;
+    let embedding = response
+        .embeddings
         .into_iter()
         .next()
-        .context("CLIP returned no query embedding")
+        .context("CLIP returned no query embedding")?;
+    Ok((embedding, model_reloaded))
 }
 
 fn passes_color_gate(
