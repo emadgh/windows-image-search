@@ -1,8 +1,10 @@
 use crate::db;
 use anyhow::{bail, Context, Result};
 use hnsw_rs::prelude::{AnnT, DistCosine, Hnsw, HnswIo};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 const INDEX_DIR_NAME: &str = "ann-index";
 const INDEX_BASENAME: &str = "clip-cosine-v1";
@@ -11,6 +13,8 @@ const MANIFEST_VERSION: u32 = 1;
 const MAX_CONNECTIONS: usize = 24;
 const MAX_LAYERS: usize = 16;
 const EF_CONSTRUCTION: usize = 200;
+const DEFAULT_BENCHMARK_QUERIES: usize = 32;
+const BENCHMARK_K_VALUES: [usize; 3] = [10, 50, 100];
 
 #[derive(Clone, Debug)]
 struct Manifest {
@@ -28,31 +32,18 @@ pub fn search_candidates(
         return Ok(HashMap::new());
     }
 
-    let signature = db::ann_index_signature(db_path)?;
     let index_dir = index_dir_for_db(db_path);
-    let manifest = match load_manifest(&index_dir) {
-        Ok(manifest)
-            if manifest.signature == signature && dump_exists(&index_dir, &manifest.basename) =>
-        {
-            manifest
-        }
-        _ => rebuild(db_path, &index_dir, signature)?,
-    };
-
+    let (manifest, _) = ensure_manifest(db_path, &index_dir)?;
     if manifest.count == 0 {
         return Ok(HashMap::new());
     }
 
-    let mut loader = HnswIo::new(&index_dir, &manifest.basename);
-    let hnsw: Hnsw<f32, DistCosine> = loader
-        .load_hnsw::<f32, DistCosine>()
-        .context("loading persisted CLIP HNSW index")?;
-
+    let hnsw = load_index(&index_dir, &manifest)?;
     let k = limit.min(manifest.count);
     if k == 0 {
         return Ok(HashMap::new());
     }
-    let ef = (k + 512).min(manifest.count).max(k);
+    let ef = search_ef(k, manifest.count);
     let neighbours = hnsw.search(query, k, ef);
 
     Ok(neighbours
@@ -64,6 +55,142 @@ pub fn search_candidates(
             (neighbour.d_id, similarity)
         })
         .collect())
+}
+
+pub fn benchmark(db_path: &Path, requested_queries: usize) -> Result<String> {
+    let entries = db::load_ann_embeddings(db_path)?;
+    if entries.len() < 2 {
+        bail!("ANN benchmark requires at least 2 indexed CLIP embeddings");
+    }
+
+    let index_dir = index_dir_for_db(db_path);
+    let prepare_started = Instant::now();
+    let (manifest, rebuilt) = ensure_manifest(db_path, &index_dir)?;
+    let prepare_ms = prepare_started.elapsed().as_secs_f64() * 1_000.0;
+    if manifest.count == 0 {
+        bail!("ANN benchmark found no persisted CLIP vectors");
+    }
+
+    let load_started = Instant::now();
+    let hnsw = load_index(&index_dir, &manifest)?;
+    let load_ms = load_started.elapsed().as_secs_f64() * 1_000.0;
+
+    let query_indices = sample_indices(entries.len(), requested_queries.max(1));
+    let k_values: Vec<usize> = BENCHMARK_K_VALUES
+        .into_iter()
+        .map(|k| k.min(entries.len()))
+        .filter(|k| *k > 0)
+        .fold(Vec::new(), |mut values, k| {
+            if values.last().copied() != Some(k) {
+                values.push(k);
+            }
+            values
+        });
+    let max_k = *k_values.last().context("benchmark has no K values")?;
+    let ef = search_ef(max_k, manifest.count);
+
+    let mut ann_us = Vec::with_capacity(query_indices.len());
+    let mut exact_us = Vec::with_capacity(query_indices.len());
+    let mut overlap_totals = vec![0usize; k_values.len()];
+
+    for index in &query_indices {
+        let query = &entries[*index].embedding;
+
+        let exact_started = Instant::now();
+        let exact = exact_top_rowids(&entries, query, max_k);
+        exact_us.push(exact_started.elapsed().as_micros());
+
+        let ann_started = Instant::now();
+        let ann: Vec<usize> = hnsw
+            .search(query, max_k.min(manifest.count), ef)
+            .into_iter()
+            .map(|neighbour| neighbour.d_id)
+            .collect();
+        ann_us.push(ann_started.elapsed().as_micros());
+
+        for (slot, k) in k_values.iter().copied().enumerate() {
+            let exact_set: HashSet<usize> = exact.iter().take(k).copied().collect();
+            overlap_totals[slot] += ann
+                .iter()
+                .take(k)
+                .filter(|rowid| exact_set.contains(rowid))
+                .count();
+        }
+    }
+
+    let ann_avg = average_ms(&ann_us);
+    let exact_avg = average_ms(&exact_us);
+    let speedup = if ann_avg > f64::EPSILON {
+        exact_avg / ann_avg
+    } else {
+        0.0
+    };
+
+    let mut report = String::new();
+    writeln!(report, "Windows Image Search ANN Benchmark")?;
+    writeln!(report, "application_version=v{}", env!("CARGO_PKG_VERSION"))?;
+    writeln!(report, "vectors={}", entries.len())?;
+    writeln!(report, "queries={}", query_indices.len())?;
+    writeln!(report, "hnsw_rebuilt={rebuilt}")?;
+    writeln!(report, "index_prepare_ms={prepare_ms:.3}")?;
+    writeln!(report, "index_load_ms={load_ms:.3}")?;
+    writeln!(report, "hnsw_m={MAX_CONNECTIONS}")?;
+    writeln!(report, "hnsw_ef_construction={EF_CONSTRUCTION}")?;
+    writeln!(report, "hnsw_ef_search={ef}")?;
+    writeln!(report, "ann_avg_ms={ann_avg:.3}")?;
+    writeln!(report, "ann_p50_ms={:.3}", percentile_ms(&ann_us, 0.50))?;
+    writeln!(report, "ann_p95_ms={:.3}", percentile_ms(&ann_us, 0.95))?;
+    writeln!(report, "bruteforce_avg_ms={exact_avg:.3}")?;
+    writeln!(
+        report,
+        "bruteforce_p50_ms={:.3}",
+        percentile_ms(&exact_us, 0.50)
+    )?;
+    writeln!(
+        report,
+        "bruteforce_p95_ms={:.3}",
+        percentile_ms(&exact_us, 0.95)
+    )?;
+    writeln!(report, "warm_query_speedup={speedup:.2}x")?;
+
+    for (slot, k) in k_values.iter().copied().enumerate() {
+        let denominator = query_indices.len() * k;
+        let recall = if denominator == 0 {
+            0.0
+        } else {
+            overlap_totals[slot] as f64 / denominator as f64
+        };
+        writeln!(report, "recall@{k}={:.2}%", recall * 100.0)?;
+    }
+
+    Ok(report)
+}
+
+pub fn default_benchmark_queries() -> usize {
+    DEFAULT_BENCHMARK_QUERIES
+}
+
+fn ensure_manifest(db_path: &Path, index_dir: &Path) -> Result<(Manifest, bool)> {
+    let signature = db::ann_index_signature(db_path)?;
+    match load_manifest(index_dir) {
+        Ok(manifest)
+            if manifest.signature == signature && dump_exists(index_dir, &manifest.basename) =>
+        {
+            Ok((manifest, false))
+        }
+        _ => Ok((rebuild(db_path, index_dir, signature)?, true)),
+    }
+}
+
+fn load_index(index_dir: &Path, manifest: &Manifest) -> Result<Hnsw<f32, DistCosine>> {
+    let mut loader = HnswIo::new(index_dir, &manifest.basename);
+    loader
+        .load_hnsw::<f32, DistCosine>()
+        .context("loading persisted CLIP HNSW index")
+}
+
+fn search_ef(k: usize, count: usize) -> usize {
+    (k + 512).min(count).max(k)
 }
 
 fn rebuild(db_path: &Path, index_dir: &Path, signature: u64) -> Result<Manifest> {
@@ -104,6 +231,48 @@ fn rebuild(db_path: &Path, index_dir: &Path, signature: u64) -> Result<Manifest>
     };
     store_manifest(index_dir, &manifest)?;
     Ok(manifest)
+}
+
+fn exact_top_rowids(entries: &[db::AnnEmbedding], query: &[f32], limit: usize) -> Vec<usize> {
+    let mut ranked: Vec<(usize, f32)> = entries
+        .iter()
+        .map(|entry| (entry.rowid, dot_product(query, &entry.embedding)))
+        .collect();
+    if ranked.len() > limit {
+        ranked.select_nth_unstable_by(limit, |a, b| b.1.total_cmp(&a.1));
+        ranked.truncate(limit);
+    }
+    ranked.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+    ranked.into_iter().map(|(rowid, _)| rowid).collect()
+}
+
+fn dot_product(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b.iter()).map(|(left, right)| left * right).sum()
+}
+
+fn sample_indices(total: usize, requested: usize) -> Vec<usize> {
+    if total == 0 {
+        return Vec::new();
+    }
+    let count = requested.clamp(1, total);
+    (0..count).map(|index| index * total / count).collect()
+}
+
+fn average_ms(values_us: &[u128]) -> f64 {
+    if values_us.is_empty() {
+        return 0.0;
+    }
+    values_us.iter().copied().sum::<u128>() as f64 / values_us.len() as f64 / 1_000.0
+}
+
+fn percentile_ms(values_us: &[u128], percentile: f64) -> f64 {
+    if values_us.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = values_us.to_vec();
+    sorted.sort_unstable();
+    let position = ((sorted.len() - 1) as f64 * percentile.clamp(0.0, 1.0)).round() as usize;
+    sorted[position] as f64 / 1_000.0
 }
 
 fn index_dir_for_db(db_path: &Path) -> PathBuf {
@@ -193,5 +362,39 @@ mod tests {
         assert_eq!(loaded.basename, manifest.basename);
         assert_eq!(loaded.count, manifest.count);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn benchmark_sampling_is_even_and_unique() {
+        assert_eq!(sample_indices(10, 4), vec![0, 2, 5, 7]);
+        assert_eq!(sample_indices(3, 10), vec![0, 1, 2]);
+        assert!(sample_indices(0, 10).is_empty());
+    }
+
+    #[test]
+    fn exact_top_rows_prefer_identical_normalized_vector() {
+        let entries = vec![
+            db::AnnEmbedding {
+                rowid: 11,
+                embedding: vec![1.0, 0.0],
+            },
+            db::AnnEmbedding {
+                rowid: 22,
+                embedding: vec![0.8, 0.6],
+            },
+            db::AnnEmbedding {
+                rowid: 33,
+                embedding: vec![0.0, 1.0],
+            },
+        ];
+        let ranked = exact_top_rowids(&entries, &[1.0, 0.0], 2);
+        assert_eq!(ranked, vec![11, 22]);
+    }
+
+    #[test]
+    fn percentile_uses_sorted_duration_distribution() {
+        let values = [1_000, 2_000, 10_000, 4_000, 3_000];
+        assert_eq!(percentile_ms(&values, 0.50), 3.0);
+        assert_eq!(percentile_ms(&values, 0.95), 10.0);
     }
 }
