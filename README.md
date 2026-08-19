@@ -68,10 +68,35 @@ Results are saved under a timestamped `benchmark-results` directory and compress
   -PreviewSamples 96 `
   -RuntimeSamples 96 `
   -ImageModelQueries 32 `
-  -TextureSamples 48
+  -TextureSamples 48 `
+  -MaterialEvalManifest .\material-eval.tsv
 ```
 
 Peak working set is process-level resident RAM. Private-memory and GPU-memory values are sampled while the benchmark runs rather than being allocator-level exact maxima. `Win32_VideoController.AdapterRAM` in `system-info.json` is the capacity reported by Windows/WMI and can differ from exact dedicated VRAM on some drivers.
+
+`-MaterialEvalManifest` is optional. When it is omitted, `manifest.json` and `summary.txt` explicitly mark labeled same-material evaluation as not run. When supplied, its path is passed as a discrete process argument, so spaces in the manifest path are supported.
+
+### Labeled same-material evaluation
+
+Use a small manually curated UTF-8 TSV when you need to measure retrieval across *different images of the same material/design*, not only transformed copies of one source image:
+
+```text
+group	path
+Calacatta Gold	D:\Material Eval\calacatta-face-01.jpg
+Calacatta Gold	D:\Material Eval\calacatta-face-02.jpg
+Travertine Beige	travertine-face-01.jpg
+Travertine Beige	travertine-face-02.jpg
+```
+
+Blank lines and lines beginning with `#` are ignored. Relative paths are resolved relative to the TSV file. Every evaluated group must contain at least two distinct indexed images; assigning one image path to different groups is rejected.
+
+Run the labeled benchmark directly:
+
+```powershell
+.\windows-image-search.exe --benchmark-material-eval .\material-eval.tsv
+```
+
+Or include it in the complete gate with `-MaterialEvalManifest`. Every labeled image is used as a query, the query itself is excluded, and the first *other* image from the same group is the relevant result. The report compares indexed dHash, Gradient, LBP, combined material texture, the current material+dHash blend, stored production CLIP, and CPU embeddings from CLIP B32, UNICOM B16/B32, Nomic Vision v1.5 and ResNet50. It reports Recall@1/5/10/25, MRR and mean first-relevant rank, plus model initialization/throughput and embedding coverage. The command never overwrites production embeddings or changes search defaults.
 
 ### Library profile
 
@@ -158,7 +183,7 @@ cargo test --all-targets
 cargo run --release
 ```
 
-Windows CI reads the package version from `Cargo.toml` and uploads a versioned artifact such as `windows-image-search-v0.2.8-win64`. The ZIP contains `windows-image-search.exe`, `run-v0.2-benchmark-gate.ps1`, `README.md`, `LICENSE` and `VERSION.txt`.
+Windows CI reads the package version from `Cargo.toml` and uploads a versioned artifact such as `windows-image-search-v0.2.9-win64`. The ZIP contains `windows-image-search.exe`, `run-v0.2-benchmark-gate.ps1`, `README.md`, `LICENSE` and `VERSION.txt`.
 
 ## Privacy
 

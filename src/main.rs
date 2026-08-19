@@ -4,6 +4,7 @@ mod embedding;
 mod fs_watch;
 mod indexer;
 mod library_profile;
+mod material_eval;
 mod material_texture;
 mod metadata;
 mod model_benchmark;
@@ -29,6 +30,7 @@ enum StartupMode {
     ClipRuntimeBenchmark(usize),
     ImageModelBenchmark(usize),
     LibraryProfile,
+    MaterialEval(PathBuf),
     MaterialTextureBenchmark(usize),
 }
 
@@ -112,6 +114,14 @@ fn startup_mode() -> StartupMode {
         if arg == "--benchmark-library-profile" {
             return StartupMode::LibraryProfile;
         }
+        if let Some(value) = arg.strip_prefix("--benchmark-material-eval=") {
+            if !value.trim().is_empty() {
+                return StartupMode::MaterialEval(PathBuf::from(value));
+            }
+        }
+        if arg == "--benchmark-material-eval" {
+            return StartupMode::MaterialEval(args.next().map(PathBuf::from).unwrap_or_default());
+        }
         if let Some(value) = arg.strip_prefix("--benchmark-material-texture=") {
             let samples = value
                 .parse::<usize>()
@@ -151,6 +161,10 @@ fn library_profile_report_path(db_path: &Path) -> PathBuf {
     benchmark_report_path(db_path, "library-profile")
 }
 
+fn material_eval_report_path(db_path: &Path) -> PathBuf {
+    benchmark_report_path(db_path, "material-eval")
+}
+
 fn material_texture_benchmark_report_path(db_path: &Path) -> PathBuf {
     benchmark_report_path(db_path, "material-texture")
 }
@@ -179,9 +193,14 @@ fn write_benchmark_report(destination: &Path, report: &str, label: &str) {
     }
 }
 
+fn benchmark_failed(label: &str, err: &anyhow::Error) -> ! {
+    eprintln!("{label} failed: {err:#}");
+    std::process::exit(1);
+}
+
 fn main() -> eframe::Result<()> {
     let mode = startup_mode();
-    if matches!(mode, StartupMode::Version) {
+    if matches!(&mode, StartupMode::Version) {
         println!("{APP_TITLE}");
         return Ok(());
     }
@@ -192,72 +211,84 @@ fn main() -> eframe::Result<()> {
     });
     let _ = db::open(&db_path);
 
-    if let StartupMode::AnnBenchmark(query_count) = mode {
-        match ann::benchmark(&db_path, query_count) {
+    if let StartupMode::AnnBenchmark(query_count) = &mode {
+        match ann::benchmark(&db_path, *query_count) {
             Ok(report) => {
                 write_benchmark_report(&ann_benchmark_report_path(&db_path), &report, "ANN")
             }
-            Err(err) => eprintln!("ANN benchmark failed: {err:#}"),
+            Err(err) => benchmark_failed("ANN benchmark", &err),
         }
         return Ok(());
     }
 
-    if let StartupMode::ClipPreviewBenchmark(sample_count) = mode {
-        match preview_benchmark::benchmark(&db_path, &model_cache, sample_count) {
+    if let StartupMode::ClipPreviewBenchmark(sample_count) = &mode {
+        match preview_benchmark::benchmark(&db_path, &model_cache, *sample_count) {
             Ok(report) => write_benchmark_report(
                 &preview_benchmark_report_path(&db_path),
                 &report,
                 "CLIP preview",
             ),
-            Err(err) => eprintln!("CLIP preview benchmark failed: {err:#}"),
+            Err(err) => benchmark_failed("CLIP preview benchmark", &err),
         }
         return Ok(());
     }
 
-    if let StartupMode::ClipRuntimeBenchmark(sample_count) = mode {
-        match runtime_benchmark::benchmark(&db_path, &model_cache, sample_count) {
+    if let StartupMode::ClipRuntimeBenchmark(sample_count) = &mode {
+        match runtime_benchmark::benchmark(&db_path, &model_cache, *sample_count) {
             Ok(report) => write_benchmark_report(
                 &runtime_benchmark_report_path(&db_path),
                 &report,
                 "CLIP runtime",
             ),
-            Err(err) => eprintln!("CLIP runtime benchmark failed: {err:#}"),
+            Err(err) => benchmark_failed("CLIP runtime benchmark", &err),
         }
         return Ok(());
     }
 
-    if let StartupMode::ImageModelBenchmark(query_count) = mode {
-        match model_benchmark::benchmark(&db_path, &model_cache, query_count) {
+    if let StartupMode::ImageModelBenchmark(query_count) = &mode {
+        match model_benchmark::benchmark(&db_path, &model_cache, *query_count) {
             Ok(report) => write_benchmark_report(
                 &image_model_benchmark_report_path(&db_path),
                 &report,
                 "image models",
             ),
-            Err(err) => eprintln!("Image model benchmark failed: {err:#}"),
+            Err(err) => benchmark_failed("Image model benchmark", &err),
         }
         return Ok(());
     }
 
-    if matches!(mode, StartupMode::LibraryProfile) {
+    if matches!(&mode, StartupMode::LibraryProfile) {
         match library_profile::benchmark(&db_path) {
             Ok(report) => write_benchmark_report(
                 &library_profile_report_path(&db_path),
                 &report,
                 "library profile",
             ),
-            Err(err) => eprintln!("Library profile benchmark failed: {err:#}"),
+            Err(err) => benchmark_failed("Library profile benchmark", &err),
         }
         return Ok(());
     }
 
-    if let StartupMode::MaterialTextureBenchmark(sample_count) = mode {
-        match texture_benchmark::benchmark(&db_path, sample_count) {
+    if let StartupMode::MaterialEval(manifest_path) = &mode {
+        match material_eval::benchmark(&db_path, &model_cache, manifest_path) {
+            Ok(report) => write_benchmark_report(
+                &material_eval_report_path(&db_path),
+                &report,
+                "labeled material evaluation",
+            ),
+            Err(err) => benchmark_failed("Labeled material evaluation", &err),
+        }
+        return Ok(());
+    }
+
+    if let StartupMode::MaterialTextureBenchmark(sample_count) = &mode {
+        match texture_benchmark::benchmark(&db_path, *sample_count) {
             Ok(report) => write_benchmark_report(
                 &material_texture_benchmark_report_path(&db_path),
                 &report,
                 "material texture",
             ),
-            Err(err) => eprintln!("Material texture benchmark failed: {err:#}"),
+            Err(err) => benchmark_failed("Material texture benchmark", &err),
         }
         return Ok(());
     }
