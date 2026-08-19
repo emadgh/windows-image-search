@@ -74,9 +74,9 @@ pub fn open(db_path: &Path) -> Result<Connection> {
 fn ensure_column(conn: &Connection, table: &str, column: &str, declaration: &str) -> Result<()> {
     let exists = {
         let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
-        stmt.query_map([], |row| row.get::<_, String>(1))?
-            .filter_map(|row| row.ok())
-            .any(|name| name == column)
+        let mut rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let found = rows.any(|row| row.is_ok_and(|name| name == column));
+        found
     };
 
     if !exists {
