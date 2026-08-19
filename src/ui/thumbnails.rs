@@ -1,13 +1,13 @@
-use image::DynamicImage;
 use image::codecs::jpeg::JpegEncoder;
-use std::collections::{HashSet, hash_map::DefaultHasher};
+use image::DynamicImage;
+use std::collections::{hash_map::DefaultHasher, HashSet};
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc, Mutex,
     mpsc::{self, Receiver, Sender},
+    Arc, Mutex,
 };
 use std::time::UNIX_EPOCH;
 

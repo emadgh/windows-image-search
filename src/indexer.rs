@@ -3,12 +3,49 @@ use crate::metadata;
 use anyhow::{Context, Result};
 use fastembed::{ImageEmbedding, ImageEmbeddingModel, ImageInitOptions};
 use image::{imageops::FilterType, DynamicImage, GenericImageView, Pixel};
+use rayon::prelude::*;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::time::UNIX_EPOCH;
 use walkdir::WalkDir;
 
 const COLOR_HISTOGRAM_BINS: usize = 64;
+
+#[derive(Clone)]
+struct PendingImage {
+    root: PathBuf,
+    path: PathBuf,
+    size: u64,
+    modified: i64,
+}
+
+struct PreparedImage {
+    root: PathBuf,
+    path: PathBuf,
+    file_name: String,
+    extension: String,
+    size: u64,
+    modified: i64,
+    width: u32,
+    height: u32,
+    description: String,
+    keywords: String,
+    dominant: [u8; 3],
+    visual_hash: u64,
+    color_histogram: Vec<f32>,
+}
+
+fn background_worker_count() -> usize {
+    let logical = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(4);
+    logical.saturating_sub(1).max(1).min(6)
+}
+
+fn clip_worker_count() -> usize {
+    background_worker_count().min(4)
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct SimilaritySettings {
@@ -107,8 +144,10 @@ fn rescan(
     let total = candidates.len();
     let mut seen_by_root: std::collections::HashMap<PathBuf, Vec<PathBuf>> =
         std::collections::HashMap::new();
-    let mut changed = 0usize;
+    let mut pending = Vec::<PendingImage>::new();
 
+    // Keep filesystem/SQLite state checks cheap and serialized, but move image
+    // decoding + metadata extraction to a bounded worker pool below.
     for (index, (root, path)) in candidates.iter().enumerate() {
         seen_by_root
             .entry(root.clone())
@@ -138,52 +177,118 @@ fn rescan(
             .unwrap_or(false);
 
         if !unchanged {
-            match inspect_image(path) {
-                Ok((width, height, dominant, visual_hash, color_histogram)) => {
-                    let text = metadata::extract(path);
-                    let file_name = path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or_default();
-                    let extension = path
-                        .extension()
-                        .and_then(|ext| ext.to_str())
-                        .unwrap_or_default()
-                        .to_ascii_lowercase();
-                    db::upsert_image(
-                        &conn,
-                        path,
-                        root,
-                        file_name,
-                        &extension,
-                        size,
-                        modified,
-                        width,
-                        height,
-                        &text.description,
-                        &text.keywords,
-                        dominant,
-                        visual_hash,
-                        &color_histogram,
-                    )?;
-                    changed += 1;
-                }
-                Err(err) => {
-                    let _ = tx.send(WorkerMessage::Error(format!(
-                        "Cannot decode {}: {err:#}",
-                        path.display()
-                    )));
-                }
-            }
+            pending.push(PendingImage {
+                root: root.clone(),
+                path: path.clone(),
+                size,
+                modified,
+            });
         }
 
-        if index % 5 == 0 || index + 1 == total {
+        if index % 32 == 0 || index + 1 == total {
             let _ = tx.send(WorkerMessage::Progress {
                 done: index + 1,
                 total,
             });
         }
     }
+
+    let changed_total = pending.len();
+    let _ = tx.send(WorkerMessage::Status(format!(
+        "Preparing {changed_total} changed image{} on {} background worker{}…",
+        if changed_total == 1 { "" } else { "s" },
+        background_worker_count(),
+        if background_worker_count() == 1 {
+            ""
+        } else {
+            "s"
+        }
+    )));
+
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(background_worker_count())
+        .thread_name(|index| format!("image-index-{index}"))
+        .build()
+        .context("creating image indexing worker pool")?;
+    let prepared_count = AtomicUsize::new(0);
+
+    let prepared: Vec<PreparedImage> = pool.install(|| {
+        pending
+            .par_iter()
+            .filter_map(|item| {
+                let result = inspect_image(&item.path).map(
+                    |(width, height, dominant, visual_hash, color_histogram)| {
+                        let text = metadata::extract(&item.path);
+                        PreparedImage {
+                            root: item.root.clone(),
+                            path: item.path.clone(),
+                            file_name: item
+                                .path
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or_default()
+                                .to_owned(),
+                            extension: item
+                                .path
+                                .extension()
+                                .and_then(|ext| ext.to_str())
+                                .unwrap_or_default()
+                                .to_ascii_lowercase(),
+                            size: item.size,
+                            modified: item.modified,
+                            width,
+                            height,
+                            description: text.description,
+                            keywords: text.keywords,
+                            dominant,
+                            visual_hash,
+                            color_histogram,
+                        }
+                    },
+                );
+
+                let done = prepared_count.fetch_add(1, Ordering::Relaxed) + 1;
+                if done % 16 == 0 || done == changed_total {
+                    let _ = tx.send(WorkerMessage::Status(format!(
+                        "Decoding/reading metadata: {done}/{changed_total}"
+                    )));
+                }
+
+                match result {
+                    Ok(value) => Some(value),
+                    Err(err) => {
+                        let _ = tx.send(WorkerMessage::Error(format!(
+                            "Cannot decode {}: {err:#}",
+                            item.path.display()
+                        )));
+                        None
+                    }
+                }
+            })
+            .collect()
+    });
+
+    // SQLite writes stay on this worker thread; CPU-heavy preparation above is
+    // parallelized without sharing a Connection across threads.
+    for item in &prepared {
+        db::upsert_image(
+            &conn,
+            &item.path,
+            &item.root,
+            &item.file_name,
+            &item.extension,
+            item.size,
+            item.modified,
+            item.width,
+            item.height,
+            &item.description,
+            &item.keywords,
+            item.dominant,
+            item.visual_hash,
+            &item.color_histogram,
+        )?;
+    }
+    let changed = prepared.len();
 
     let mut removed = 0usize;
     for root in roots {
@@ -228,26 +333,42 @@ fn build_visual_descriptors(
     tx: &Sender<WorkerMessage>,
 ) -> Result<()> {
     let total = paths.len();
-    for (index, path) in paths.iter().enumerate() {
-        match decode_image(path).map(|image| visual_descriptor(&image)) {
-            Ok((_, visual_hash, color_histogram)) => {
-                db::set_visual_descriptor(conn, path, visual_hash, &color_histogram)?;
-            }
-            Err(err) => {
-                let _ = tx.send(WorkerMessage::Error(format!(
-                    "Cannot build visual descriptor for {}: {err:#}",
-                    path.display()
-                )));
-            }
-        }
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(background_worker_count())
+        .thread_name(|index| format!("visual-index-{index}"))
+        .build()
+        .context("creating visual descriptor worker pool")?;
+    let done = AtomicUsize::new(0);
 
-        if index % 25 == 0 || index + 1 == total {
-            let _ = tx.send(WorkerMessage::Status(format!(
-                "Building texture/color index: {}/{}",
-                index + 1,
-                total
-            )));
-        }
+    let descriptors: Vec<(PathBuf, u64, Vec<f32>)> = pool.install(|| {
+        paths
+            .par_iter()
+            .filter_map(|path| {
+                let result = decode_image(path).map(|image| visual_descriptor(&image));
+                let current = done.fetch_add(1, Ordering::Relaxed) + 1;
+                if current % 25 == 0 || current == total {
+                    let _ = tx.send(WorkerMessage::Status(format!(
+                        "Building texture/color index: {current}/{total}"
+                    )));
+                }
+                match result {
+                    Ok((_, visual_hash, color_histogram)) => {
+                        Some((path.clone(), visual_hash, color_histogram))
+                    }
+                    Err(err) => {
+                        let _ = tx.send(WorkerMessage::Error(format!(
+                            "Cannot build visual descriptor for {}: {err:#}",
+                            path.display()
+                        )));
+                        None
+                    }
+                }
+            })
+            .collect()
+    });
+
+    for (path, visual_hash, color_histogram) in descriptors {
+        db::set_visual_descriptor(conn, &path, visual_hash, &color_histogram)?;
     }
     Ok(())
 }
@@ -265,7 +386,7 @@ fn build_embeddings(
     let options = ImageInitOptions::new(ImageEmbeddingModel::ClipVitB32)
         .with_cache_dir(model_cache.to_path_buf())
         .with_show_download_progress(true)
-        .with_intra_threads(4);
+        .with_intra_threads(clip_worker_count());
     let mut model = ImageEmbedding::try_new(options).context("loading CLIP image model")?;
 
     let total = paths.len();
@@ -410,7 +531,7 @@ fn query_clip_embedding(model_cache: &Path, query_path: &Path) -> Result<Vec<f32
     let options = ImageInitOptions::new(ImageEmbeddingModel::ClipVitB32)
         .with_cache_dir(model_cache.to_path_buf())
         .with_show_download_progress(true)
-        .with_intra_threads(4);
+        .with_intra_threads(clip_worker_count());
     let mut model = ImageEmbedding::try_new(options).context("loading CLIP image model")?;
     let query_vecs = model
         .embed(vec![query_path.to_path_buf()], Some(1))

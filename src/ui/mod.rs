@@ -291,7 +291,9 @@ impl ImageSearchApp {
             .default_width(620.0)
             .show(ctx, |ui| {
                 ui.heading("Indexed folders");
-                ui.label("Recursive indexing is enabled for every root and includes all subfolders.");
+                ui.label(
+                    "Recursive indexing is enabled for every root and includes all subfolders.",
+                );
                 ui.horizontal(|ui| {
                     if ui.button("＋ Add folder").clicked() {
                         add_folder = true;
@@ -323,8 +325,13 @@ impl ImageSearchApp {
                 ui.add_space(12.0);
                 ui.separator();
                 ui.heading("Thumbnail cache");
-                ui.label(format!("Location: {}", self.thumb_pool.cache_dir().display()));
-                ui.label("Cached previews are generated at up to 512 px on background worker threads.");
+                ui.label(format!(
+                    "Location: {}",
+                    self.thumb_pool.cache_dir().display()
+                ));
+                ui.label(
+                    "Cached previews are generated at up to 512 px on background worker threads.",
+                );
                 if ui.button("Clear thumbnail cache").clicked() {
                     clear_cache = true;
                 }
@@ -424,12 +431,9 @@ impl ImageSearchApp {
                         .suffix("%"),
                     );
                     ui.add(
-                        egui::Slider::new(
-                            &mut self.similarity_settings.clip_weight,
-                            0.0..=100.0,
-                        )
-                        .text("CLIP semantic")
-                        .suffix("%"),
+                        egui::Slider::new(&mut self.similarity_settings.clip_weight, 0.0..=100.0)
+                            .text("CLIP semantic")
+                            .suffix("%"),
                     );
                     ui.add(
                         egui::Slider::new(

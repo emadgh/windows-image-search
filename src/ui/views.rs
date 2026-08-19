@@ -78,7 +78,10 @@ impl ImageSearchApp {
                                         ui.painter().rect_stroke(
                                             response.rect,
                                             4.0,
-                                            egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
+                                            egui::Stroke::new(
+                                                2.0,
+                                                ui.visuals().selection.stroke.color,
+                                            ),
                                             egui::StrokeKind::Inside,
                                         );
                                     }
@@ -189,8 +192,11 @@ impl ImageSearchApp {
                                 let metadata = metadata_text(&record);
                                 ui.add_sized(
                                     [widths.metadata, 42.0],
-                                    egui::Label::new(truncate_middle(&metadata, metadata_chars(widths.metadata)))
-                                        .wrap(),
+                                    egui::Label::new(truncate_middle(
+                                        &metadata,
+                                        metadata_chars(widths.metadata),
+                                    ))
+                                    .wrap(),
                                 )
                                 .on_hover_text(metadata);
                             },
@@ -263,14 +269,26 @@ impl DetailWidths {
 fn detail_header(ui: &mut egui::Ui, widths: DetailWidths) {
     ui.horizontal(|ui| {
         ui.add_sized([widths.thumb, 22.0], egui::Label::new(""));
-        ui.add_sized([widths.name, 22.0], egui::Label::new("Name").selectable(false));
-        ui.add_sized([widths.info, 22.0], egui::Label::new("Info").selectable(false));
-        ui.add_sized([widths.color, 22.0], egui::Label::new("Color").selectable(false));
+        ui.add_sized(
+            [widths.name, 22.0],
+            egui::Label::new("Name").selectable(false),
+        );
+        ui.add_sized(
+            [widths.info, 22.0],
+            egui::Label::new("Info").selectable(false),
+        );
+        ui.add_sized(
+            [widths.color, 22.0],
+            egui::Label::new("Color").selectable(false),
+        );
         ui.add_sized(
             [widths.metadata, 22.0],
             egui::Label::new("Metadata").selectable(false),
         );
-        ui.add_sized([widths.score, 22.0], egui::Label::new("Score").selectable(false));
+        ui.add_sized(
+            [widths.score, 22.0],
+            egui::Label::new("Score").selectable(false),
+        );
     });
 }
 
@@ -336,17 +354,11 @@ fn thumbnail_widget(
                 let uv = if source_aspect > target_aspect {
                     let visible = target_aspect / source_aspect;
                     let margin = (1.0 - visible) * 0.5;
-                    egui::Rect::from_min_max(
-                        egui::pos2(margin, 0.0),
-                        egui::pos2(1.0 - margin, 1.0),
-                    )
+                    egui::Rect::from_min_max(egui::pos2(margin, 0.0), egui::pos2(1.0 - margin, 1.0))
                 } else {
                     let visible = source_aspect / target_aspect;
                     let margin = (1.0 - visible) * 0.5;
-                    egui::Rect::from_min_max(
-                        egui::pos2(0.0, margin),
-                        egui::pos2(1.0, 1.0 - margin),
-                    )
+                    egui::Rect::from_min_max(egui::pos2(0.0, margin), egui::pos2(1.0, 1.0 - margin))
                 };
                 ui.painter()
                     .image(texture.id(), rect, uv, egui::Color32::WHITE);
