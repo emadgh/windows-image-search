@@ -1,4 +1,4 @@
-use crate::{ann, db, thumbnail_cache};
+use crate::{ann, db, face_store, thumbnail_cache};
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
@@ -252,8 +252,6 @@ pub fn replace_root_from_session(session_db_path: &Path, root: &Path) -> Result<
     let prefix = root_prefix(root);
     let result = (|| -> Result<usize> {
         let tx = conn.transaction()?;
-        tx.execute(&format!("DELETE FROM {ATTACHED_DB}.images"), [])?;
-        tx.execute(&format!("DELETE FROM {ATTACHED_DB}.roots"), [])?;
         tx.execute(
             &format!("INSERT OR IGNORE INTO {ATTACHED_DB}.roots(path) VALUES('.')"),
             [],
@@ -262,9 +260,21 @@ pub fn replace_root_from_session(session_db_path: &Path, root: &Path) -> Result<
             &format!(
                 "INSERT INTO {ATTACHED_DB}.images({}) \
                  SELECT CASE WHEN path = ?1 THEN '' ELSE substr(path, length(?2) + 1) END, '', {} \
-                 FROM main.images WHERE root = ?1",
+                 FROM main.images WHERE root = ?1 \
+                 ON CONFLICT(path) DO UPDATE SET {}",
                 image_columns_with_path(),
-                image_columns_without_path_root()
+                image_columns_without_path_root(),
+                image_update_assignments()
+            ),
+            params![root_text, prefix],
+        )?;
+        tx.execute(
+            &format!(
+                "DELETE FROM {ATTACHED_DB}.images \
+                 WHERE path NOT IN (\
+                    SELECT CASE WHEN path = ?1 THEN '' ELSE substr(path, length(?2) + 1) END \
+                    FROM main.images WHERE root = ?1\
+                 )"
             ),
             params![root_text, prefix],
         )?;
@@ -290,21 +300,15 @@ fn mirror_paths_for_root(conn: &mut Connection, root: &Path, paths: &[PathBuf]) 
             let relative_text = relative.to_string_lossy().to_string();
             let absolute_text = absolute.to_string_lossy().to_string();
             tx.execute(
-                &format!("DELETE FROM {ATTACHED_DB}.images WHERE path = ?1"),
-                params![relative_text],
-            )?;
-            tx.execute(
                 &format!(
                     "INSERT INTO {ATTACHED_DB}.images({}) \
-                     SELECT ?1, '', {} FROM main.images WHERE path = ?2 AND root = ?3",
+                     SELECT ?1, '', {} FROM main.images WHERE path = ?2 AND root = ?3 \
+                     ON CONFLICT(path) DO UPDATE SET {}",
                     image_columns_with_path(),
-                    image_columns_without_path_root()
+                    image_columns_without_path_root(),
+                    image_update_assignments()
                 ),
-                params![
-                    relative.to_string_lossy().to_string(),
-                    absolute_text,
-                    root_text
-                ],
+                params![relative_text, absolute_text, root_text],
             )?;
         }
         set_attached_meta(&tx, "schema_version", &PORTABLE_SCHEMA_VERSION.to_string())?;
@@ -434,6 +438,7 @@ fn ensure_portable_layout(root: &Path) -> Result<()> {
     std::fs::create_dir_all(thumbnail_dir(root))?;
     std::fs::create_dir_all(ann_dir(root))?;
     let conn = db::open(&index_db_path(root))?;
+    face_store::ensure_schema(&conn)?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS portable_meta(\
              key TEXT PRIMARY KEY NOT NULL,\
@@ -561,6 +566,20 @@ fn image_columns_without_path_root() -> &'static str {
      dominant_r, dominant_g, dominant_b, visual_hash, color_histogram, color_histogram_dim, \
      material_texture, material_texture_dim, material_texture_version, embedding, embedding_dim, \
      embedding_normalized, last_seen_scan, content_fingerprint"
+}
+
+fn image_update_assignments() -> &'static str {
+    "root = excluded.root, \
+     file_name = excluded.file_name, extension = excluded.extension, \
+     size = excluded.size, modified = excluded.modified, width = excluded.width, height = excluded.height, \
+     description = excluded.description, keywords = excluded.keywords, \
+     dominant_r = excluded.dominant_r, dominant_g = excluded.dominant_g, dominant_b = excluded.dominant_b, \
+     visual_hash = excluded.visual_hash, color_histogram = excluded.color_histogram, \
+     color_histogram_dim = excluded.color_histogram_dim, material_texture = excluded.material_texture, \
+     material_texture_dim = excluded.material_texture_dim, \
+     material_texture_version = excluded.material_texture_version, embedding = excluded.embedding, \
+     embedding_dim = excluded.embedding_dim, embedding_normalized = excluded.embedding_normalized, \
+     last_seen_scan = excluded.last_seen_scan, content_fingerprint = excluded.content_fingerprint"
 }
 
 #[cfg(test)]

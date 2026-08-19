@@ -6017,7 +6017,7 @@ dependencies = [
 
 [[package]]
 name = "windows-image-search"
-version = "0.2.10"
+version = "0.3.0-alpha.1"
 dependencies = [
  "anyhow",
  "chrono",
