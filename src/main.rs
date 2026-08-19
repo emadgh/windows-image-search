@@ -9,6 +9,7 @@ mod preview_benchmark;
 mod runtime_benchmark;
 mod settings;
 mod text_search;
+mod texture_benchmark;
 mod thumbnail_cache;
 mod ui;
 
@@ -24,6 +25,7 @@ enum StartupMode {
     AnnBenchmark(usize),
     ClipPreviewBenchmark(usize),
     ClipRuntimeBenchmark(usize),
+    MaterialTextureBenchmark(usize),
 }
 
 fn app_paths() -> Result<(PathBuf, PathBuf)> {
@@ -88,6 +90,21 @@ fn startup_mode() -> StartupMode {
                 .max(1);
             return StartupMode::ClipRuntimeBenchmark(samples);
         }
+        if let Some(value) = arg.strip_prefix("--benchmark-material-texture=") {
+            let samples = value
+                .parse::<usize>()
+                .unwrap_or_else(|_| texture_benchmark::default_sample_count())
+                .max(1);
+            return StartupMode::MaterialTextureBenchmark(samples);
+        }
+        if arg == "--benchmark-material-texture" {
+            let samples = args
+                .peek()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or_else(texture_benchmark::default_sample_count)
+                .max(1);
+            return StartupMode::MaterialTextureBenchmark(samples);
+        }
     }
     StartupMode::Gui
 }
@@ -102,6 +119,10 @@ fn preview_benchmark_report_path(db_path: &Path) -> PathBuf {
 
 fn runtime_benchmark_report_path(db_path: &Path) -> PathBuf {
     benchmark_report_path(db_path, "clip-runtime")
+}
+
+fn material_texture_benchmark_report_path(db_path: &Path) -> PathBuf {
+    benchmark_report_path(db_path, "material-texture")
 }
 
 fn benchmark_report_path(db_path: &Path, label: &str) -> PathBuf {
@@ -171,6 +192,18 @@ fn main() -> eframe::Result<()> {
                 "CLIP runtime",
             ),
             Err(err) => eprintln!("CLIP runtime benchmark failed: {err:#}"),
+        }
+        return Ok(());
+    }
+
+    if let StartupMode::MaterialTextureBenchmark(sample_count) = mode {
+        match texture_benchmark::benchmark(&db_path, sample_count) {
+            Ok(report) => write_benchmark_report(
+                &material_texture_benchmark_report_path(&db_path),
+                &report,
+                "material texture",
+            ),
+            Err(err) => eprintln!("Material texture benchmark failed: {err:#}"),
         }
         return Ok(());
     }
