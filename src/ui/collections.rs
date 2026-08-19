@@ -488,7 +488,7 @@ fn paint_drop_feedback(ui: &egui::Ui, response: &egui::Response) {
         ui.painter().rect_stroke(
             response.rect,
             4.0,
-            egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
+            egui::Stroke::new(2.0_f32, ui.visuals().selection.stroke.color),
             egui::StrokeKind::Inside,
         );
     }

@@ -45,7 +45,7 @@ pub struct ImageSearchApp {
     pub(super) similarity_settings: indexer::SimilaritySettings,
     pub(super) indexing_settings: IndexingSettings,
     settings_path: PathBuf,
-    pub(super) collections: collections::CollectionsState,
+    collections: collections::CollectionsState,
     pub(super) search_text: String,
     text_search_service: TextSearchService,
     text_search_matches: Option<HashSet<PathBuf>>,
