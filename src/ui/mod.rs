@@ -7,7 +7,7 @@ use crate::db::{self, ImageSummary};
 use crate::embedding::EmbeddingService;
 use crate::fs_watch::{FsWatchMessage, FsWatchService};
 use crate::indexer::{self, WorkerMessage};
-use crate::settings::{self, IndexingSettings};
+use crate::settings::{self, ClipExecutionProvider, IndexingSettings};
 use crate::text_search::TextSearchService;
 use crate::thumbnail_cache;
 use eframe::egui;
@@ -614,7 +614,7 @@ impl ImageSearchApp {
                 );
                 let logical_threads = settings::logical_parallelism();
                 ui.small(format!(
-                    "Detected {logical_threads} logical CPU thread{}. Safe defaults: Decode 2 / CLIP up to 4 / Batch 16.",
+                    "Detected {logical_threads} logical CPU thread{}. Safe defaults: Decode 2 / CLIP up to 4 / Batch 16 / Device CPU.",
                     if logical_threads == 1 { "" } else { "s" }
                 ));
                 ui.add_enabled_ui(!self.busy, |ui| {
@@ -636,6 +636,27 @@ impl ImageSearchApp {
                             .text("CLIP CPU threads"),
                         )
                         .changed();
+                    let provider_before = self.indexing_settings.clip_execution_provider;
+                    egui::ComboBox::from_label("CLIP execution provider")
+                        .selected_text(self.indexing_settings.clip_execution_provider.label())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.indexing_settings.clip_execution_provider,
+                                ClipExecutionProvider::Cpu,
+                                "CPU (safe default)",
+                            );
+                            ui.selectable_value(
+                                &mut self.indexing_settings.clip_execution_provider,
+                                ClipExecutionProvider::DirectMl,
+                                "DirectML (Windows GPU)",
+                            );
+                        });
+                    let provider_changed =
+                        provider_before != self.indexing_settings.clip_execution_provider;
+                    ui.small(
+                        "DirectML uses the same CLIP model and falls back to CPU automatically if the GPU provider cannot initialize.",
+                    );
+
                     let batch_changed = ui
                         .add(
                             egui::Slider::new(
@@ -646,7 +667,7 @@ impl ImageSearchApp {
                         )
                         .changed();
 
-                    if decode_changed || clip_changed || batch_changed {
+                    if decode_changed || clip_changed || provider_changed || batch_changed {
                         self.indexing_settings = self.indexing_settings.sanitized();
                         save_performance_settings = true;
                     }
@@ -694,9 +715,10 @@ impl ImageSearchApp {
             match settings::save(&self.settings_path, self.indexing_settings) {
                 Ok(()) => {
                     self.status = format!(
-                        "Performance settings saved: decode {}, CLIP {}, batch {}",
+                        "Performance settings saved: decode {}, CLIP {} threads on {}, batch {}",
                         self.indexing_settings.decode_workers,
                         self.indexing_settings.clip_threads,
+                        self.indexing_settings.clip_execution_provider.label(),
                         self.indexing_settings.batch_size
                     );
                 }

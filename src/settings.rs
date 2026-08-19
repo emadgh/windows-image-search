@@ -5,10 +5,41 @@ pub const MAX_BATCH_SIZE: usize = 256;
 const MAX_CONFIGURED_THREADS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClipExecutionProvider {
+    Cpu,
+    DirectMl,
+}
+
+impl ClipExecutionProvider {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Cpu => "CPU",
+            Self::DirectMl => "DirectML (GPU)",
+        }
+    }
+
+    fn config_value(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::DirectMl => "directml",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "cpu" => Some(Self::Cpu),
+            "directml" | "dml" | "gpu" => Some(Self::DirectMl),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IndexingSettings {
     pub decode_workers: usize,
     pub clip_threads: usize,
     pub batch_size: usize,
+    pub clip_execution_provider: ClipExecutionProvider,
 }
 
 impl Default for IndexingSettings {
@@ -18,6 +49,7 @@ impl Default for IndexingSettings {
             decode_workers: logical.saturating_sub(1).max(1).min(2),
             clip_threads: logical.saturating_sub(1).max(1).min(4),
             batch_size: 16,
+            clip_execution_provider: ClipExecutionProvider::Cpu,
         }
     }
 }
@@ -28,6 +60,7 @@ impl IndexingSettings {
             decode_workers: self.decode_workers.clamp(1, max_decode_workers()),
             clip_threads: self.clip_threads.clamp(1, max_clip_threads()),
             batch_size: self.batch_size.clamp(1, MAX_BATCH_SIZE),
+            clip_execution_provider: self.clip_execution_provider,
         }
     }
 }
@@ -57,13 +90,27 @@ pub fn load(path: &Path) -> IndexingSettings {
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        let Ok(value) = value.trim().parse::<usize>() else {
-            continue;
-        };
         match key.trim() {
-            "decode_workers" => settings.decode_workers = value,
-            "clip_threads" => settings.clip_threads = value,
-            "batch_size" => settings.batch_size = value,
+            "decode_workers" => {
+                if let Ok(value) = value.trim().parse::<usize>() {
+                    settings.decode_workers = value;
+                }
+            }
+            "clip_threads" => {
+                if let Ok(value) = value.trim().parse::<usize>() {
+                    settings.clip_threads = value;
+                }
+            }
+            "batch_size" => {
+                if let Ok(value) = value.trim().parse::<usize>() {
+                    settings.batch_size = value;
+                }
+            }
+            "clip_execution_provider" => {
+                if let Some(provider) = ClipExecutionProvider::parse(value) {
+                    settings.clip_execution_provider = provider;
+                }
+            }
             _ => {}
         }
     }
@@ -78,8 +125,11 @@ pub fn save(path: &Path, settings: IndexingSettings) -> Result<()> {
             .with_context(|| format!("creating settings directory {}", parent.display()))?;
     }
     let content = format!(
-        "decode_workers={}\nclip_threads={}\nbatch_size={}\n",
-        settings.decode_workers, settings.clip_threads, settings.batch_size
+        "decode_workers={}\nclip_threads={}\nbatch_size={}\nclip_execution_provider={}\n",
+        settings.decode_workers,
+        settings.clip_threads,
+        settings.batch_size,
+        settings.clip_execution_provider.config_value()
     );
     std::fs::write(path, content)
         .with_context(|| format!("writing performance settings {}", path.display()))?;
@@ -108,12 +158,17 @@ mod tests {
             decode_workers: usize::MAX,
             clip_threads: 0,
             batch_size: usize::MAX,
+            clip_execution_provider: ClipExecutionProvider::DirectMl,
         }
         .sanitized();
 
         assert_eq!(settings.decode_workers, max_decode_workers());
         assert_eq!(settings.clip_threads, 1);
         assert_eq!(settings.batch_size, MAX_BATCH_SIZE);
+        assert_eq!(
+            settings.clip_execution_provider,
+            ClipExecutionProvider::DirectMl
+        );
     }
 
     #[test]
@@ -123,6 +178,7 @@ mod tests {
             decode_workers: max_decode_workers().min(3),
             clip_threads: max_clip_threads().min(4),
             batch_size: 48,
+            clip_execution_provider: ClipExecutionProvider::DirectMl,
         }
         .sanitized();
 
@@ -132,17 +188,34 @@ mod tests {
     }
 
     #[test]
-    fn invalid_values_are_clamped() {
+    fn invalid_values_are_clamped_and_invalid_provider_keeps_default() {
         let path = temp_settings_path("invalid");
         std::fs::write(
             &path,
-            "decode_workers=0\nclip_threads=999999\nbatch_size=0\nunknown=12\n",
+            "decode_workers=0\nclip_threads=999999\nbatch_size=0\nclip_execution_provider=unknown\n",
         )
         .unwrap();
         let loaded = load(&path);
         assert_eq!(loaded.decode_workers, 1);
         assert_eq!(loaded.clip_threads, max_clip_threads());
         assert_eq!(loaded.batch_size, 1);
+        assert_eq!(loaded.clip_execution_provider, ClipExecutionProvider::Cpu);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn provider_aliases_parse_for_backward_compatible_manual_edits() {
+        assert_eq!(
+            ClipExecutionProvider::parse("directml"),
+            Some(ClipExecutionProvider::DirectMl)
+        );
+        assert_eq!(
+            ClipExecutionProvider::parse("GPU"),
+            Some(ClipExecutionProvider::DirectMl)
+        );
+        assert_eq!(
+            ClipExecutionProvider::parse("cpu"),
+            Some(ClipExecutionProvider::Cpu)
+        );
     }
 }
