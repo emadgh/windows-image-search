@@ -6,6 +6,7 @@ mod indexer;
 mod material_texture;
 mod metadata;
 mod preview_benchmark;
+mod runtime_benchmark;
 mod settings;
 mod text_search;
 mod thumbnail_cache;
@@ -22,6 +23,7 @@ enum StartupMode {
     Version,
     AnnBenchmark(usize),
     ClipPreviewBenchmark(usize),
+    ClipRuntimeBenchmark(usize),
 }
 
 fn app_paths() -> Result<(PathBuf, PathBuf)> {
@@ -71,30 +73,59 @@ fn startup_mode() -> StartupMode {
                 .max(3);
             return StartupMode::ClipPreviewBenchmark(samples);
         }
+        if let Some(value) = arg.strip_prefix("--benchmark-clip-runtime=") {
+            let samples = value
+                .parse::<usize>()
+                .unwrap_or_else(|_| runtime_benchmark::default_sample_count())
+                .max(1);
+            return StartupMode::ClipRuntimeBenchmark(samples);
+        }
+        if arg == "--benchmark-clip-runtime" {
+            let samples = args
+                .peek()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or_else(runtime_benchmark::default_sample_count)
+                .max(1);
+            return StartupMode::ClipRuntimeBenchmark(samples);
+        }
     }
     StartupMode::Gui
 }
 
 fn ann_benchmark_report_path(db_path: &Path) -> PathBuf {
+    benchmark_report_path(db_path, "ann")
+}
+
+fn preview_benchmark_report_path(db_path: &Path) -> PathBuf {
+    benchmark_report_path(db_path, "clip-preview")
+}
+
+fn runtime_benchmark_report_path(db_path: &Path) -> PathBuf {
+    benchmark_report_path(db_path, "clip-runtime")
+}
+
+fn benchmark_report_path(db_path: &Path, label: &str) -> PathBuf {
     let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
     db_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(format!(
-            "ann-benchmark-v{}-{timestamp}.txt",
+            "{label}-benchmark-v{}-{timestamp}.txt",
             env!("CARGO_PKG_VERSION")
         ))
 }
 
-fn preview_benchmark_report_path(db_path: &Path) -> PathBuf {
-    let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-    db_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(format!(
-            "clip-preview-benchmark-v{}-{timestamp}.txt",
-            env!("CARGO_PKG_VERSION")
-        ))
+fn write_benchmark_report(destination: &Path, report: &str, label: &str) {
+    match std::fs::write(destination, report) {
+        Ok(()) => {
+            println!("{report}");
+            println!("report={}", destination.display());
+        }
+        Err(err) => {
+            println!("{report}");
+            eprintln!("Cannot save {label} benchmark report: {err}");
+        }
+    }
 }
 
 fn main() -> eframe::Result<()> {
@@ -113,17 +144,7 @@ fn main() -> eframe::Result<()> {
     if let StartupMode::AnnBenchmark(query_count) = mode {
         match ann::benchmark(&db_path, query_count) {
             Ok(report) => {
-                let destination = ann_benchmark_report_path(&db_path);
-                match std::fs::write(&destination, &report) {
-                    Ok(()) => {
-                        println!("{report}");
-                        println!("report={}", destination.display());
-                    }
-                    Err(err) => {
-                        println!("{report}");
-                        eprintln!("Cannot save benchmark report: {err}");
-                    }
-                }
+                write_benchmark_report(&ann_benchmark_report_path(&db_path), &report, "ANN")
             }
             Err(err) => eprintln!("ANN benchmark failed: {err:#}"),
         }
@@ -132,20 +153,24 @@ fn main() -> eframe::Result<()> {
 
     if let StartupMode::ClipPreviewBenchmark(sample_count) = mode {
         match preview_benchmark::benchmark(&db_path, &model_cache, sample_count) {
-            Ok(report) => {
-                let destination = preview_benchmark_report_path(&db_path);
-                match std::fs::write(&destination, &report) {
-                    Ok(()) => {
-                        println!("{report}");
-                        println!("report={}", destination.display());
-                    }
-                    Err(err) => {
-                        println!("{report}");
-                        eprintln!("Cannot save CLIP preview benchmark report: {err}");
-                    }
-                }
-            }
+            Ok(report) => write_benchmark_report(
+                &preview_benchmark_report_path(&db_path),
+                &report,
+                "CLIP preview",
+            ),
             Err(err) => eprintln!("CLIP preview benchmark failed: {err:#}"),
+        }
+        return Ok(());
+    }
+
+    if let StartupMode::ClipRuntimeBenchmark(sample_count) = mode {
+        match runtime_benchmark::benchmark(&db_path, &model_cache, sample_count) {
+            Ok(report) => write_benchmark_report(
+                &runtime_benchmark_report_path(&db_path),
+                &report,
+                "CLIP runtime",
+            ),
+            Err(err) => eprintln!("CLIP runtime benchmark failed: {err:#}"),
         }
         return Ok(());
     }

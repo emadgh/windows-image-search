@@ -1,6 +1,6 @@
 [package]
 name = "windows-image-search"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 description = "Local image indexing and visual search for Windows"
 license = "MIT"
@@ -12,12 +12,13 @@ chrono = { version = "0.4", default-features = true }
 dirs = "6"
 eframe = { version = "0.32", default-features = true }
 egui = "0.32"
-fastembed = "5.17.4"
+fastembed = { version = "5.17.4", features = ["directml"] }
 hnsw_rs = "0.3.4"
 image = { version = "0.25", features = ["jpeg", "png", "tiff"] }
 kamadak-exif = "0.6"
 notify = "8.2"
 open = "5"
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["directml"] }
 rayon = "1.10"
 rfd = "0.15"
 rusqlite = { version = "0.37", features = ["bundled"] }
