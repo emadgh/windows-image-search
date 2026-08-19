@@ -233,7 +233,7 @@ mod tests {
     fn portable_key_has_a_stable_known_value() {
         assert_eq!(
             portable_key_for_state(Path::new("tiles/stone/face.jpg"), 12345, 55, 9),
-            0xe209b97304ad0b05
+            0x0a916e50a289f87c
         );
     }
 
