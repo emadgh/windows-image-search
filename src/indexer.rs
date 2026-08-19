@@ -1,4 +1,4 @@
-use crate::db::{self, ImageRecord};
+use crate::db::{self, ImageRecord, ImageSummary};
 use crate::embedding::EmbeddingService;
 use crate::metadata;
 use crate::settings::IndexingSettings;
@@ -38,8 +38,8 @@ struct PreparedImage {
 }
 
 impl PreparedImage {
-    fn to_record(&self) -> ImageRecord {
-        ImageRecord {
+    fn to_summary(&self) -> ImageSummary {
+        ImageSummary {
             path: self.path.clone(),
             root: self.root.clone(),
             file_name: self.file_name.clone(),
@@ -51,9 +51,6 @@ impl PreparedImage {
             description: self.description.clone(),
             keywords: self.keywords.clone(),
             dominant: self.dominant,
-            visual_hash: Some(self.visual_hash),
-            color_histogram: Some(self.color_histogram.clone()),
-            embedding: None,
             score: None,
         }
     }
@@ -89,8 +86,8 @@ pub enum WorkerMessage {
     Status(String),
     Progress { done: usize, total: usize },
     Reload,
-    IndexedBatch(Vec<ImageRecord>),
-    SimilarityResults(Vec<ImageRecord>),
+    IndexedBatch(Vec<ImageSummary>),
+    SimilarityResults(Vec<ImageSummary>),
     Error(String),
     Idle,
 }
@@ -318,7 +315,7 @@ fn rescan(
         }
 
         changed += prepared.len();
-        let live_records = prepared.iter().map(PreparedImage::to_record).collect();
+        let live_records = prepared.iter().map(PreparedImage::to_summary).collect();
         let _ = tx.send(WorkerMessage::IndexedBatch(live_records));
         let _ = tx.send(WorkerMessage::Status(format!(
             "Committed base index: {changed}/{changed_total} changed images safely stored"
@@ -521,7 +518,7 @@ fn similarity_search(
     indexing_settings: IndexingSettings,
     embedding_service: &EmbeddingService,
     tx: &Sender<WorkerMessage>,
-) -> Result<Vec<ImageRecord>> {
+) -> Result<Vec<ImageSummary>> {
     let indexing_settings = indexing_settings.sanitized();
     let conn = db::open(db_path)?;
 
@@ -615,7 +612,7 @@ fn similarity_search(
                 .total_cmp(&a.score.unwrap_or(f32::NEG_INFINITY))
         })
     });
-    Ok(records)
+    Ok(records.into_iter().map(ImageSummary::from).collect())
 }
 
 fn query_clip_embedding(
