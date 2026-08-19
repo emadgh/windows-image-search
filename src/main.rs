@@ -3,6 +3,7 @@ mod embedding;
 mod indexer;
 mod metadata;
 mod settings;
+mod text_search;
 mod ui;
 
 use anyhow::{Context, Result};
