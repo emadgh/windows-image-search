@@ -16,6 +16,7 @@ fastembed = "5.17.4"
 image = { version = "0.25", features = ["jpeg", "png", "tiff"] }
 kamadak-exif = "0.6"
 open = "5"
+rayon = "1.10"
 rfd = "0.15"
 rusqlite = { version = "0.37", features = ["bundled"] }
 walkdir = "2.5"
