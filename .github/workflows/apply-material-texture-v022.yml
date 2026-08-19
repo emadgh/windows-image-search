@@ -1,0 +1,47 @@
+name: Apply material texture v0.2.2
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-validate:
+    if: github.head_ref == 'perf/material-texture-v0.2.2'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/material-texture-v0.2.2
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Apply integration
+        run: python scripts/apply_material_texture_v022.py
+
+      - name: Format
+        run: cargo fmt --all
+
+      - name: Check
+        run: cargo check --all-targets
+
+      - name: Test
+        run: cargo test --all-targets
+
+      - name: Commit validated source
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock Cargo.toml src\main.rs src\db.rs src\indexer.rs src\material_texture.rs
+          if (git status --porcelain -- Cargo.lock Cargo.toml src\main.rs src\db.rs src\indexer.rs src\material_texture.rs) {
+            git commit -m "perf: add v1 material texture descriptor"
+            git push origin HEAD:perf/material-texture-v0.2.2
+          }
