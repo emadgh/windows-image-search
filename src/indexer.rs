@@ -484,13 +484,7 @@ fn inspect_image(path: &Path) -> Result<(u32, u32, [u8; 3], u64, Vec<f32>)> {
     let image = decode_image(path)?;
     let (width, height) = image.dimensions();
     let (dominant, visual_hash, color_histogram) = visual_descriptor(&image);
-    Ok((
-        width,
-        height,
-        dominant,
-        visual_hash,
-        color_histogram,
-    ))
+    Ok((width, height, dominant, visual_hash, color_histogram))
 }
 
 fn decode_image(path: &Path) -> Result<DynamicImage> {
@@ -523,8 +517,7 @@ fn visual_descriptor(image: &DynamicImage) -> ([u8; 3], u64, Vec<f32>) {
         let g = rgba[1];
         let b = rgba[2];
 
-        let dominant_index =
-            ((r as usize >> 5) * 64) + ((g as usize >> 5) * 8) + (b as usize >> 5);
+        let dominant_index = ((r as usize >> 5) * 64) + ((g as usize >> 5) * 8) + (b as usize >> 5);
         let dominant_bin = &mut dominant_bins[dominant_index];
         dominant_bin.0 += 1;
         dominant_bin.1 += r as u64;
@@ -559,9 +552,7 @@ fn visual_descriptor(image: &DynamicImage) -> ([u8; 3], u64, Vec<f32>) {
 
     // 64-bit difference hash: captures coarse edge/vein layout and is very
     // strong for exact/near-duplicate texture faces without adding a model.
-    let gray = image
-        .resize_exact(9, 8, FilterType::Triangle)
-        .to_luma8();
+    let gray = image.resize_exact(9, 8, FilterType::Triangle).to_luma8();
     let mut visual_hash = 0u64;
     let mut bit = 0u32;
     for y in 0..8 {
