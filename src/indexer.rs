@@ -2,6 +2,7 @@ use crate::db::{self, ImageRecord, ImageSummary};
 use crate::embedding::EmbeddingService;
 use crate::metadata;
 use crate::settings::IndexingSettings;
+use crate::thumbnail_cache;
 use anyhow::{bail, Context, Result};
 use image::{imageops::FilterType, DynamicImage, GenericImageView, Pixel};
 use rayon::prelude::*;
@@ -147,6 +148,7 @@ fn incremental_update(
     tx: &Sender<WorkerMessage>,
 ) -> Result<()> {
     let indexing_settings = indexing_settings.sanitized();
+    let thumbnail_cache_dir = thumbnail_cache::cache_dir_for_db(db_path);
     let mut conn = db::open(db_path)?;
     let existing_states = db::load_file_states(&conn)?;
     let unique_paths: HashSet<PathBuf> = changed_paths.iter().cloned().collect();
@@ -245,7 +247,7 @@ fn incremental_update(
             batch
                 .par_iter()
                 .filter_map(|item| {
-                    let result = inspect_image(&item.path).map(
+                    let result = inspect_image(&item.path, &thumbnail_cache_dir).map(
                         |(width, height, dominant, visual_hash, color_histogram)| {
                             let text = metadata::extract(&item.path);
                             PreparedImage {
@@ -362,6 +364,7 @@ fn rescan(
     tx: &Sender<WorkerMessage>,
 ) -> Result<()> {
     let indexing_settings = indexing_settings.sanitized();
+    let thumbnail_cache_dir = thumbnail_cache::cache_dir_for_db(db_path);
     let mut conn = db::open(db_path)?;
     let existing_file_states = db::load_file_states(&conn)?;
     let mut candidates: Vec<(PathBuf, PathBuf)> = Vec::new();
@@ -480,7 +483,7 @@ fn rescan(
             batch
                 .par_iter()
                 .filter_map(|item| {
-                    let result = inspect_image(&item.path).map(
+                    let result = inspect_image(&item.path, &thumbnail_cache_dir).map(
                         |(width, height, dominant, visual_hash, color_histogram)| {
                             let text = metadata::extract(&item.path);
                             PreparedImage {
@@ -1002,9 +1005,18 @@ fn normalized_path_key(path: &Path) -> String {
     }
 }
 
-fn inspect_image(path: &Path) -> Result<(u32, u32, [u8; 3], u64, Vec<f32>)> {
+fn inspect_image(
+    path: &Path,
+    thumbnail_cache_dir: &Path,
+) -> Result<(u32, u32, [u8; 3], u64, Vec<f32>)> {
     let image = decode_image(path)?;
     let (width, height) = image.dimensions();
+
+    // Seed the exact same persistent cache used by the UI while the original
+    // file is already decoded. Thumbnail cache failures never invalidate the
+    // authoritative image index; the UI can still rebuild the preview later.
+    let _ = thumbnail_cache::store_from_decoded(thumbnail_cache_dir, path, &image);
+
     let (dominant, visual_hash, color_histogram) = visual_descriptor(&image);
     Ok((width, height, dominant, visual_hash, color_histogram))
 }
