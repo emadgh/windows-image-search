@@ -1,6 +1,8 @@
 mod ann;
 mod db;
 mod embedding;
+mod face_detection;
+mod face_store;
 mod fs_watch;
 mod indexer;
 mod library_profile;

@@ -1,4 +1,4 @@
-use crate::{ann, db, thumbnail_cache};
+use crate::{ann, db, face_store, thumbnail_cache};
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
@@ -434,6 +434,7 @@ fn ensure_portable_layout(root: &Path) -> Result<()> {
     std::fs::create_dir_all(thumbnail_dir(root))?;
     std::fs::create_dir_all(ann_dir(root))?;
     let conn = db::open(&index_db_path(root))?;
+    face_store::ensure_schema(&conn)?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS portable_meta(\
              key TEXT PRIMARY KEY NOT NULL,\

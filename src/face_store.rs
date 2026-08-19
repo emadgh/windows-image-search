@@ -145,7 +145,11 @@ pub fn paths_needing_detection(
         "#,
     )?;
     let rows = stmt.query_map(
-        params![detector_id, detector_version, face_detection::SCHEMA_VERSION],
+        params![
+            detector_id,
+            detector_version,
+            face_detection::SCHEMA_VERSION
+        ],
         |row| row.get::<_, String>(0),
     )?;
     Ok(rows.filter_map(|row| row.ok()).map(PathBuf::from).collect())
@@ -272,7 +276,10 @@ pub fn replace_detections(
     Ok(stored)
 }
 
-pub fn load_detection_state(conn: &Connection, image_path: &Path) -> Result<Option<DetectionState>> {
+pub fn load_detection_state(
+    conn: &Connection,
+    image_path: &Path,
+) -> Result<Option<DetectionState>> {
     let row = conn.query_row(
         r#"
         SELECT image_path, detector_id, detector_version, schema_version,
@@ -442,7 +449,10 @@ mod tests {
                 width: 0.25,
                 height: 0.3,
             },
-            landmarks: vec![FaceLandmark { x: x + 0.05, y: 0.3 }],
+            landmarks: vec![FaceLandmark {
+                x: x + 0.05,
+                y: 0.3,
+            }],
         }
     }
 
@@ -512,9 +522,17 @@ mod tests {
             &[face(0.1, 0.9), face(0.7, 0.8)],
         )
         .unwrap();
-        assert_eq!(first.iter().map(|face| &face.face_id).collect::<Vec<_>>(), second.iter().map(|face| &face.face_id).collect::<Vec<_>>());
+        assert_eq!(
+            first.iter().map(|face| &face.face_id).collect::<Vec<_>>(),
+            second.iter().map(|face| &face.face_id).collect::<Vec<_>>()
+        );
         assert!(second[0].bbox.x < second[1].bbox.x);
-        assert_eq!(load_faces(&conn, Path::new("people/group.jpg")).unwrap().len(), 2);
+        assert_eq!(
+            load_faces(&conn, Path::new("people/group.jpg"))
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[test]
@@ -600,6 +618,11 @@ mod tests {
             .unwrap();
             // Simulated interruption: dropping the transaction rolls it back.
         }
-        assert_eq!(load_faces(&conn, Path::new("people/resume.jpg")).unwrap().len(), 1);
+        assert_eq!(
+            load_faces(&conn, Path::new("people/resume.jpg"))
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

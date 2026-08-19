@@ -78,7 +78,12 @@ pub fn decode_oriented(path: &Path) -> Result<DynamicImage> {
     let image = image::ImageReader::open(path)
         .with_context(|| format!("opening image for face detection {}", path.display()))?
         .with_guessed_format()
-        .with_context(|| format!("guessing image format for face detection {}", path.display()))?
+        .with_context(|| {
+            format!(
+                "guessing image format for face detection {}",
+                path.display()
+            )
+        })?
         .decode()
         .with_context(|| format!("decoding image for face detection {}", path.display()))?;
     Ok(apply_orientation(image, read_exif_orientation(path)))
