@@ -21,6 +21,8 @@ jobs:
         with:
           components: rustfmt
 
+      - uses: Swatinem/rust-cache@v2
+
       - name: Format, validate and sync generated source state
         shell: pwsh
         run: |
