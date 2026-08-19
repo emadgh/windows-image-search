@@ -51,7 +51,8 @@ jobs:
           git fetch origin main
           git checkout origin/main -- .github/workflows/windows-build.yml
           git add -A
-          if (-not (git diff --cached --quiet)) {
+          $changes = git status --porcelain
+          if ($changes) {
             git commit -m "feat: add collections management and drag drop"
             git push origin HEAD:feat/collections-management
           }
