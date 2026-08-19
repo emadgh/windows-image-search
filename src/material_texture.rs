@@ -26,21 +26,28 @@ pub fn descriptor(image: &DynamicImage) -> Vec<f32> {
 }
 
 pub fn similarity(a: &[f32], b: &[f32]) -> Option<f32> {
-    if a.len() != DIM || b.len() != DIM {
-        return None;
-    }
-    let ranges = [
-        0..GRADIENT_BINS,
-        GRADIENT_BINS..GRADIENT_BINS * 2,
-        GRADIENT_BINS * 2..GRADIENT_BINS * 2 + LBP_BINS,
-        GRADIENT_BINS * 2 + LBP_BINS..DIM,
-    ];
-    let score = ranges
-        .iter()
-        .map(|range| histogram_intersection(&a[range.clone()], &b[range.clone()]))
-        .sum::<f32>()
-        / ranges.len() as f32;
-    Some(score.clamp(0.0, 1.0))
+    let gradient = gradient_similarity(a, b)?;
+    let lbp = lbp_similarity(a, b)?;
+    Some(((gradient + lbp) * 0.5).clamp(0.0, 1.0))
+}
+
+pub fn gradient_similarity(a: &[f32], b: &[f32]) -> Option<f32> {
+    descriptor_similarity(
+        a,
+        b,
+        &[(0, GRADIENT_BINS), (GRADIENT_BINS, GRADIENT_BINS * 2)],
+    )
+}
+
+pub fn lbp_similarity(a: &[f32], b: &[f32]) -> Option<f32> {
+    descriptor_similarity(
+        a,
+        b,
+        &[
+            (GRADIENT_BINS * 2, GRADIENT_BINS * 2 + LBP_BINS),
+            (GRADIENT_BINS * 2 + LBP_BINS, DIM),
+        ],
+    )
 }
 
 pub fn combine_with_dhash(dhash: Option<f32>, material: Option<f32>) -> Option<f32> {
@@ -55,6 +62,18 @@ pub fn combine_with_dhash(dhash: Option<f32>, material: Option<f32>) -> Option<f
         (None, Some(texture)) => Some(texture.clamp(0.0, 1.0)),
         (None, None) => None,
     }
+}
+
+fn descriptor_similarity(a: &[f32], b: &[f32], ranges: &[(usize, usize)]) -> Option<f32> {
+    if a.len() != DIM || b.len() != DIM || ranges.is_empty() {
+        return None;
+    }
+    let score = ranges
+        .iter()
+        .map(|&(start, end)| histogram_intersection(&a[start..end], &b[start..end]))
+        .sum::<f32>()
+        / ranges.len() as f32;
+    Some(score.clamp(0.0, 1.0))
 }
 
 fn gradient_histogram(gray: &GrayImage) -> Vec<f32> {
@@ -181,6 +200,14 @@ mod tests {
             let sum: f32 = segment.iter().sum();
             assert!((sum - 1.0).abs() < 1e-4 || sum == 0.0);
         }
+    }
+
+    #[test]
+    fn component_similarities_match_identical_descriptor() {
+        let descriptor = descriptor(&striped(128, 128, true));
+        assert!((gradient_similarity(&descriptor, &descriptor).unwrap() - 1.0).abs() < 1e-6);
+        assert!((lbp_similarity(&descriptor, &descriptor).unwrap() - 1.0).abs() < 1e-6);
+        assert!((similarity(&descriptor, &descriptor).unwrap() - 1.0).abs() < 1e-6);
     }
 
     #[test]
