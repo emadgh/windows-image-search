@@ -1,0 +1,47 @@
+name: Validate visual backfill v0.2.6
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.head_ref == 'perf/bounded-visual-backfill-v0.2.6'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/bounded-visual-backfill-v0.2.6
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Apply bounded backfill
+        run: python scripts/apply_bounded_visual_backfill_v026.py
+
+      - name: Format
+        run: cargo fmt --all
+
+      - name: Check
+        run: cargo check --all-targets
+
+      - name: Test
+        run: cargo test --all-targets
+
+      - name: Commit validated source and lockfile
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock Cargo.toml src\indexer.rs
+          if (git status --porcelain -- Cargo.lock Cargo.toml src\indexer.rs) {
+            git commit -m "perf: bound visual descriptor backfill batches"
+            git push origin HEAD:perf/bounded-visual-backfill-v0.2.6
+          }
