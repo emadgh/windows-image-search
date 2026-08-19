@@ -45,7 +45,10 @@ struct DimensionStats {
 pub fn benchmark(db_path: &Path) -> Result<String> {
     let records = db::load_image_summaries(db_path)?;
     let indexed_images = records.len();
-    let existing_sources = records.iter().filter(|record| record.path.is_file()).count();
+    let existing_sources = records
+        .iter()
+        .filter(|record| record.path.is_file())
+        .count();
     let missing_sources = indexed_images.saturating_sub(existing_sources);
     let indexed_source_bytes: u64 = records.iter().map(|record| record.size).sum();
     let db_bytes = std::fs::metadata(db_path)
@@ -93,31 +96,11 @@ pub fn benchmark(db_path: &Path) -> Result<String> {
     writeln!(report, "height_p50_px={}", dimensions.height_p50)?;
     writeln!(report, "height_p90_px={}", dimensions.height_p90)?;
     writeln!(report, "height_max_px={}", dimensions.height_max)?;
-    writeln!(
-        report,
-        "megapixels_min={:.3}",
-        dimensions.megapixels_min
-    )?;
-    writeln!(
-        report,
-        "megapixels_p50={:.3}",
-        dimensions.megapixels_p50
-    )?;
-    writeln!(
-        report,
-        "megapixels_p90={:.3}",
-        dimensions.megapixels_p90
-    )?;
-    writeln!(
-        report,
-        "megapixels_p95={:.3}",
-        dimensions.megapixels_p95
-    )?;
-    writeln!(
-        report,
-        "megapixels_max={:.3}",
-        dimensions.megapixels_max
-    )?;
+    writeln!(report, "megapixels_min={:.3}", dimensions.megapixels_min)?;
+    writeln!(report, "megapixels_p50={:.3}", dimensions.megapixels_p50)?;
+    writeln!(report, "megapixels_p90={:.3}", dimensions.megapixels_p90)?;
+    writeln!(report, "megapixels_p95={:.3}", dimensions.megapixels_p95)?;
+    writeln!(report, "megapixels_max={:.3}", dimensions.megapixels_max)?;
     writeln!(
         report,
         "megapixel_bucket.up_to_0_5={}",
@@ -238,9 +221,7 @@ fn percentile_index(len: usize, percentile: f64) -> Option<usize> {
     if len == 0 {
         return None;
     }
-    Some(
-        (((len - 1) as f64 * percentile.clamp(0.0, 1.0)).round() as usize).min(len - 1),
-    )
+    Some((((len - 1) as f64 * percentile.clamp(0.0, 1.0)).round() as usize).min(len - 1))
 }
 
 fn percentile_u32(sorted: &[u32], percentile: f64) -> u32 {
