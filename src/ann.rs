@@ -247,7 +247,10 @@ fn exact_top_rowids(entries: &[db::AnnEmbedding], query: &[f32], limit: usize) -
 }
 
 fn dot_product(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b.iter()).map(|(left, right)| left * right).sum()
+    a.iter()
+        .zip(b.iter())
+        .map(|(left, right)| left * right)
+        .sum()
 }
 
 fn sample_indices(total: usize, requested: usize) -> Vec<usize> {
