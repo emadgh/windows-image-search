@@ -243,7 +243,6 @@ impl ImageSearchApp {
         }
         self.busy = true;
         self.indexing = true;
-        self.watcher_reconcile_required = None;
         self.allow_close = false;
         self.close_confirmation_open = false;
         self.similarity_results = None;
@@ -294,6 +293,7 @@ impl ImageSearchApp {
         }
         self.busy = true;
         self.indexing = true;
+        self.watcher_reconcile_required = None;
         self.allow_close = false;
         self.close_confirmation_open = false;
         self.progress = None;
