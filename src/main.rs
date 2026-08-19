@@ -1,4 +1,5 @@
 mod db;
+mod embedding;
 mod indexer;
 mod metadata;
 mod settings;
