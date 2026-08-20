@@ -23,6 +23,28 @@ jobs:
           components: rustfmt
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
+      - name: PowerShell benchmark script syntax
+        shell: pwsh
+        run: |
+          $files = @(
+            'scripts/new-material-eval-manifest-from-folders.ps1',
+            'scripts/run-v0.2-benchmark-gate-from-folders.ps1',
+            'scripts/run-v0.2-benchmark-gate.ps1',
+            'scripts/run-indexed-sample-benchmark.ps1'
+          )
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path -LiteralPath $file).Path,
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error "$file: $($_.Message)" }
+              exit 1
+            }
+          }
       - name: Format check
         run: cargo fmt --all -- --check
       - name: Cargo check
