@@ -1,0 +1,267 @@
+name: Face search wiring
+
+on:
+  push:
+    branches: [feat/indexed-face-search-ui]
+
+permissions:
+  contents: write
+
+jobs:
+  wire:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/indexed-face-search-ui
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Wire indexed face search UI
+        shell: python
+        run: |
+          from pathlib import Path
+          def once(t, old, new, label):
+              if new in t: return t
+              if old not in t: raise SystemExit(f'missing {label}')
+              return t.replace(old, new, 1)
+
+          p=Path('src/main.rs'); t=p.read_text()
+          t=once(t,'mod face_scope;\nmod face_settings;','mod face_scope;\nmod face_search;\nmod face_settings;','main face_search module')
+          p.write_text(t)
+
+          p=Path('src/ui/mod.rs'); t=p.read_text()
+          t=once(t,
+              'use crate::embedding::EmbeddingService;\nuse crate::face_settings::{self, FaceEmbeddingSettings};',
+              'use crate::embedding::EmbeddingService;\nuse crate::face_search::{self, IndexedFaceChoice, IndexedFaceSearchOptions};\nuse crate::face_settings::{self, FaceEmbeddingSettings};',
+              'face search import')
+          t=once(t,
+              '    pub(super) similarity_results: Option<Vec<ImageSummary>>,\n    pub(super) query_image: Option<PathBuf>,',
+              '    pub(super) similarity_results: Option<Vec<ImageSummary>>,\n    face_results: Option<Vec<ImageSummary>>,\n    face_query_image: Option<PathBuf>,\n    face_query_faces: Vec<IndexedFaceChoice>,\n    face_query_face_id: Option<String>,\n    face_search_options: IndexedFaceSearchOptions,\n    pub(super) query_image: Option<PathBuf>,',
+              'face search fields')
+          t=once(t,
+              '            similarity_results: None,\n            query_image: None,',
+              '            similarity_results: None,\n            face_results: None,\n            face_query_image: None,\n            face_query_faces: Vec::new(),\n            face_query_face_id: None,\n            face_search_options: IndexedFaceSearchOptions::default(),\n            query_image: None,',
+              'face search init')
+          t=once(t,
+              '        if let Some(results) = &mut self.similarity_results {\n            results.retain(|record| !removed.contains(&record.path));\n        }',
+              '        if let Some(results) = &mut self.similarity_results {\n            results.retain(|record| !removed.contains(&record.path));\n        }\n        if let Some(results) = &mut self.face_results {\n            results.retain(|record| !removed.contains(&record.path));\n        }',
+              'remove face results')
+          t=once(t,
+              '        let mut protected = HashSet::new();\n        if let Some(query) = &self.query_image {',
+              '        let mut protected = HashSet::new();\n        if let Some(query) = &self.face_query_image {\n            if self.textures.contains_key(query) {\n                protected.insert(query.clone());\n            }\n        }\n        if let Some(query) = &self.query_image {',
+              'protect face query texture')
+
+          marker='    pub(super) fn source(&self) -> &[ImageSummary] {'
+          methods='''    fn clear_face_search_state(&mut self) {
+        self.face_results = None;
+        self.face_query_image = None;
+        self.face_query_faces.clear();
+        self.face_query_face_id = None;
+    }
+
+    fn load_face_query_from_selected(&mut self) {
+        if self.selected_paths.len() != 1 {
+            self.last_error = Some("Select exactly one indexed image to choose a face.".to_owned());
+            return;
+        }
+        let path = self.selected_paths.iter().next().cloned().unwrap();
+        let Some(root) = portable::indexed_root_for_path(&path, &self.roots).cloned() else {
+            self.last_error = Some("Selected image is not inside an available indexed root.".to_owned());
+            return;
+        };
+        match face_search::list_persisted_faces(&root, &path) {
+            Ok(faces) if faces.is_empty() => {
+                self.clear_face_search_state();
+                self.last_error = Some("No current persisted faces are available for the selected image.".to_owned());
+            }
+            Ok(faces) => {
+                self.face_results = None;
+                self.face_query_image = Some(path);
+                self.face_query_face_id = if faces.len() == 1 {
+                    Some(faces[0].face_id.clone())
+                } else {
+                    None
+                };
+                self.face_query_faces = faces;
+                self.last_error = None;
+                self.status = format!(
+                    "Face query ready: {} detected face{}",
+                    self.face_query_faces.len(),
+                    if self.face_query_faces.len() == 1 { "" } else { "s" }
+                );
+            }
+            Err(err) => {
+                self.last_error = Some(format!("Cannot load indexed faces: {err:#}"));
+            }
+        }
+    }
+
+    fn run_indexed_face_search(&mut self, face_id: &str) {
+        let Some(query_path) = self.face_query_image.clone() else {
+            self.last_error = Some("Choose an indexed face query first.".to_owned());
+            return;
+        };
+        let Some(query_root) = portable::indexed_root_for_path(&query_path, &self.roots).cloned() else {
+            self.last_error = Some("Face query root is unavailable.".to_owned());
+            return;
+        };
+        match face_search::search_indexed_face(
+            &self.roots,
+            &query_root,
+            face_id,
+            self.face_search_options,
+        ) {
+            Ok(report) => {
+                let mut results = Vec::new();
+                for hit in report.matches {
+                    if hit.image_path == query_path {
+                        continue;
+                    }
+                    let Some(&index) = self.image_positions.get(&hit.image_path) else {
+                        continue;
+                    };
+                    let mut record = self.images[index].clone();
+                    record.score = Some(hit.similarity);
+                    results.push(record);
+                }
+                self.similarity_results = None;
+                self.query_image = None;
+                self.face_query_face_id = Some(face_id.to_owned());
+                self.face_results = Some(results);
+                self.selected_paths.clear();
+                self.last_error = None;
+                let count = self.face_results.as_ref().map_or(0, Vec::len);
+                self.status = format!(
+                    "Face search: {count} result{} across {} available root{}; {} unavailable",
+                    if count == 1 { "" } else { "s" },
+                    report.roots_searched,
+                    if report.roots_searched == 1 { "" } else { "s" },
+                    report.roots_unavailable
+                );
+            }
+            Err(err) => self.last_error = Some(format!("Face search failed: {err:#}")),
+        }
+    }
+
+'''
+          if methods not in t:
+              if marker not in t: raise SystemExit('missing source marker')
+              t=t.replace(marker, methods+marker, 1)
+          t=once(t,
+              '    pub(super) fn source(&self) -> &[ImageSummary] {\n        self.similarity_results.as_deref().unwrap_or(&self.images)\n    }',
+              '    pub(super) fn source(&self) -> &[ImageSummary] {\n        self.face_results\n            .as_deref()\n            .or_else(|| self.similarity_results.as_deref())\n            .unwrap_or(&self.images)\n    }',
+              'source priority')
+
+          # Starting an image-level similarity search supersedes any active face result set.
+          t=once(t,
+              '        self.searching = true;\n        self.busy = true;\n        self.last_error = None;\n        self.query_image = Some(path.clone());',
+              '        self.searching = true;\n        self.busy = true;\n        self.last_error = None;\n        self.clear_face_search_state();\n        self.query_image = Some(path.clone());',
+              'image search clears face search')
+
+          query_block='''                    if let Some(query) = self.query_image.clone() {
+                        ui.add_space(8.0);
+                        ui.strong("Similarity query");
+                        if let Some(texture) = self.thumbnail(&query) {
+                            views::show_query_preview(ui, &texture, 220.0);
+                        } else {
+                            ui.add_sized([220.0, 150.0], egui::Label::new("Loading preview…"));
+                        }
+                        ui.small(views::truncate_middle(&query.display().to_string(), 46))
+                            .on_hover_text(query.display().to_string());
+                    }
+
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.strong("Color filter");'''
+          face_ui='''                    if let Some(query) = self.query_image.clone() {
+                        ui.add_space(8.0);
+                        ui.strong("Similarity query");
+                        if let Some(texture) = self.thumbnail(&query) {
+                            views::show_query_preview(ui, &texture, 220.0);
+                        } else {
+                            ui.add_sized([220.0, 150.0], egui::Label::new("Loading preview…"));
+                        }
+                        ui.small(views::truncate_middle(&query.display().to_string(), 46))
+                            .on_hover_text(query.display().to_string());
+                    }
+
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.strong("Face search");
+                    ui.small("Search by a persisted face from one selected indexed image.");
+                    if ui
+                        .add_enabled(
+                            self.selected_paths.len() == 1 && !self.busy,
+                            egui::Button::new("Use selected image for face search"),
+                        )
+                        .clicked()
+                    {
+                        self.load_face_query_from_selected();
+                    }
+                    if let Some(query) = self.face_query_image.clone() {
+                        ui.small(views::truncate_middle(&query.display().to_string(), 46))
+                            .on_hover_text(query.display().to_string());
+                        let choices = self.face_query_faces.clone();
+                        for face in choices {
+                            let selected = self.face_query_face_id.as_deref() == Some(face.face_id.as_str());
+                            if ui
+                                .selectable_label(
+                                    selected,
+                                    format!(
+                                        "Face {} · {:.0}% detector confidence",
+                                        face.ordinal + 1,
+                                        face.confidence * 100.0
+                                    ),
+                                )
+                                .clicked()
+                            {
+                                self.face_query_face_id = Some(face.face_id);
+                            }
+                        }
+                        ui.add(
+                            egui::Slider::new(
+                                &mut self.face_search_options.min_similarity,
+                                0.0..=1.0,
+                            )
+                            .text("Min face similarity"),
+                        );
+                        ui.add(
+                            egui::Slider::new(&mut self.face_search_options.limit, 1..=500)
+                                .text("Face Top-K"),
+                        );
+                        let chosen = self.face_query_face_id.clone();
+                        if ui
+                            .add_enabled(chosen.is_some() && !self.busy, egui::Button::new("Search selected face"))
+                            .clicked()
+                        {
+                            if let Some(face_id) = chosen {
+                                self.run_indexed_face_search(&face_id);
+                            }
+                        }
+                    }
+                    if self.face_results.is_some() && ui.button("Clear face search").clicked() {
+                        self.clear_face_search_state();
+                        self.selected_paths.clear();
+                    }
+
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.strong("Color filter");'''
+          t=once(t, query_block, face_ui, 'face search sidebar')
+          t=once(t,
+              '                if self.similarity_results.is_some() {\n                    ui.small("Hybrid similarity order using current weights");\n                }',
+              '                if self.face_results.is_some() {\n                    ui.small("Face identity order; score is best matching-face similarity");\n                } else if self.similarity_results.is_some() {\n                    ui.small("Hybrid similarity order using current weights");\n                }',
+              'face result order label')
+          p.write_text(t)
+      - name: Commit wiring
+        shell: bash
+        run: |
+          cargo fmt --all
+          if ! git diff --quiet; then
+            git config user.name github-actions[bot]
+            git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+            git add src/main.rs src/ui/mod.rs src/face_search.rs
+            git commit -m "feat: wire indexed face chooser and search UI"
+            git push origin HEAD:feat/indexed-face-search-ui
+          fi
