@@ -351,6 +351,24 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
+    if let StartupMode::FaceBenchmarkValidate(manifest_path) = &mode {
+        match face_benchmark::validate_manifest(manifest_path) {
+            Ok(report) => println!("{report}"),
+            Err(err) => benchmark_failed("Face benchmark manifest validation", &err),
+        }
+        return Ok(());
+    }
+
+    if let StartupMode::FaceBenchmark(manifest_path) = &mode {
+        match face_benchmark::benchmark(manifest_path) {
+            Ok(report) => {
+                write_benchmark_report(&face_benchmark_report_path(&db_path), &report, "face")
+            }
+            Err(err) => benchmark_failed("Face benchmark", &err),
+        }
+        return Ok(());
+    }
+
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(APP_TITLE)

@@ -83,7 +83,7 @@ Validate syntax and licensing metadata without computing metrics:
 Evaluate the labeled detector predictions and/or identity scores:
 
 ```powershell
-.\windows-image-search.exe --benchmark-face-eval .\face-benchmark.tsv
+.\windows-image-search.exe --benchmark-face .\face-benchmark.tsv
 ```
 
 The model-adapter work tracked separately can generate `pred` and `identity` rows for CPU/DirectML candidates while reusing this exact evaluator and dataset.

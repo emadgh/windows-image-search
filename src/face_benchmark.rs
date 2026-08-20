@@ -333,17 +333,22 @@ pub fn load_manifest(path: &Path) -> Result<FaceBenchmarkManifest> {
 }
 
 fn validate_identity_consistency(pairs: &[IdentityPair]) -> Result<()> {
-    let mut query_people: HashMap<&str, &str> = HashMap::new();
+    let mut face_people: HashMap<&str, &str> = HashMap::new();
     let mut seen_pairs = BTreeSet::new();
     for pair in pairs {
-        if let Some(existing) = query_people.insert(&pair.query_id, &pair.query_person) {
-            if existing != pair.query_person {
-                bail!(
-                    "identity query {:?} is assigned to multiple person ids ({:?}, {:?})",
-                    pair.query_id,
-                    existing,
-                    pair.query_person
-                );
+        for (face_id, person_id) in [
+            (pair.query_id.as_str(), pair.query_person.as_str()),
+            (pair.candidate_id.as_str(), pair.candidate_person.as_str()),
+        ] {
+            if let Some(existing) = face_people.insert(face_id, person_id) {
+                if existing != person_id {
+                    bail!(
+                        "identity face {:?} is assigned to multiple person ids ({:?}, {:?})",
+                        face_id,
+                        existing,
+                        person_id
+                    );
+                }
             }
         }
         if !seen_pairs.insert((pair.query_id.as_str(), pair.candidate_id.as_str())) {
@@ -865,6 +870,18 @@ mod tests {
         let path = temp_manifest("duplicate-pair", &content);
         let error = load_manifest(&path).unwrap_err().to_string();
         assert!(error.contains("duplicate identity score"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn identity_face_person_assignment_must_be_consistent_for_candidates_too() {
+        let content = format!(
+            "{}identity\tq1\tp1\tc\tp2\t0.2\nidentity\tq2\tp3\tc\tp4\t0.3\n",
+            model()
+        );
+        let path = temp_manifest("candidate-person-conflict", &content);
+        let error = load_manifest(&path).unwrap_err().to_string();
+        assert!(error.contains("assigned to multiple person ids"));
         let _ = std::fs::remove_file(path);
     }
 
