@@ -1,7 +1,7 @@
-use crate::face_detection::{DetectedFace, FaceDetector};
+use super::yunet_adapter::YuNetOnnxAdapter;
+use super::yunet_settings::FaceDetectorSettings;
+use super::{DetectedFace, FaceDetector};
 use crate::face_pipeline::{self, FacePipelineEvent, FacePipelineOptions, FacePipelineSummary};
-use crate::face_yunet_adapter::YuNetOnnxAdapter;
-use crate::face_yunet_settings::FaceDetectorSettings;
 use anyhow::{bail, Result};
 use image::DynamicImage;
 use std::path::{Path, PathBuf};

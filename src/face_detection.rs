@@ -4,6 +4,10 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 
+pub mod yunet_adapter;
+pub mod yunet_production;
+pub mod yunet_settings;
+
 pub const SCHEMA_VERSION: i64 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -113,10 +117,8 @@ pub fn apply_orientation(image: DynamicImage, orientation: u32) -> DynamicImage 
         2 => image.fliph(),
         3 => image.rotate180(),
         4 => image.flipv(),
-        // EXIF 5 is a transpose across the top-left/bottom-right diagonal.
         5 => image.rotate90().fliph(),
         6 => image.rotate90(),
-        // EXIF 7 is a transverse flip across the opposite diagonal.
         7 => image.rotate90().flipv(),
         8 => image.rotate270(),
         _ => image,

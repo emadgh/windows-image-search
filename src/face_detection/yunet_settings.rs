@@ -1,4 +1,4 @@
-use crate::face_yunet_adapter::{
+use super::yunet_adapter::{
     YuNetExecutionProvider, DEFAULT_NMS_THRESHOLD, DEFAULT_SCORE_THRESHOLD, DEFAULT_TOP_K,
 };
 use anyhow::{Context, Result};
