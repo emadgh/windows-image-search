@@ -1,0 +1,77 @@
+name: Face cache revision patch
+
+on:
+  push:
+    branches:
+      - fix/face-cache-revisions
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/face-cache-revisions
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Apply patch and verify
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $log = 'face-cache-patch.log'
+          Remove-Item $log -ErrorAction SilentlyContinue
+
+          function Run-Step([string]$Name, [scriptblock]$Command) {
+            "===== $Name =====" | Tee-Object -FilePath $log -Append
+            & $Command 2>&1 | Tee-Object -FilePath $log -Append
+            if ($LASTEXITCODE -ne 0) {
+              throw "$Name failed with exit code $LASTEXITCODE"
+            }
+          }
+
+          Run-Step 'Patch' { python scripts/patch_face_cache_revisions.py }
+          Run-Step 'Format' { cargo fmt --all }
+          Run-Step 'Check' { cargo check --all-targets }
+          Run-Step 'Tests' { cargo test --all-targets }
+          Run-Step 'Release' { cargo build --release }
+
+      - name: Commit verified source
+        if: success()
+        shell: pwsh
+        run: |
+          Remove-Item scripts/patch_face_cache_revisions.py -ErrorAction SilentlyContinue
+          Remove-Item .github/workflows/face-cache-revision-patch.yml -ErrorAction SilentlyContinue
+          Remove-Item face-cache-patch.log -ErrorAction SilentlyContinue
+          Remove-Item face-cache-patch-failure.txt -ErrorAction SilentlyContinue
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 0) { exit 0 }
+          git commit -m "fix: make face cache revisions content-aware"
+          git push origin HEAD:fix/face-cache-revisions
+
+      - name: Preserve failure log
+        if: failure()
+        shell: pwsh
+        run: |
+          if (Test-Path face-cache-patch.log) {
+            Copy-Item face-cache-patch.log face-cache-patch-failure.txt -Force
+          } else {
+            'Patch workflow failed before producing a log.' | Set-Content face-cache-patch-failure.txt
+          }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add face-cache-patch-failure.txt
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 0) { exit 0 }
+          git commit -m "ci: capture face cache patch failure"
+          git push origin HEAD:fix/face-cache-revisions
