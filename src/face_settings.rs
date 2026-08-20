@@ -2,6 +2,7 @@ use crate::face_sface_adapter::SFaceExecutionProvider;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
+/// User-owned configuration for the external production face embedding model.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FaceEmbeddingSettings {
     pub model_path: PathBuf,
