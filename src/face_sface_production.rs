@@ -8,9 +8,9 @@ use crate::face_sface_adapter::{
     align_sface_112, LandmarkPoint, SFaceExecutionProvider, SFaceOnnxAdapter,
     SFACE_EMBEDDING_DIMENSION, SFACE_INPUT_SIZE,
 };
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use image::{DynamicImage, GenericImageView};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const MODEL_ID: &str = "opencv-sface-external";
 pub const MODEL_VERSION: &str = "1";
@@ -19,6 +19,7 @@ pub const ALIGNMENT_REVISION: i64 = 2;
 pub struct SFaceProductionEmbedder {
     adapter: SFaceOnnxAdapter,
     provider: SFaceExecutionProvider,
+    cache_revision: &'static str,
 }
 
 impl SFaceProductionEmbedder {
@@ -26,10 +27,14 @@ impl SFaceProductionEmbedder {
         if !settings.configured() {
             bail!("SFace model path is not configured");
         }
+        let model_fingerprint = model_fingerprint_fnv1a64(&settings.model_path)?;
         let adapter = SFaceOnnxAdapter::load(&settings.model_path, settings.provider)?;
+        let cache_revision = embedding_cache_revision(model_fingerprint);
+        let cache_revision = Box::leak(cache_revision.into_boxed_str());
         Ok(Self {
             adapter,
             provider: settings.provider,
+            cache_revision,
         })
     }
 
@@ -44,7 +49,7 @@ impl FaceEmbedder for SFaceProductionEmbedder {
     }
 
     fn model_version(&self) -> &'static str {
-        MODEL_VERSION
+        self.cache_revision
     }
 
     fn input_size(&self) -> u32 {
@@ -86,6 +91,24 @@ where
 {
     let mut embedder = SFaceProductionEmbedder::load(settings)?;
     face_embedding_pipeline::run_available_roots(roots, &mut embedder, options, emit)
+}
+
+fn model_fingerprint_fnv1a64(path: &Path) -> Result<u64> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("reading SFace model for cache revision {}", path.display()))?;
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    Ok(hash)
+}
+
+fn embedding_cache_revision(model_fingerprint: u64) -> String {
+    format!(
+        "{MODEL_VERSION}-{:016x}-align{ALIGNMENT_REVISION}-{}x{}",
+        model_fingerprint, SFACE_INPUT_SIZE, SFACE_EMBEDDING_DIMENSION
+    )
 }
 
 fn normalized_landmarks_to_pixels(
@@ -163,6 +186,14 @@ mod tests {
         assert_eq!(SFACE_INPUT_SIZE, 112);
         assert_eq!(SFACE_EMBEDDING_DIMENSION, 128);
         assert!(ALIGNMENT_REVISION > face_embedding::ALIGNMENT_REVISION);
+    }
+
+    #[test]
+    fn cache_revision_changes_when_external_model_content_changes() {
+        let base = embedding_cache_revision(0x1234);
+        assert_eq!(base, embedding_cache_revision(0x1234));
+        assert_ne!(base, embedding_cache_revision(0x1235));
+        assert!(base.contains(&format!("align{ALIGNMENT_REVISION}")));
     }
 
     #[test]
