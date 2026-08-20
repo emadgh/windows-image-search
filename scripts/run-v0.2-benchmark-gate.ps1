@@ -170,6 +170,26 @@ function Get-GpuProcessMemorySample {
     }
 }
 
+function ConvertTo-ProcessArgument {
+    param(
+        [AllowEmptyString()]
+        [string]$Value
+    )
+
+    if ([string]::IsNullOrEmpty($Value)) {
+        return '""'
+    }
+    if ($Value -notmatch '[\s"]') {
+        return $Value
+    }
+
+    # The modern ProcessStartInfo argument-list API is unavailable on Windows PowerShell 5.1 /
+    # .NET Framework. Build a correctly quoted command-line token instead.
+    $escaped = $Value -replace '(\\*)"', '$1$1\"'
+    $escaped = $escaped -replace '(\\+)$', '$1$1'
+    return '"' + $escaped + '"'
+}
+
 function Invoke-DiagnosticBenchmark {
     param(
         [Parameter(Mandatory)]
@@ -197,9 +217,9 @@ function Invoke-DiagnosticBenchmark {
 
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = $ExecutablePath
-    foreach ($argument in $Arguments) {
-        [void]$startInfo.ArgumentList.Add($argument)
-    }
+    $startInfo.Arguments = (($Arguments | ForEach-Object {
+        ConvertTo-ProcessArgument -Value ([string]$_)
+    }) -join ' ')
     $startInfo.UseShellExecute = $false
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
