@@ -45,7 +45,7 @@ pub fn ensure_schema(db_path: &Path) -> Result<()> {
     ensure_schema_on(&conn)
 }
 
-fn ensure_schema_on(conn: &Connection) -> Result<()> {
+pub(crate) fn ensure_schema_on(conn: &Connection) -> Result<()> {
     conn.execute_batch(COLLECTION_FACE_SCHEMA)
         .context("creating collection face settings")?;
     Ok(())
@@ -87,6 +87,11 @@ pub fn set_collection_enabled(db_path: &Path, collection_id: i64, enabled: bool)
 pub fn count_eligible_paths(db_path: &Path, root: &Path) -> Result<usize> {
     let conn = db::open(db_path)?;
     ensure_schema_on(&conn)?;
+    count_eligible_paths_on(&conn, root)
+}
+
+pub(crate) fn count_eligible_paths_on(conn: &Connection, root: &Path) -> Result<usize> {
+    ensure_schema_on(conn)?;
     let sql = format!(
         "SELECT COUNT(*) FROM images WHERE root = ?1 COLLATE NOCASE AND {ELIGIBLE_PREDICATE}"
     );
@@ -106,6 +111,16 @@ pub fn eligible_batch(
 ) -> Result<Vec<PathBuf>> {
     let conn = db::open(db_path)?;
     ensure_schema_on(&conn)?;
+    eligible_batch_on(&conn, root, after, limit)
+}
+
+pub(crate) fn eligible_batch_on(
+    conn: &Connection,
+    root: &Path,
+    after: Option<&Path>,
+    limit: usize,
+) -> Result<Vec<PathBuf>> {
+    ensure_schema_on(conn)?;
     let after = after
         .map(|path| path.to_string_lossy().to_string())
         .unwrap_or_default();
@@ -151,7 +166,7 @@ mod tests {
     }
 
     fn root(label: &str) -> PathBuf {
-        PathBuf::from(format!(r"C:\Libraries\{label}"))
+        std::env::temp_dir().join(format!("wis-face-scope-root-{label}"))
     }
 
     fn add_image(db_path: &Path, root: &Path, relative: &str) -> PathBuf {
@@ -180,8 +195,8 @@ mod tests {
     #[test]
     fn collections_are_default_off_and_toggle_controls_scope() {
         let db_path = temp_db("default-off");
-        let root = root("People");
-        let image = add_image(&db_path, &root, r"faces\a.jpg");
+        let root = root("people");
+        let image = add_image(&db_path, &root, "faces/a.jpg");
         let collection = db::create_collection(&db_path, "People").unwrap();
         db::add_collection_folders(&db_path, collection.id, &[root.join("faces")]).unwrap();
 
@@ -200,7 +215,7 @@ mod tests {
     #[test]
     fn overlapping_collections_use_or_semantics() {
         let db_path = temp_db("or");
-        let root = root("Mixed");
+        let root = root("mixed");
         let a = add_image(&db_path, &root, "a.jpg");
         let _b = add_image(&db_path, &root, "b.jpg");
 
@@ -219,10 +234,10 @@ mod tests {
     #[test]
     fn keyset_batching_only_walks_enabled_collection_members() {
         let db_path = temp_db("batch");
-        let root = root("Batch");
-        let a = add_image(&db_path, &root, r"people\a.jpg");
-        let b = add_image(&db_path, &root, r"people\b.jpg");
-        let _texture = add_image(&db_path, &root, r"textures\z.jpg");
+        let root = root("batch");
+        let a = add_image(&db_path, &root, "people/a.jpg");
+        let b = add_image(&db_path, &root, "people/b.jpg");
+        let _texture = add_image(&db_path, &root, "textures/z.jpg");
 
         let people = db::create_collection(&db_path, "People").unwrap();
         db::add_collection_folders(&db_path, people.id, &[root.join("people")]).unwrap();
