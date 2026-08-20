@@ -1,0 +1,47 @@
+name: Validate face similarity alpha6
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.head_ref == 'feat/face-similarity-core-v0.3-alpha6'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/face-similarity-core-v0.3-alpha6
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Apply alpha6 integration
+        run: python scripts/apply_face_similarity_alpha6.py
+      - name: Format
+        run: cargo fmt --all
+      - name: Cargo check
+        run: cargo check --all-targets
+      - name: Future-incompatible warnings are errors
+        shell: pwsh
+        run: |
+          $env:RUSTFLAGS = '-Dfuture-incompatible'
+          cargo check --all-targets
+      - name: Regression tests
+        run: cargo test --all-targets
+      - name: Release build
+        run: cargo build --release
+      - name: Commit validated source
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock src\main.rs src\face_similarity.rs
+          if (git status --porcelain -- Cargo.toml Cargo.lock src\main.rs src\face_similarity.rs) {
+            git commit -m "feat: add portable face similarity core alpha6"
+            git push origin HEAD:feat/face-similarity-core-v0.3-alpha6
+          }
