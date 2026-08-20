@@ -79,6 +79,7 @@ jobs:
           $version = "${{ steps.version.outputs.version }}"
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item target\release\windows-image-search.exe dist\windows-image-search.exe
+          Copy-Item target\release\portable-cache-repair.exe dist\portable-cache-repair.exe
           Get-ChildItem target\release -File -Filter *.dll -ErrorAction SilentlyContinue |
             ForEach-Object { Copy-Item $_.FullName (Join-Path dist $_.Name) }
           Copy-Item scripts\run-v0.2-benchmark-gate.ps1 dist\run-v0.2-benchmark-gate.ps1
