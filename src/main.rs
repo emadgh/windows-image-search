@@ -21,6 +21,7 @@ mod material_texture;
 mod metadata;
 mod model_benchmark;
 mod portable;
+mod portable_verify;
 mod preview_benchmark;
 mod runtime_benchmark;
 mod settings;
@@ -48,6 +49,7 @@ enum StartupMode {
     MaterialTextureBenchmark(usize),
     FaceBenchmark(PathBuf),
     FaceBenchmarkValidate(PathBuf),
+    PortableVerify(PathBuf, bool),
 }
 
 fn app_paths() -> Result<(PathBuf, PathBuf)> {
@@ -146,6 +148,28 @@ fn startup_mode() -> StartupMode {
         if arg == "--validate-face-benchmark" {
             return StartupMode::FaceBenchmarkValidate(
                 args.next().map(PathBuf::from).unwrap_or_default(),
+            );
+        }
+        if let Some(value) = arg.strip_prefix("--verify-portable=") {
+            if !value.trim().is_empty() {
+                return StartupMode::PortableVerify(PathBuf::from(value), false);
+            }
+        }
+        if arg == "--verify-portable" {
+            return StartupMode::PortableVerify(
+                args.next().map(PathBuf::from).unwrap_or_default(),
+                false,
+            );
+        }
+        if let Some(value) = arg.strip_prefix("--verify-portable-deep=") {
+            if !value.trim().is_empty() {
+                return StartupMode::PortableVerify(PathBuf::from(value), true);
+            }
+        }
+        if arg == "--verify-portable-deep" {
+            return StartupMode::PortableVerify(
+                args.next().map(PathBuf::from).unwrap_or_default(),
+                true,
             );
         }
         if let Some(value) = arg.strip_prefix("--benchmark-material-eval=") {
@@ -261,6 +285,26 @@ fn main() -> eframe::Result<()> {
         let fallback = PathBuf::from(".");
         (fallback.join("index.sqlite3"), fallback.join("models"))
     });
+    if let StartupMode::PortableVerify(root, deep) = &mode {
+        let verify_mode = if *deep {
+            portable_verify::VerifyMode::DeepFingerprint
+        } else {
+            portable_verify::VerifyMode::Quick
+        };
+        match portable_verify::verify_root(
+            root,
+            portable_verify::VerifyOptions {
+                mode: verify_mode,
+                ..portable_verify::VerifyOptions::default()
+            },
+            |_| {},
+        ) {
+            Ok(report) => println!("{}", report.render_text(root, verify_mode)),
+            Err(err) => benchmark_failed("Portable index verification", &err),
+        }
+        return Ok(());
+    }
+
     // Keep GUI launch lightweight: database open/migration, portable-root hydration,
     // and the initial image list are loaded by ImageSearchApp on a background thread.
     // CLI modes still prepare the database synchronously before running diagnostics.
