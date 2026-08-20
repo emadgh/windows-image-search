@@ -12,6 +12,7 @@ mod face_pipeline;
 #[cfg(test)]
 mod face_portable_tests;
 mod face_scope;
+mod face_similarity;
 mod face_sface_adapter;
 mod face_sface_benchmark;
 mod face_store;
