@@ -178,8 +178,8 @@ fn validate_thresholds(score: f32, nms: f32, top_k: usize) -> Result<()> {
 }
 
 fn fnv1a64_file(path: &Path) -> Result<u64> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("reading YuNet model {}", path.display()))?;
+    let bytes =
+        std::fs::read(path).with_context(|| format!("reading YuNet model {}", path.display()))?;
     let mut hash = 0xcbf29ce484222325u64;
     for byte in bytes {
         hash ^= byte as u64;
@@ -376,7 +376,11 @@ mod tests {
             height: 10.0,
             landmarks: [(0.0, 0.0); 5],
         };
-        let kept = nms(vec![make(0.8, 1.0), make(0.9, 0.0), make(0.7, 30.0)], 0.3, 10);
+        let kept = nms(
+            vec![make(0.8, 1.0), make(0.9, 0.0), make(0.7, 30.0)],
+            0.3,
+            10,
+        );
         assert_eq!(kept.len(), 2);
         assert_eq!(kept[0].score, 0.9);
         assert_eq!(kept[1].score, 0.7);
