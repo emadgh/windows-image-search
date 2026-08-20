@@ -5,6 +5,8 @@ mod views;
 
 use crate::db::{self, ImageSummary};
 use crate::embedding::EmbeddingService;
+use crate::face_settings::{self, FaceEmbeddingSettings};
+use crate::face_sface_adapter::SFaceExecutionProvider;
 use crate::fs_watch::{FsWatchMessage, FsWatchService};
 use crate::indexer::{self, WorkerMessage};
 use crate::portable;
@@ -62,6 +64,8 @@ pub struct ImageSearchApp {
     pub(super) similarity_settings: indexer::SimilaritySettings,
     pub(super) indexing_settings: IndexingSettings,
     settings_path: PathBuf,
+    face_embedding_settings: FaceEmbeddingSettings,
+    face_settings_path: PathBuf,
     collections: collections::CollectionsState,
     pub(super) search_text: String,
     text_search_service: TextSearchService,
@@ -106,6 +110,8 @@ impl ImageSearchApp {
         let thumbnail_cache = thumbnail_cache::cache_dir_for_db(&db_path);
         let settings_path = app_data_dir.join("performance-settings.ini");
         let indexing_settings = settings::load(&settings_path);
+        let face_settings_path = app_data_dir.join("face-embedding-settings.ini");
+        let face_embedding_settings = face_settings::load(&face_settings_path);
         let embedding_service = EmbeddingService::new(model_cache);
         let text_search_service = TextSearchService::new(db_path.clone());
         let fs_watch_service = FsWatchService::new(Vec::new());
@@ -165,6 +171,8 @@ impl ImageSearchApp {
             similarity_settings: indexer::SimilaritySettings::default(),
             indexing_settings,
             settings_path,
+            face_embedding_settings,
+            face_settings_path,
             collections: collections::CollectionsState::default(),
             search_text: String::new(),
             text_search_service,
@@ -779,6 +787,7 @@ impl ImageSearchApp {
         let mut remove_folder = None;
         let mut clear_cache = false;
         let mut save_performance_settings = false;
+        let mut save_face_settings = false;
 
         egui::Window::new("Settings")
             .open(&mut open)
@@ -974,6 +983,41 @@ impl ImageSearchApp {
 
                 ui.add_space(12.0);
                 ui.separator();
+                ui.heading("Face identity (SFace)");
+                ui.label("Use an external SFace-compatible ONNX model for portable face embeddings. Model weights are never downloaded or stored by the application.");
+                ui.add_enabled_ui(!self.busy, |ui| {
+                    ui.horizontal(|ui| {
+                        let mut model_path = self.face_embedding_settings.model_path.to_string_lossy().into_owned();
+                        if ui.add(egui::TextEdit::singleline(&mut model_path).hint_text("Path to external SFace .onnx").desired_width(560.0)).changed() {
+                            self.face_embedding_settings.model_path = PathBuf::from(model_path.trim());
+                            save_face_settings = true;
+                        }
+                        if ui.button("Browse…").clicked() {
+                            if let Some(path) = rfd::FileDialog::new().add_filter("ONNX model", &["onnx"]).pick_file() {
+                                self.face_embedding_settings.model_path = path;
+                                save_face_settings = true;
+                            }
+                        }
+                    });
+                    let provider_before = self.face_embedding_settings.provider;
+                    egui::ComboBox::from_label("SFace execution provider")
+                        .selected_text(self.face_embedding_settings.provider_label())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.face_embedding_settings.provider, SFaceExecutionProvider::Cpu, "CPU");
+                            ui.selectable_value(&mut self.face_embedding_settings.provider, SFaceExecutionProvider::DirectMl, "DirectML (Windows GPU)");
+                        });
+                    if provider_before != self.face_embedding_settings.provider { save_face_settings = true; }
+                });
+                if !self.face_embedding_settings.configured() {
+                    ui.small("No SFace model configured. Face embedding remains disabled until an external ONNX path is selected.");
+                } else if self.face_embedding_settings.model_path.is_file() {
+                    ui.small(format!("Configured: {} on {}", self.face_embedding_settings.model_path.display(), self.face_embedding_settings.provider_label()));
+                } else {
+                    ui.colored_label(egui::Color32::LIGHT_RED, "Configured SFace model path is not currently available.");
+                }
+
+                ui.add_space(12.0);
+                ui.separator();
                 ui.heading("Thumbnail cache");
                 ui.label(format!(
                     "Location: {}",
@@ -1017,6 +1061,24 @@ impl ImageSearchApp {
                 }
                 Err(err) => {
                     self.last_error = Some(format!("Cannot save performance settings: {err:#}"));
+                }
+            }
+        }
+        if save_face_settings {
+            match face_settings::save(&self.face_settings_path, &self.face_embedding_settings) {
+                Ok(()) => {
+                    self.status = if self.face_embedding_settings.configured() {
+                        format!(
+                            "SFace settings saved: {} on {}",
+                            self.face_embedding_settings.model_path.display(),
+                            self.face_embedding_settings.provider_label()
+                        )
+                    } else {
+                        "SFace settings cleared".to_owned()
+                    };
+                }
+                Err(err) => {
+                    self.last_error = Some(format!("Cannot save SFace settings: {err:#}"));
                 }
             }
         }
