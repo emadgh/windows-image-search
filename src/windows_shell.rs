@@ -18,6 +18,7 @@ pub fn show_context_menu(path: PathBuf) {
 fn windows_context_menu(path: &std::path::Path) -> windows::core::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::{PCSTR, PCWSTR};
+    use windows::Win32::Foundation::POINT;
     use windows::Win32::System::Com::{
         CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
     };
@@ -29,7 +30,6 @@ fn windows_context_menu(path: &std::path::Path) -> windows::core::Result<()> {
         CreatePopupMenu, DestroyMenu, GetCursorPos, GetForegroundWindow, TrackPopupMenuEx,
         SW_SHOWNORMAL, TPM_RETURNCMD, TPM_RIGHTBUTTON,
     };
-    use windows::Win32::Foundation::POINT;
 
     struct ComGuard;
     impl Drop for ComGuard {
@@ -49,14 +49,16 @@ fn windows_context_menu(path: &std::path::Path) -> windows::core::Result<()> {
 
         let menu_result = (|| -> windows::core::Result<()> {
             const FIRST_COMMAND: u32 = 1;
-            context.QueryContextMenu(menu, 0, FIRST_COMMAND, 0x7fff, CMF_NORMAL.0 as u32)?;
+            context
+                .QueryContextMenu(menu, 0, FIRST_COMMAND, 0x7fff, CMF_NORMAL)
+                .ok()?;
 
             let mut point = POINT::default();
             GetCursorPos(&mut point)?;
             let owner = GetForegroundWindow();
             let selected = TrackPopupMenuEx(
                 menu,
-                TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                (TPM_RETURNCMD | TPM_RIGHTBUTTON).0,
                 point.x,
                 point.y,
                 owner,
