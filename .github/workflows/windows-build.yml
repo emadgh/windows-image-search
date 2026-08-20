@@ -45,6 +45,29 @@ jobs:
               exit 1
             }
           }
+      - name: Windows PowerShell 5.1 benchmark compatibility
+        shell: powershell
+        run: |
+          $files = @(
+            'scripts/run-v0.2-benchmark-gate.ps1',
+            'scripts/run-indexed-sample-benchmark.ps1'
+          )
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path -LiteralPath $file).Path,
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error "${file}: $($_.Message)" }
+              exit 1
+            }
+          }
+          if (Select-String -Path 'scripts/run-v0.2-benchmark-gate.ps1' -Pattern '\.ArgumentList' -Quiet) {
+            throw 'Benchmark runner uses ProcessStartInfo.ArgumentList, which is unavailable on Windows PowerShell 5.1.'
+          }
       - name: Format check
         run: cargo fmt --all -- --check
       - name: Cargo check
