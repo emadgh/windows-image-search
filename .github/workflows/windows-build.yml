@@ -10,47 +10,13 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.head_ref || github.ref_name }}
-
-      - name: Apply one-time portable repair compile patch
-        if: github.event_name == 'pull_request' && github.event.pull_request.number == 117
-        shell: pwsh
-        run: |
-          $path = "src/bin/portable-cache-repair.rs"
-          $text = [System.IO.File]::ReadAllText($path)
-          $old = @'
-    let mut loader = HnswIo::new(&ann_dir, &manifest.basename);
-    match loader.load_hnsw::<f32, DistCosine>() {
-        Ok(_) => Ok(AnnState::Current),
-        Err(_) => Ok(AnnState::Corrupt),
-    }
-'@
-          $new = @'
-    let mut loader = HnswIo::new(&ann_dir, &manifest.basename);
-    let state = match loader.load_hnsw::<f32, DistCosine>() {
-        Ok(_) => AnnState::Current,
-        Err(_) => AnnState::Corrupt,
-    };
-    Ok(state)
-'@
-          if (-not $text.Contains($old)) { throw "Expected HNSW loader block not found" }
-          [System.IO.File]::WriteAllText($path, $text.Replace($old, $new), [System.Text.UTF8Encoding]::new($false))
-          Copy-Item .github/windows-build.final.yml .github/workflows/windows-build.yml -Force
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add $path .github/workflows/windows-build.yml
-          git rm .github/windows-build.final.yml
-          if (Test-Path .github/workflows/self-patch-portable.yml) { git rm .github/workflows/self-patch-portable.yml }
-          git commit -m "fix: avoid borrowed HNSW loader temporary"
-          git push origin HEAD:${{ github.head_ref }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
