@@ -1,7 +1,7 @@
-use crate::{db, face_detection, face_store, portable};
+use crate::{db, face_detection, face_scope, face_store, portable};
 use anyhow::{Context, Result};
 use image::GenericImageView;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 
 const DEFAULT_BATCH_SIZE: usize = 16;
@@ -32,12 +32,13 @@ impl FacePipelineOptions {
 pub enum FacePipelineEvent {
     RootStarted {
         root: PathBuf,
-        pending: usize,
+        eligible: usize,
     },
     Progress {
         root: PathBuf,
+        visited: usize,
+        eligible: usize,
         processed: usize,
-        pending: usize,
         faces: usize,
         failures: usize,
     },
@@ -51,6 +52,7 @@ pub enum FacePipelineEvent {
     },
     RootFinished {
         root: PathBuf,
+        visited: usize,
         processed: usize,
         faces: usize,
         failures: usize,
@@ -61,19 +63,15 @@ pub enum FacePipelineEvent {
 pub struct FacePipelineSummary {
     pub roots_processed: usize,
     pub roots_unavailable: usize,
+    pub images_eligible: usize,
+    pub images_visited: usize,
     pub images_processed: usize,
     pub faces_detected: usize,
     pub failures: usize,
 }
 
-#[derive(Clone, Debug)]
-struct PendingImage {
-    relative_path: PathBuf,
-    size: u64,
-    modified: i64,
-}
-
 pub fn run_available_roots<D, F>(
+    session_db_path: &Path,
     roots: &[PathBuf],
     detector: &mut D,
     options: FacePipelineOptions,
@@ -86,6 +84,10 @@ where
     let options = options.sanitized();
     let detector_id = detector.detector_id();
     let detector_version = detector.detector_version();
+    let session_conn = db::open(session_db_path)
+        .with_context(|| format!("opening collection scope database {}", session_db_path.display()))?;
+    face_scope::ensure_schema_on(&session_conn)?;
+
     let mut summary = FacePipelineSummary::default();
 
     for root in roots {
@@ -95,26 +97,28 @@ where
             continue;
         }
 
+        let eligible = face_scope::count_eligible_paths_on(&session_conn, root)?;
+        summary.images_eligible += eligible;
+        emit(FacePipelineEvent::RootStarted {
+            root: root.clone(),
+            eligible,
+        });
+
         let db_path = portable::index_db_path(root);
         let mut conn = db::open(&db_path)
             .with_context(|| format!("opening portable face index {}", db_path.display()))?;
         face_store::ensure_schema(&conn)?;
-        let pending = count_pending(&conn, detector_id, detector_version)?;
-        emit(FacePipelineEvent::RootStarted {
-            root: root.clone(),
-            pending,
-        });
 
+        let mut root_visited = 0usize;
         let mut root_processed = 0usize;
         let mut root_faces = 0usize;
         let mut root_failures = 0usize;
-        let mut cursor: Option<String> = None;
+        let mut cursor: Option<PathBuf> = None;
 
         loop {
-            let batch = pending_batch(
-                &conn,
-                detector_id,
-                detector_version,
+            let batch = face_scope::eligible_batch_on(
+                &session_conn,
+                root,
                 cursor.as_deref(),
                 options.batch_size,
             )?;
@@ -122,28 +126,87 @@ where
                 break;
             }
 
-            for item in batch {
-                cursor = Some(item.relative_path.to_string_lossy().to_string());
-                let absolute = match portable::absolute_source_path(root, &item.relative_path) {
+            for absolute in batch {
+                cursor = Some(absolute.clone());
+                root_visited += 1;
+
+                let relative = match portable::relative_source_path(root, &absolute) {
                     Ok(path) => path,
                     Err(err) => {
                         root_failures += 1;
-                        emit_failure(&mut emit, root, &item.relative_path, &err);
+                        emit_failure(&mut emit, root, &absolute, &err);
+                        emit_progress(
+                            &mut emit,
+                            root,
+                            root_visited,
+                            eligible,
+                            root_processed,
+                            root_faces,
+                            root_failures,
+                        );
                         continue;
                     }
                 };
 
-                // Face state belongs to the indexed source revision. If the file
-                // changed before the base watcher/indexer caught up, leave it
-                // pending rather than committing geometry against stale metadata.
-                if !filesystem_state_matches(&absolute, item.size, item.modified) {
+                let Some((size, modified)) = indexed_image_state(&conn, &relative)? else {
                     root_failures += 1;
                     emit(FacePipelineEvent::ImageFailed {
                         root: root.clone(),
-                        image: absolute,
+                        image: absolute.clone(),
+                        error: "collection member is missing from the portable root index".to_owned(),
+                    });
+                    emit_progress(
+                        &mut emit,
+                        root,
+                        root_visited,
+                        eligible,
+                        root_processed,
+                        root_faces,
+                        root_failures,
+                    );
+                    continue;
+                };
+
+                if face_store::detection_is_current(
+                    &conn,
+                    &relative,
+                    size,
+                    modified,
+                    detector_id,
+                    detector_version,
+                )? {
+                    emit_progress(
+                        &mut emit,
+                        root,
+                        root_visited,
+                        eligible,
+                        root_processed,
+                        root_faces,
+                        root_failures,
+                    );
+                    continue;
+                }
+
+                // Face state belongs to the indexed source revision. If the file
+                // changed before the base watcher/indexer caught up, leave it
+                // pending rather than committing geometry against stale metadata.
+                if !filesystem_state_matches(&absolute, size, modified) {
+                    root_failures += 1;
+                    emit(FacePipelineEvent::ImageFailed {
+                        root: root.clone(),
+                        image: absolute.clone(),
                         error: "source state changed; base image index must update before face detection"
                             .to_owned(),
                     });
+                    emit_progress(
+                        &mut emit,
+                        root,
+                        root_visited,
+                        eligible,
+                        root_processed,
+                        root_faces,
+                        root_failures,
+                    );
                     continue;
                 }
 
@@ -154,9 +217,9 @@ where
                     let detections = detector.detect(&oriented)?;
                     let stored = face_store::replace_detections(
                         &mut conn,
-                        &item.relative_path,
-                        item.size,
-                        item.modified,
+                        &relative,
+                        size,
+                        modified,
                         orientation,
                         width,
                         height,
@@ -178,22 +241,26 @@ where
                     }
                 }
 
-                emit(FacePipelineEvent::Progress {
-                    root: root.clone(),
-                    processed: root_processed,
-                    pending,
-                    faces: root_faces,
-                    failures: root_failures,
-                });
+                emit_progress(
+                    &mut emit,
+                    root,
+                    root_visited,
+                    eligible,
+                    root_processed,
+                    root_faces,
+                    root_failures,
+                );
             }
         }
 
         summary.roots_processed += 1;
+        summary.images_visited += root_visited;
         summary.images_processed += root_processed;
         summary.faces_detected += root_faces;
         summary.failures += root_failures;
         emit(FacePipelineEvent::RootFinished {
             root: root.clone(),
+            visited: root_visited,
             processed: root_processed,
             faces: root_faces,
             failures: root_failures,
@@ -201,6 +268,27 @@ where
     }
 
     Ok(summary)
+}
+
+fn emit_progress<F>(
+    emit: &mut F,
+    root: &Path,
+    visited: usize,
+    eligible: usize,
+    processed: usize,
+    faces: usize,
+    failures: usize,
+) where
+    F: FnMut(FacePipelineEvent),
+{
+    emit(FacePipelineEvent::Progress {
+        root: root.to_path_buf(),
+        visited,
+        eligible,
+        processed,
+        faces,
+        failures,
+    });
 }
 
 fn emit_failure<F>(emit: &mut F, root: &Path, image: &Path, err: &anyhow::Error)
@@ -214,73 +302,19 @@ where
     });
 }
 
-fn count_pending(conn: &Connection, detector_id: &str, detector_version: &str) -> Result<usize> {
-    let count = conn.query_row(
-        r#"
-        SELECT COUNT(*)
-        FROM images
-        LEFT JOIN face_detection_state state ON state.image_path = images.path
-        WHERE state.image_path IS NULL
-           OR state.detector_id <> ?1
-           OR state.detector_version <> ?2
-           OR state.schema_version <> ?3
-           OR state.source_size <> images.size
-           OR state.source_modified <> images.modified
-        "#,
-        params![
-            detector_id,
-            detector_version,
-            face_detection::SCHEMA_VERSION
-        ],
-        |row| row.get::<_, i64>(0),
-    )?;
-    Ok(count.max(0) as usize)
-}
-
-fn pending_batch(
-    conn: &Connection,
-    detector_id: &str,
-    detector_version: &str,
-    after: Option<&str>,
-    limit: usize,
-) -> Result<Vec<PendingImage>> {
-    let after = after.unwrap_or("");
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT images.path, images.size, images.modified
-        FROM images
-        LEFT JOIN face_detection_state state ON state.image_path = images.path
-        WHERE images.path COLLATE NOCASE > ?4 COLLATE NOCASE
-          AND (
-               state.image_path IS NULL
-            OR state.detector_id <> ?1
-            OR state.detector_version <> ?2
-            OR state.schema_version <> ?3
-            OR state.source_size <> images.size
-            OR state.source_modified <> images.modified
-          )
-        ORDER BY images.path COLLATE NOCASE
-        LIMIT ?5
-        "#,
-    )?;
-    let rows = stmt.query_map(
-        params![
-            detector_id,
-            detector_version,
-            face_detection::SCHEMA_VERSION,
-            after,
-            limit as i64,
-        ],
+fn indexed_image_state(conn: &Connection, relative: &Path) -> Result<Option<(u64, i64)>> {
+    conn.query_row(
+        "SELECT size, modified FROM images WHERE path = ?1",
+        params![relative.to_string_lossy().to_string()],
         |row| {
-            Ok(PendingImage {
-                relative_path: PathBuf::from(row.get::<_, String>(0)?),
-                size: row.get::<_, i64>(1)?.max(0) as u64,
-                modified: row.get(2)?,
-            })
+            Ok((
+                row.get::<_, i64>(0)?.max(0) as u64,
+                row.get::<_, i64>(1)?,
+            ))
         },
-    )?;
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .context("loading bounded face-detection batch")
+    )
+    .optional()
+    .context("loading portable image state for face detection")
 }
 
 fn filesystem_state_matches(path: &Path, expected_size: u64, expected_modified: i64) -> bool {
@@ -354,7 +388,16 @@ mod tests {
         ))
     }
 
-    fn add_image(root: &Path, name: &str, width: u32) -> PathBuf {
+    fn prepared_library(label: &str) -> (PathBuf, PathBuf) {
+        let root = temp_root(label);
+        std::fs::create_dir_all(&root).unwrap();
+        let session = root.with_extension("session.sqlite3");
+        portable::attach_root(&session, &root).unwrap();
+        face_scope::ensure_schema(&session).unwrap();
+        (root, session)
+    }
+
+    fn add_image(root: &Path, session: &Path, name: &str, width: u32) -> PathBuf {
         let source = root.join(name);
         let image = ImageBuffer::from_pixel(width, 9, Rgb([20u8, 30, 40]));
         image.save(&source).unwrap();
@@ -365,11 +408,11 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
-        let portable_db = portable::index_db_path(root);
-        let conn = db::open(&portable_db).unwrap();
+
         let relative = PathBuf::from(name);
+        let portable_conn = db::open(&portable::index_db_path(root)).unwrap();
         db::upsert_image(
-            &conn,
+            &portable_conn,
             &relative,
             Path::new(""),
             name,
@@ -385,46 +428,76 @@ mod tests {
             &[1.0],
         )
         .unwrap();
-        relative
+
+        let session_conn = db::open(session).unwrap();
+        db::upsert_image(
+            &session_conn,
+            &source,
+            root,
+            name,
+            "png",
+            meta.len(),
+            modified,
+            width,
+            9,
+            "",
+            "",
+            [20, 30, 40],
+            1,
+            &[1.0],
+        )
+        .unwrap();
+        source
     }
 
-    fn prepared_root(label: &str) -> PathBuf {
-        let root = temp_root(label);
-        std::fs::create_dir_all(&root).unwrap();
-        let session = root.with_extension("session.sqlite3");
-        portable::attach_root(&session, &root).unwrap();
+    fn add_collection_folder(session: &Path, name: &str, folder: &Path, enabled: bool) -> i64 {
+        let collection = db::create_collection(session, name).unwrap();
+        db::add_collection_folders(session, collection.id, &[folder.to_path_buf()]).unwrap();
+        face_scope::set_collection_enabled(session, collection.id, enabled).unwrap();
+        collection.id
+    }
+
+    fn cleanup(root: &Path, session: &Path) {
+        let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_file(session);
-        root
+        let _ = std::fs::remove_file(session.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(session.with_extension("sqlite3-shm"));
     }
 
     #[test]
     fn bounded_batches_persist_zero_and_one_face_then_skip_current() {
-        let root = prepared_root("bounded");
-        add_image(&root, "a.png", 10);
-        add_image(&root, "b.png", 11);
-        add_image(&root, "c.png", 12);
+        let (root, session) = prepared_library("bounded");
+        add_image(&root, &session, "a.png", 10);
+        add_image(&root, &session, "b.png", 11);
+        add_image(&root, &session, "c.png", 12);
+        add_collection_folder(&session, "People", &root, true);
+
         let mut detector = FakeDetector {
             version: "1",
             calls: 0,
         };
         let first = run_available_roots(
+            &session,
             std::slice::from_ref(&root),
             &mut detector,
             FacePipelineOptions { batch_size: 1 },
             |_| {},
         )
         .unwrap();
+        assert_eq!(first.images_eligible, 3);
         assert_eq!(first.images_processed, 3);
         assert_eq!(first.faces_detected, 2);
         assert_eq!(detector.calls, 3);
 
         let second = run_available_roots(
+            &session,
             std::slice::from_ref(&root),
             &mut detector,
             FacePipelineOptions { batch_size: 1 },
             |_| {},
         )
         .unwrap();
+        assert_eq!(second.images_eligible, 3);
         assert_eq!(second.images_processed, 0);
         assert_eq!(detector.calls, 3);
         let conn = db::open(&portable::index_db_path(&root)).unwrap();
@@ -435,51 +508,172 @@ mod tests {
                 .face_count,
             0
         );
-        let _ = std::fs::remove_dir_all(root);
+        cleanup(&root, &session);
     }
 
     #[test]
-    fn detector_version_change_backfills_current_images() {
-        let root = prepared_root("version");
-        add_image(&root, "a.png", 10);
-        let mut v1 = FakeDetector {
-            version: "1",
-            calls: 0,
-        };
-        run_available_roots(
-            &[root.clone()],
-            &mut v1,
-            FacePipelineOptions::default(),
-            |_| {},
-        )
-        .unwrap();
-        let mut v2 = FakeDetector {
-            version: "2",
-            calls: 0,
-        };
-        let result = run_available_roots(
-            &[root.clone()],
-            &mut v2,
-            FacePipelineOptions::default(),
-            |_| {},
-        )
-        .unwrap();
-        assert_eq!(result.images_processed, 1);
-        assert_eq!(v2.calls, 1);
-        let _ = std::fs::remove_dir_all(root);
-    }
+    fn disabled_texture_collection_never_calls_detector() {
+        let (root, session) = prepared_library("disabled");
+        add_image(&root, &session, "tile-a.png", 10);
+        add_image(&root, &session, "tile-b.png", 12);
+        add_collection_folder(&session, "Textures", &root, false);
 
-    #[test]
-    fn one_failed_image_does_not_block_later_images_or_mark_failure_current() {
-        let root = prepared_root("failure");
-        add_image(&root, "a.png", 13);
-        add_image(&root, "b.png", 14);
         let mut detector = FakeDetector {
             version: "1",
             calls: 0,
         };
         let result = run_available_roots(
-            &[root.clone()],
+            &session,
+            std::slice::from_ref(&root),
+            &mut detector,
+            FacePipelineOptions::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(result.images_eligible, 0);
+        assert_eq!(result.images_processed, 0);
+        assert_eq!(detector.calls, 0);
+        cleanup(&root, &session);
+    }
+
+    #[test]
+    fn overlapping_collections_use_any_enabled_membership() {
+        let (root, session) = prepared_library("overlap");
+        let person = add_image(&root, &session, "person.png", 10);
+        add_image(&root, &session, "texture.png", 12);
+        add_collection_folder(&session, "Textures", &root, false);
+
+        let people = db::create_collection(&session, "People").unwrap();
+        db::add_collection_files(&session, people.id, std::slice::from_ref(&person)).unwrap();
+        face_scope::set_collection_enabled(&session, people.id, true).unwrap();
+
+        let mut detector = FakeDetector {
+            version: "1",
+            calls: 0,
+        };
+        let result = run_available_roots(
+            &session,
+            std::slice::from_ref(&root),
+            &mut detector,
+            FacePipelineOptions::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(result.images_eligible, 1);
+        assert_eq!(result.images_processed, 1);
+        assert_eq!(detector.calls, 1);
+        let conn = db::open(&portable::index_db_path(&root)).unwrap();
+        assert!(face_store::load_detection_state(&conn, Path::new("person.png"))
+            .unwrap()
+            .is_some());
+        assert!(face_store::load_detection_state(&conn, Path::new("texture.png"))
+            .unwrap()
+            .is_none());
+        cleanup(&root, &session);
+    }
+
+    #[test]
+    fn disabling_then_reenabling_reuses_current_face_state() {
+        let (root, session) = prepared_library("toggle");
+        add_image(&root, &session, "person.png", 10);
+        let collection_id = add_collection_folder(&session, "People", &root, true);
+
+        let mut detector = FakeDetector {
+            version: "1",
+            calls: 0,
+        };
+        run_available_roots(
+            &session,
+            std::slice::from_ref(&root),
+            &mut detector,
+            FacePipelineOptions::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(detector.calls, 1);
+
+        face_scope::set_collection_enabled(&session, collection_id, false).unwrap();
+        let disabled = run_available_roots(
+            &session,
+            std::slice::from_ref(&root),
+            &mut detector,
+            FacePipelineOptions::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(disabled.images_eligible, 0);
+        assert_eq!(detector.calls, 1);
+
+        face_scope::set_collection_enabled(&session, collection_id, true).unwrap();
+        let enabled_again = run_available_roots(
+            &session,
+            std::slice::from_ref(&root),
+            &mut detector,
+            FacePipelineOptions::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(enabled_again.images_eligible, 1);
+        assert_eq!(enabled_again.images_processed, 0);
+        assert_eq!(detector.calls, 1);
+        cleanup(&root, &session);
+    }
+
+    #[test]
+    fn detector_version_change_backfills_only_enabled_images() {
+        let (root, session) = prepared_library("version");
+        add_image(&root, &session, "person.png", 10);
+        add_image(&root, &session, "texture.png", 12);
+        let people = db::create_collection(&session, "People").unwrap();
+        db::add_collection_files(&session, people.id, &[root.join("person.png")]).unwrap();
+        face_scope::set_collection_enabled(&session, people.id, true).unwrap();
+        add_collection_folder(&session, "Textures", &root.join("texture-folder-never-matches"), false);
+
+        let mut v1 = FakeDetector {
+            version: "1",
+            calls: 0,
+        };
+        run_available_roots(
+            &session,
+            std::slice::from_ref(&root),
+            &mut v1,
+            FacePipelineOptions::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(v1.calls, 1);
+
+        let mut v2 = FakeDetector {
+            version: "2",
+            calls: 0,
+        };
+        let result = run_available_roots(
+            &session,
+            std::slice::from_ref(&root),
+            &mut v2,
+            FacePipelineOptions::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(result.images_eligible, 1);
+        assert_eq!(result.images_processed, 1);
+        assert_eq!(v2.calls, 1);
+        cleanup(&root, &session);
+    }
+
+    #[test]
+    fn one_failed_image_does_not_block_later_enabled_images() {
+        let (root, session) = prepared_library("failure");
+        add_image(&root, &session, "a.png", 13);
+        add_image(&root, &session, "b.png", 14);
+        add_collection_folder(&session, "People", &root, true);
+        let mut detector = FakeDetector {
+            version: "1",
+            calls: 0,
+        };
+        let result = run_available_roots(
+            &session,
+            std::slice::from_ref(&root),
             &mut detector,
             FacePipelineOptions { batch_size: 1 },
             |_| {},
@@ -494,17 +688,20 @@ mod tests {
         assert!(face_store::load_detection_state(&conn, Path::new("b.png"))
             .unwrap()
             .is_some());
-        let _ = std::fs::remove_dir_all(root);
+        cleanup(&root, &session);
     }
 
     #[test]
-    fn unavailable_roots_are_reported_without_error() {
+    fn unavailable_roots_are_reported_without_touching_scope() {
         let root = temp_root("missing");
+        let session = root.with_extension("session.sqlite3");
+        face_scope::ensure_schema(&session).unwrap();
         let mut detector = FakeDetector {
             version: "1",
             calls: 0,
         };
         let result = run_available_roots(
+            &session,
             &[root],
             &mut detector,
             FacePipelineOptions::default(),
@@ -513,5 +710,6 @@ mod tests {
         .unwrap();
         assert_eq!(result.roots_unavailable, 1);
         assert_eq!(detector.calls, 0);
+        let _ = std::fs::remove_file(session);
     }
 }
