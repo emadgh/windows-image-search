@@ -37,6 +37,7 @@ jobs:
             }
           }
 
+          Run-Step 'Fix patch assertions' { python scripts/fix_face_cache_patch_script.py }
           Run-Step 'Patch' { python scripts/patch_face_cache_revisions.py }
           Run-Step 'Format' { cargo fmt --all }
           Run-Step 'Check' { cargo check --all-targets }
@@ -48,6 +49,7 @@ jobs:
         shell: pwsh
         run: |
           Remove-Item scripts/patch_face_cache_revisions.py -ErrorAction SilentlyContinue
+          Remove-Item scripts/fix_face_cache_patch_script.py -ErrorAction SilentlyContinue
           Remove-Item .github/workflows/face-cache-revision-patch.yml -ErrorAction SilentlyContinue
           Remove-Item face-cache-patch.log -ErrorAction SilentlyContinue
           Remove-Item face-cache-patch-failure.txt -ErrorAction SilentlyContinue
