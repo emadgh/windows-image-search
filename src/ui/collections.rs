@@ -1,5 +1,6 @@
 use super::ImageSearchApp;
 use crate::db::{self, Collection, CollectionMembership, ImageSummary};
+use crate::face_scope;
 use eframe::egui;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -16,6 +17,7 @@ pub(super) struct CollectionsState {
     active_filter: Option<i64>,
     memberships: HashMap<i64, CollectionMembership>,
     effective: HashMap<i64, HashSet<PathBuf>>,
+    face_detection: HashMap<i64, bool>,
     new_name: String,
     rename_name: String,
 }
@@ -29,6 +31,7 @@ impl CollectionsState {
 
     fn reload(&mut self, db_path: &Path, images: &[ImageSummary]) -> anyhow::Result<()> {
         self.items = db::load_collections(db_path)?;
+        self.face_detection = face_scope::load_collection_flags(db_path)?;
         if self
             .selected_manage
             .is_some_and(|id| !self.items.iter().any(|item| item.id == id))
@@ -113,6 +116,7 @@ impl CollectionsState {
 enum CollectionAction {
     Create(String),
     Rename(i64, String),
+    SetFaceDetection(i64, bool),
     Delete(i64),
     AddFolderDialog(i64),
     AddFilesDialog(i64),
@@ -278,6 +282,31 @@ impl ImageSearchApp {
                 });
                 ui.small("Deleting a collection only removes its membership records; image files stay untouched.");
 
+                let mut detect_faces = self
+                    .collections
+                    .face_detection
+                    .get(&id)
+                    .copied()
+                    .unwrap_or(false);
+                if ui
+                    .add_enabled(
+                        !self.busy,
+                        egui::Checkbox::new(
+                            &mut detect_faces,
+                            "Detect faces in this collection",
+                        ),
+                    )
+                    .on_hover_text(
+                        "Only effective members of face-enabled collections are sent to the face detector.",
+                    )
+                    .changed()
+                {
+                    action = Some(CollectionAction::SetFaceDetection(id, detect_faces));
+                }
+                ui.small(
+                    "Off by default. Texture-only collections are skipped completely by face detection. Existing face data is kept when this is turned off.",
+                );
+
                 ui.add_space(8.0);
                 let drop_response = ui.add_sized(
                     [ui.available_width(), 48.0],
@@ -391,6 +420,15 @@ impl ImageSearchApp {
                 CollectionAction::Rename(id, name) => {
                     db::rename_collection(&self.db_path, id, &name)?;
                     format!("Renamed collection to ‘{name}’")
+                }
+                CollectionAction::SetFaceDetection(id, enabled) => {
+                    face_scope::set_collection_enabled(&self.db_path, id, enabled)?;
+                    if enabled {
+                        "Face detection enabled for this collection".to_owned()
+                    } else {
+                        "Face detection disabled for this collection; existing face data was kept"
+                            .to_owned()
+                    }
                 }
                 CollectionAction::Delete(id) => {
                     db::delete_collection(&self.db_path, id)?;

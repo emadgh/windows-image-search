@@ -75,6 +75,11 @@ pub trait FaceDetector: Send {
 }
 
 pub fn decode_oriented(path: &Path) -> Result<DynamicImage> {
+    decode_oriented_with_orientation(path).map(|(image, _)| image)
+}
+
+pub fn decode_oriented_with_orientation(path: &Path) -> Result<(DynamicImage, u32)> {
+    let orientation = read_exif_orientation(path);
     let image = image::ImageReader::open(path)
         .with_context(|| format!("opening image for face detection {}", path.display()))?
         .with_guessed_format()
@@ -86,7 +91,7 @@ pub fn decode_oriented(path: &Path) -> Result<DynamicImage> {
         })?
         .decode()
         .with_context(|| format!("decoding image for face detection {}", path.display()))?;
-    Ok(apply_orientation(image, read_exif_orientation(path)))
+    Ok((apply_orientation(image, orientation), orientation))
 }
 
 pub fn read_exif_orientation(path: &Path) -> u32 {
