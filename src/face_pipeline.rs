@@ -84,8 +84,12 @@ where
     let options = options.sanitized();
     let detector_id = detector.detector_id();
     let detector_version = detector.detector_version();
-    let session_conn = db::open(session_db_path)
-        .with_context(|| format!("opening collection scope database {}", session_db_path.display()))?;
+    let session_conn = db::open(session_db_path).with_context(|| {
+        format!(
+            "opening collection scope database {}",
+            session_db_path.display()
+        )
+    })?;
     face_scope::ensure_schema_on(&session_conn)?;
 
     let mut summary = FacePipelineSummary::default();
@@ -153,7 +157,8 @@ where
                     emit(FacePipelineEvent::ImageFailed {
                         root: root.clone(),
                         image: absolute.clone(),
-                        error: "collection member is missing from the portable root index".to_owned(),
+                        error: "collection member is missing from the portable root index"
+                            .to_owned(),
                     });
                     emit_progress(
                         &mut emit,
@@ -306,12 +311,7 @@ fn indexed_image_state(conn: &Connection, relative: &Path) -> Result<Option<(u64
     conn.query_row(
         "SELECT size, modified FROM images WHERE path = ?1",
         params![relative.to_string_lossy().to_string()],
-        |row| {
-            Ok((
-                row.get::<_, i64>(0)?.max(0) as u64,
-                row.get::<_, i64>(1)?,
-            ))
-        },
+        |row| Ok((row.get::<_, i64>(0)?.max(0) as u64, row.get::<_, i64>(1)?)),
     )
     .optional()
     .context("loading portable image state for face detection")
@@ -563,12 +563,16 @@ mod tests {
         assert_eq!(result.images_processed, 1);
         assert_eq!(detector.calls, 1);
         let conn = db::open(&portable::index_db_path(&root)).unwrap();
-        assert!(face_store::load_detection_state(&conn, Path::new("person.png"))
-            .unwrap()
-            .is_some());
-        assert!(face_store::load_detection_state(&conn, Path::new("texture.png"))
-            .unwrap()
-            .is_none());
+        assert!(
+            face_store::load_detection_state(&conn, Path::new("person.png"))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            face_store::load_detection_state(&conn, Path::new("texture.png"))
+                .unwrap()
+                .is_none()
+        );
         cleanup(&root, &session);
     }
 
@@ -627,7 +631,12 @@ mod tests {
         let people = db::create_collection(&session, "People").unwrap();
         db::add_collection_files(&session, people.id, &[root.join("person.png")]).unwrap();
         face_scope::set_collection_enabled(&session, people.id, true).unwrap();
-        add_collection_folder(&session, "Textures", &root.join("texture-folder-never-matches"), false);
+        add_collection_folder(
+            &session,
+            "Textures",
+            &root.join("texture-folder-never-matches"),
+            false,
+        );
 
         let mut v1 = FakeDetector {
             version: "1",

@@ -34,7 +34,7 @@ const ELIGIBLE_PREDICATE: &str = r#"
           AND substr(images.path, 1, length(folders.folder_path)) = folders.folder_path COLLATE NOCASE
           AND (
                 length(images.path) = length(folders.folder_path)
-             OR substr(images.path, length(folders.folder_path) + 1, 1) IN ('\\', '/')
+             OR substr(images.path, length(folders.folder_path) + 1, 1) IN ('\', '/')
           )
     )
 )
@@ -95,11 +95,9 @@ pub(crate) fn count_eligible_paths_on(conn: &Connection, root: &Path) -> Result<
     let sql = format!(
         "SELECT COUNT(*) FROM images WHERE root = ?1 COLLATE NOCASE AND {ELIGIBLE_PREDICATE}"
     );
-    let count = conn.query_row(
-        &sql,
-        params![root.to_string_lossy().to_string()],
-        |row| row.get::<_, i64>(0),
-    )?;
+    let count = conn.query_row(&sql, params![root.to_string_lossy().to_string()], |row| {
+        row.get::<_, i64>(0)
+    })?;
     Ok(count.max(0) as usize)
 }
 
