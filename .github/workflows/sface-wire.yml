@@ -1,0 +1,57 @@
+name: SFace wiring
+
+on:
+  push:
+    branches: [feat/sface-production-integration]
+
+permissions:
+  contents: write
+
+jobs:
+  wire:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/sface-production-integration
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Wire production SFace
+        shell: python
+        run: |
+          from pathlib import Path
+          def r(text, old, new, label):
+              if new in text: return text
+              if old not in text: raise SystemExit(f"missing {label}")
+              return text.replace(old, new, 1)
+          p=Path('src/main.rs'); t=p.read_text()
+          t=r(t,'mod face_scope;\nmod face_sface_adapter;','mod face_scope;\nmod face_settings;\nmod face_sface_adapter;\nmod face_sface_production;','main modules'); p.write_text(t)
+          p=Path('src/ui/mod.rs'); t=p.read_text()
+          t=r(t,'use crate::embedding::EmbeddingService;\nuse crate::fs_watch::{FsWatchMessage, FsWatchService};','use crate::embedding::EmbeddingService;\nuse crate::face_settings::{self, FaceEmbeddingSettings};\nuse crate::face_sface_adapter::SFaceExecutionProvider;\nuse crate::fs_watch::{FsWatchMessage, FsWatchService};','imports')
+          t=r(t,'    pub(super) indexing_settings: IndexingSettings,\n    settings_path: PathBuf,\n    collections: collections::CollectionsState,','    pub(super) indexing_settings: IndexingSettings,\n    settings_path: PathBuf,\n    face_embedding_settings: FaceEmbeddingSettings,\n    face_settings_path: PathBuf,\n    collections: collections::CollectionsState,','fields')
+          t=r(t,'        let settings_path = app_data_dir.join("performance-settings.ini");\n        let indexing_settings = settings::load(&settings_path);\n        let embedding_service = EmbeddingService::new(model_cache);','        let settings_path = app_data_dir.join("performance-settings.ini");\n        let indexing_settings = settings::load(&settings_path);\n        let face_settings_path = app_data_dir.join("face-embedding-settings.ini");\n        let face_embedding_settings = face_settings::load(&face_settings_path);\n        let embedding_service = EmbeddingService::new(model_cache);','load')
+          t=r(t,'            indexing_settings,\n            settings_path,\n            collections: collections::CollectionsState::default(),','            indexing_settings,\n            settings_path,\n            face_embedding_settings,\n            face_settings_path,\n            collections: collections::CollectionsState::default(),','init')
+          t=r(t,'        let mut clear_cache = false;\n        let mut save_performance_settings = false;','        let mut clear_cache = false;\n        let mut save_performance_settings = false;\n        let mut save_face_settings = false;','flag')
+          old='''                if self.busy {\n                    ui.small("Performance controls are locked while a worker operation is active.");\n                }\n\n                ui.add_space(12.0);\n                ui.separator();\n                ui.heading("Thumbnail cache");'''
+          new='''                if self.busy {\n                    ui.small("Performance controls are locked while a worker operation is active.");\n                }\n\n                ui.add_space(12.0);\n                ui.separator();\n                ui.heading("Face identity (SFace)");\n                ui.label("Use an external SFace-compatible ONNX model for portable face embeddings. Model weights are never downloaded or stored by the application.");\n                ui.add_enabled_ui(!self.busy, |ui| {\n                    ui.horizontal(|ui| {\n                        let mut model_path = self.face_embedding_settings.model_path.to_string_lossy().into_owned();\n                        if ui.add(egui::TextEdit::singleline(&mut model_path).hint_text("Path to external SFace .onnx").desired_width(560.0)).changed() {\n                            self.face_embedding_settings.model_path = PathBuf::from(model_path.trim());\n                            save_face_settings = true;\n                        }\n                        if ui.button("Browse…").clicked() {\n                            if let Some(path) = rfd::FileDialog::new().add_filter("ONNX model", &["onnx"]).pick_file() {\n                                self.face_embedding_settings.model_path = path;\n                                save_face_settings = true;\n                            }\n                        }\n                    });\n                    let provider_before = self.face_embedding_settings.provider;\n                    egui::ComboBox::from_label("SFace execution provider")\n                        .selected_text(self.face_embedding_settings.provider_label())\n                        .show_ui(ui, |ui| {\n                            ui.selectable_value(&mut self.face_embedding_settings.provider, SFaceExecutionProvider::Cpu, "CPU");\n                            ui.selectable_value(&mut self.face_embedding_settings.provider, SFaceExecutionProvider::DirectMl, "DirectML (Windows GPU)");\n                        });\n                    if provider_before != self.face_embedding_settings.provider { save_face_settings = true; }\n                });\n                if !self.face_embedding_settings.configured() {\n                    ui.small("No SFace model configured. Face embedding remains disabled until an external ONNX path is selected.");\n                } else if self.face_embedding_settings.model_path.is_file() {\n                    ui.small(format!("Configured: {} on {}", self.face_embedding_settings.model_path.display(), self.face_embedding_settings.provider_label()));\n                } else {\n                    ui.colored_label(egui::Color32::LIGHT_RED, "Configured SFace model path is not currently available.");\n                }\n\n                ui.add_space(12.0);\n                ui.separator();\n                ui.heading("Thumbnail cache");'''
+          t=r(t,old,new,'settings ui')
+          marker='\n    fn show_search_sidebar'; pos=t.find(marker)
+          if pos<0: raise SystemExit('missing sidebar marker')
+          block='''        if save_face_settings {\n            match face_settings::save(&self.face_settings_path, &self.face_embedding_settings) {\n                Ok(()) => {\n                    self.status = if self.face_embedding_settings.configured() {\n                        format!("SFace settings saved: {} on {}", self.face_embedding_settings.model_path.display(), self.face_embedding_settings.provider_label())\n                    } else { "SFace settings cleared".to_owned() };\n                }\n                Err(err) => { self.last_error = Some(format!("Cannot save SFace settings: {err:#}")); }\n            }\n        }\n'''
+          if block not in t:
+              closing=t.rfind('    }\n',0,pos)
+              if closing<0: raise SystemExit('missing settings close')
+              t=t[:closing]+block+t[closing:]
+          p.write_text(t)
+      - name: Commit wiring
+        shell: bash
+        run: |
+          cargo fmt --all
+          if ! git diff --quiet; then
+            git config user.name github-actions[bot]
+            git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+            git add src/main.rs src/ui/mod.rs
+            git commit -m "feat: wire SFace production settings and embedder"
+            git push origin HEAD:feat/sface-production-integration
+          fi
