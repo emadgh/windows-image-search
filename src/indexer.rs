@@ -754,8 +754,8 @@ fn rescan(
                         Ok(value) => Some(value),
                         Err(err) => {
                             let _ = tx.send(WorkerMessage::Warning(compact_decode_failure(
-                      &item.path, &err,
-                  )));
+                                &item.path, &err,
+                            )));
                             None
                         }
                     }
