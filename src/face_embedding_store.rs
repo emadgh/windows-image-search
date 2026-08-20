@@ -230,12 +230,7 @@ pub fn replace_embedding(
     alignment_revision: i64,
     values: &[f32],
 ) -> Result<()> {
-    validate_model_revision(
-        model_id,
-        model_version,
-        values.len(),
-        alignment_revision,
-    )?;
+    validate_model_revision(model_id, model_version, values.len(), alignment_revision)?;
     if values.iter().any(|value| !value.is_finite()) {
         bail!("cannot persist a face embedding with non-finite values");
     }
@@ -476,9 +471,15 @@ mod tests {
         let (mut conn, candidate) = connection_with_face();
         let values = vec![0.6, 0.8];
         replace_embedding(&mut conn, &candidate, "fake-embedder", "1", 1, &values).unwrap();
-        assert!(embedding_is_current(&conn, &candidate.face_id, "fake-embedder", "1", 2, 1).unwrap());
-        assert!(!embedding_is_current(&conn, &candidate.face_id, "fake-embedder", "2", 2, 1).unwrap());
-        assert!(!embedding_is_current(&conn, &candidate.face_id, "fake-embedder", "1", 2, 2).unwrap());
+        assert!(
+            embedding_is_current(&conn, &candidate.face_id, "fake-embedder", "1", 2, 1).unwrap()
+        );
+        assert!(
+            !embedding_is_current(&conn, &candidate.face_id, "fake-embedder", "2", 2, 1).unwrap()
+        );
+        assert!(
+            !embedding_is_current(&conn, &candidate.face_id, "fake-embedder", "1", 2, 2).unwrap()
+        );
         let stored = load_embedding(&conn, &candidate.face_id).unwrap().unwrap();
         assert_eq!(stored.values, values);
         assert!(stored.normalized);
@@ -487,15 +488,7 @@ mod tests {
     #[test]
     fn replacing_detection_cascades_embedding() {
         let (mut conn, candidate) = connection_with_face();
-        replace_embedding(
-            &mut conn,
-            &candidate,
-            "fake-embedder",
-            "1",
-            1,
-            &[0.6, 0.8],
-        )
-        .unwrap();
+        replace_embedding(&mut conn, &candidate, "fake-embedder", "1", 1, &[0.6, 0.8]).unwrap();
         conn.execute(
             "UPDATE images SET modified = 201 WHERE path = ?1",
             params!["a.jpg"],

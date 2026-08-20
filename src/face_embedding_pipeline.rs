@@ -97,8 +97,12 @@ where
         }
 
         let db_path = portable::index_db_path(root);
-        let mut conn = db::open(&db_path)
-            .with_context(|| format!("opening portable face embedding index {}", db_path.display()))?;
+        let mut conn = db::open(&db_path).with_context(|| {
+            format!(
+                "opening portable face embedding index {}",
+                db_path.display()
+            )
+        })?;
         face_store::ensure_schema(&conn)?;
         face_embedding_store::ensure_schema(&conn)?;
         let pending = face_embedding_store::count_pending(
