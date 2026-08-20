@@ -85,6 +85,7 @@ pub struct ImageSearchApp {
     startup_rx: Receiver<StartupMessage>,
     index_control: Option<indexer::IndexControl>,
     index_paused: bool,
+    searching: bool,
     current_file: Option<String>,
     root_counts: HashMap<PathBuf, (usize, usize)>,
     pub(super) busy: bool,
@@ -187,6 +188,7 @@ impl ImageSearchApp {
             startup_rx,
             index_control: None,
             index_paused: false,
+            searching: false,
             current_file: None,
             root_counts: HashMap::new(),
             busy: true,
@@ -250,11 +252,13 @@ impl ImageSearchApp {
                 WorkerMessage::Progress { done, total } => self.progress = Some((done, total)),
                 WorkerMessage::IndexedBatch(records) => {
                     self.merge_indexed_batch(records);
+                    self.refresh_live_root_indexed_counts();
                     self.refresh_collection_effective_membership();
                     self.refresh_text_search_after_data_change();
                 }
                 WorkerMessage::RemovedPaths(paths) => {
                     self.remove_indexed_paths(paths);
+                    self.refresh_live_root_indexed_counts();
                     self.refresh_collection_effective_membership();
                     self.refresh_text_search_after_data_change();
                 }
@@ -273,20 +277,35 @@ impl ImageSearchApp {
                 }
                 WorkerMessage::SimilarityResults(results) => {
                     self.similarity_results = Some(results);
-                    self.progress = None;
+                    if !self.indexing {
+                        self.progress = None;
+                    }
+                }
+                WorkerMessage::RootCounts(counts) => {
+                    self.root_counts = counts;
+                    self.refresh_live_root_indexed_counts();
+                    let _ = self.collections.refresh_discovered_counts(&self.db_path);
+                }
+                WorkerMessage::Warning(warning) => {
+                    self.last_error = Some(warning.clone());
+                    self.status = warning;
                 }
                 WorkerMessage::Error(error) => {
                     self.last_error = Some(error.clone());
                     self.status = error;
                 }
+                WorkerMessage::SearchIdle => {
+                    self.searching = false;
+                    self.busy = self.indexing;
+                }
                 WorkerMessage::Idle => {
-                    self.busy = false;
                     self.indexing = false;
                     self.index_paused = false;
                     self.index_control = None;
                     self.current_file = None;
                     self.progress = None;
                     self.close_confirmation_open = false;
+                    self.busy = self.searching;
                 }
             }
         }
@@ -305,6 +324,24 @@ impl ImageSearchApp {
                 .enumerate()
                 .map(|(index, record)| (record.path.clone(), index)),
         );
+    }
+
+    fn refresh_live_root_indexed_counts(&mut self) {
+        let mut indexed = HashMap::<PathBuf, usize>::new();
+        for image in &self.images {
+            *indexed.entry(image.root.clone()).or_default() += 1;
+        }
+        for root in &self.roots {
+            let indexed_count = indexed.get(root).copied().unwrap_or(0);
+            let discovered = self
+                .root_counts
+                .get(root)
+                .map(|counts| counts.0)
+                .unwrap_or(0)
+                .max(indexed_count);
+            self.root_counts
+                .insert(root.clone(), (discovered, indexed_count));
+        }
     }
 
     fn merge_indexed_batch(&mut self, records: Vec<ImageSummary>) {
@@ -564,8 +601,14 @@ impl ImageSearchApp {
         }
     }
 
+    fn can_run_similarity_search(&self) -> bool {
+        !self.searching
+            && !self.images.is_empty()
+            && ((!self.busy && !self.indexing) || (self.indexing && self.index_paused))
+    }
+
     fn choose_similarity_image(&mut self) {
-        if self.busy || self.indexing {
+        if !self.can_run_similarity_search() {
             return;
         }
         let Some(path) = rfd::FileDialog::new()
@@ -584,9 +627,12 @@ impl ImageSearchApp {
     }
 
     fn run_similarity_search(&mut self, path: PathBuf) {
-        if self.busy || self.indexing {
+        if self.searching || (self.indexing && !self.index_paused) || (!self.indexing && self.busy)
+        {
             return;
         }
+        let allow_descriptor_backfill = !self.indexing;
+        self.searching = true;
         self.busy = true;
         self.last_error = None;
         self.query_image = Some(path.clone());
@@ -598,6 +644,7 @@ impl ImageSearchApp {
             self.similarity_settings,
             self.indexing_settings,
             self.embedding_service.clone(),
+            allow_descriptor_backfill,
             self.tx.clone(),
         );
     }
@@ -774,6 +821,44 @@ impl ImageSearchApp {
                         self.start_force_rescan();
                     }
                 });
+                if self.indexing || self.searching || self.progress.is_some() {
+                    ui.add_space(6.0);
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            if self.indexing && !self.index_paused {
+                                ui.spinner();
+                            }
+                            if self.index_paused {
+                                ui.strong("Indexing paused");
+                            } else if self.indexing {
+                                ui.strong("Indexing");
+                            } else if self.searching {
+                                ui.strong("Image search");
+                            }
+                            if self.indexing && self.index_control.is_some() {
+                                let label = if self.index_paused { "▶ Resume" } else { "⏸ Pause" };
+                                if ui
+                                    .add_enabled(!self.searching, egui::Button::new(label).small())
+                                    .clicked()
+                                {
+                                    self.toggle_index_pause();
+                                }
+                            }
+                        });
+                        if let Some((done, total)) = self.progress.filter(|(_, total)| *total > 0) {
+                            ui.add(
+                                egui::ProgressBar::new(done as f32 / total as f32)
+                                    .desired_width(ui.available_width().min(620.0))
+                                    .text(format!("{done}/{total}")),
+                            );
+                        }
+                        if let Some(file_name) = &self.current_file {
+                            ui.small(format!("Current: {file_name}"));
+                        }
+                        ui.small(views::truncate_middle(&self.status, 96))
+                            .on_hover_text(&self.status);
+                    });
+                }
                 ui.separator();
                 if self.roots.is_empty() {
                     ui.label("No folders configured.");
@@ -960,7 +1045,7 @@ impl ImageSearchApp {
                     ui.horizontal(|ui| {
                         if ui
                             .add_enabled(
-                                !self.busy && !self.indexing && !self.images.is_empty(),
+                                self.can_run_similarity_search(),
                                 egui::Button::new("◉ Search by image"),
                             )
                             .clicked()
@@ -975,8 +1060,10 @@ impl ImageSearchApp {
                             self.selected_paths.clear();
                         }
                     });
-                    if self.indexing {
-                        ui.small("Image similarity search is disabled while indexing.");
+                    if self.indexing && !self.index_paused {
+                        ui.small("Pause indexing to search the already committed images.");
+                    } else if self.indexing && self.index_paused {
+                        ui.small("Indexing is paused; image search uses committed data only.");
                     }
 
                     if let Some(query) = self.query_image.clone() {
@@ -1066,7 +1153,7 @@ impl ImageSearchApp {
                         }
                         if ui
                             .add_enabled(
-                                !self.busy && !self.indexing && self.query_image.is_some(),
+                                self.query_image.is_some() && self.can_run_similarity_search(),
                                 egui::Button::new("Apply / re-run"),
                             )
                             .clicked()
@@ -1183,7 +1270,8 @@ impl eframe::App for ImageSearchApp {
                 if self.busy {
                     ui.spinner();
                 }
-                ui.label(&self.status);
+                ui.small(views::truncate_middle(&self.status, 96))
+                    .on_hover_text(&self.status);
                 if let Some(file_name) = &self.current_file {
                     ui.separator();
                     ui.small(file_name);
@@ -1195,7 +1283,15 @@ impl eframe::App for ImageSearchApp {
                         } else {
                             "⏸ Pause"
                         };
-                        if ui.button(label).clicked() {
+                        if ui
+                            .add_enabled(!self.searching, egui::Button::new(label))
+                            .on_hover_text(if self.searching {
+                                "Finish the paused-index image search before resuming indexing"
+                            } else {
+                                "Pause or resume indexing"
+                            })
+                            .clicked()
+                        {
                             self.toggle_index_pause();
                         }
                     }
