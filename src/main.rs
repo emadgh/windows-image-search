@@ -14,6 +14,7 @@ mod face_portable_tests;
 mod face_scope;
 mod face_sface_adapter;
 mod face_sface_benchmark;
+mod face_similarity;
 mod face_store;
 mod fs_watch;
 mod indexer;
