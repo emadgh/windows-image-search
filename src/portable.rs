@@ -10,7 +10,7 @@ pub const INDEX_DIR_NAME: &str = ".imagesearch";
 pub const INDEX_DB_NAME: &str = "index.sqlite3";
 pub const THUMBNAIL_DIR_NAME: &str = "thumbnails";
 pub const ANN_DIR_NAME: &str = "ann-index";
-const PORTABLE_SCHEMA_VERSION: i64 = 1;
+pub(crate) const PORTABLE_SCHEMA_VERSION: i64 = 1;
 const ATTACHED_DB: &str = "portable_root";
 
 #[derive(Clone, Debug)]
@@ -432,6 +432,12 @@ fn relocate_collection_table(
 }
 
 fn ensure_portable_layout(root: &Path) -> Result<()> {
+    // Existing portable databases are preflighted read-only before db::open can
+    // run SQLite migrations or rewrite metadata. Unknown/newer formats are
+    // therefore never mutated by an older application build.
+    if index_db_path(root).is_file() {
+        crate::portable_verify::preflight_existing_index(root)?;
+    }
     let dir = index_dir(root);
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("creating portable index directory {}", dir.display()))?;
@@ -452,6 +458,11 @@ fn ensure_portable_layout(root: &Path) -> Result<()> {
         &conn,
         "schema_version",
         &PORTABLE_SCHEMA_VERSION.to_string(),
+    )?;
+    set_meta(
+        &conn,
+        "format",
+        crate::portable_verify::PORTABLE_FORMAT_MARKER,
     )?;
     Ok(())
 }
