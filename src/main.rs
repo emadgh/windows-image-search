@@ -12,6 +12,8 @@ mod face_pipeline;
 #[cfg(test)]
 mod face_portable_tests;
 mod face_scope;
+mod face_sface_adapter;
+mod face_sface_benchmark;
 mod face_store;
 mod fs_watch;
 mod indexer;
@@ -49,6 +51,7 @@ enum StartupMode {
     MaterialTextureBenchmark(usize),
     FaceBenchmark(PathBuf),
     FaceBenchmarkValidate(PathBuf),
+    SFaceBenchmark(PathBuf),
     PortableVerify(PathBuf, bool),
 }
 
@@ -140,6 +143,14 @@ fn startup_mode() -> StartupMode {
         if arg == "--benchmark-face" {
             return StartupMode::FaceBenchmark(args.next().map(PathBuf::from).unwrap_or_default());
         }
+        if let Some(value) = arg.strip_prefix("--benchmark-sface=") {
+            if !value.trim().is_empty() {
+                return StartupMode::SFaceBenchmark(PathBuf::from(value));
+            }
+        }
+        if arg == "--benchmark-sface" {
+            return StartupMode::SFaceBenchmark(args.next().map(PathBuf::from).unwrap_or_default());
+        }
         if let Some(value) = arg.strip_prefix("--validate-face-benchmark=") {
             if !value.trim().is_empty() {
                 return StartupMode::FaceBenchmarkValidate(PathBuf::from(value));
@@ -229,6 +240,10 @@ fn material_texture_benchmark_report_path(db_path: &Path) -> PathBuf {
 
 fn face_benchmark_report_path(db_path: &Path) -> PathBuf {
     benchmark_report_path(db_path, "face")
+}
+
+fn sface_benchmark_report_path(db_path: &Path) -> PathBuf {
+    benchmark_report_path(db_path, "sface")
 }
 
 fn benchmark_report_path(db_path: &Path, label: &str) -> PathBuf {
@@ -410,6 +425,18 @@ fn main() -> eframe::Result<()> {
                 write_benchmark_report(&face_benchmark_report_path(&db_path), &report, "face")
             }
             Err(err) => benchmark_failed("Face benchmark", &err),
+        }
+        return Ok(());
+    }
+
+    if let StartupMode::SFaceBenchmark(manifest_path) = &mode {
+        match face_sface_benchmark::benchmark(manifest_path) {
+            Ok(report) => write_benchmark_report(
+                &sface_benchmark_report_path(&db_path),
+                &report,
+                "SFace ONNX",
+            ),
+            Err(err) => benchmark_failed("SFace ONNX benchmark", &err),
         }
         return Ok(());
     }
