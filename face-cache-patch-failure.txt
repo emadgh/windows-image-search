@@ -1,0 +1,7 @@
+===== Patch =====
+Traceback (most recent call last):
+  File "D:\a\windows-image-search\windows-image-search\scripts\patch_face_cache_revisions.py", line 1382, in <module>
+    replace(
+  File "D:\a\windows-image-search\windows-image-search\scripts\patch_face_cache_revisions.py", line 18, in replace
+    raise RuntimeError(f"{path}: expected at least {count} occurrence(s), found {actual}: {old[:120]!r}")
+RuntimeError: src/face_similarity.rs: expected at least 2 occurrence(s), found 1: '              AND e.detector_version = f.detector_version\n              AND e.detection_schema_version = f.schema_versio'
