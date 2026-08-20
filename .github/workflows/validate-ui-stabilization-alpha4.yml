@@ -23,6 +23,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Normalize alpha4 patch context
+        run: python scripts/fix_ui_stabilization_patch_v2.py
+
       - name: Apply alpha4 integration
         run: python scripts/apply_ui_stabilization_alpha4.py
 
