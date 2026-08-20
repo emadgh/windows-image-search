@@ -17,6 +17,7 @@ pub(super) struct CollectionsState {
     active_filter: Option<i64>,
     memberships: HashMap<i64, CollectionMembership>,
     effective: HashMap<i64, HashSet<PathBuf>>,
+    discovered_counts: HashMap<i64, usize>,
     face_detection: HashMap<i64, bool>,
     new_name: String,
     rename_name: String,
@@ -64,6 +65,36 @@ impl CollectionsState {
             self.rename_name.clear();
         }
         self.rebuild_effective(images);
+        let discovered = db::load_discovered_paths(db_path)?;
+        self.rebuild_discovered_counts(&discovered);
+        Ok(())
+    }
+
+    fn rebuild_discovered_counts(&mut self, discovered: &[PathBuf]) {
+        self.discovered_counts.clear();
+        for item in &self.items {
+            let Some(membership) = self.memberships.get(&item.id) else {
+                self.discovered_counts.insert(item.id, 0);
+                continue;
+            };
+            let manual: HashSet<&Path> = membership.files.iter().map(PathBuf::as_path).collect();
+            let count = discovered
+                .iter()
+                .filter(|path| {
+                    manual.contains(path.as_path())
+                        || membership
+                            .folders
+                            .iter()
+                            .any(|folder| path.starts_with(folder))
+                })
+                .count();
+            self.discovered_counts.insert(item.id, count);
+        }
+    }
+
+    pub(super) fn refresh_discovered_counts(&mut self, db_path: &Path) -> anyhow::Result<()> {
+        let discovered = db::load_discovered_paths(db_path)?;
+        self.rebuild_discovered_counts(&discovered);
         Ok(())
     }
 
@@ -92,6 +123,14 @@ impl CollectionsState {
 
     fn count(&self, id: i64) -> usize {
         self.effective.get(&id).map_or(0, HashSet::len)
+    }
+
+    fn total_count(&self, id: i64) -> usize {
+        self.discovered_counts
+            .get(&id)
+            .copied()
+            .unwrap_or(0)
+            .max(self.count(id))
     }
 
     fn filter_matches(&self, path: &Path) -> bool {
@@ -220,7 +259,11 @@ impl ImageSearchApp {
                             let count = self.collections.count(item.id);
                             let response = ui.selectable_label(
                                 selected_id == Some(item.id),
-                                format!("{}  ·  {count}", item.name),
+                                format!(
+                                    "{}  ·  {count}/{} indexed",
+                                    item.name,
+                                    self.collections.total_count(item.id)
+                                ),
                             );
                             if response.clicked() {
                                 select_collection = Some((item.id, item.name.clone()));
@@ -250,9 +293,10 @@ impl ImageSearchApp {
                     .unwrap_or_else(|| "Collection".to_owned());
                 ui.strong(selected_name);
                 ui.small(format!(
-                    "{} effective indexed image{}",
+                    "{} indexed / {} discovered image{}",
                     self.collections.count(id),
-                    if self.collections.count(id) == 1 { "" } else { "s" }
+                    self.collections.total_count(id),
+                    if self.collections.total_count(id) == 1 { "" } else { "s" }
                 ));
 
                 ui.horizontal(|ui| {

@@ -6017,7 +6017,7 @@ dependencies = [
 
 [[package]]
 name = "windows-image-search"
-version = "0.3.0-alpha.3"
+version = "0.3.0-alpha.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6035,6 +6035,7 @@ dependencies = [
  "rfd",
  "rusqlite",
  "walkdir",
+ "windows 0.61.3",
 ]
 
 [[package]]

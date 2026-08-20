@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 mod ann;
 mod db;
 mod embedding;
@@ -23,6 +25,7 @@ mod text_search;
 mod texture_benchmark;
 mod thumbnail_cache;
 mod ui;
+mod windows_shell;
 
 use anyhow::{Context, Result};
 use eframe::egui;
@@ -230,8 +233,22 @@ fn benchmark_failed(label: &str, err: &anyhow::Error) -> ! {
     std::process::exit(1);
 }
 
+#[cfg(target_os = "windows")]
+fn attach_parent_console_for_cli() {
+    use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    unsafe {
+        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn attach_parent_console_for_cli() {}
+
 fn main() -> eframe::Result<()> {
     let mode = startup_mode();
+    if !matches!(&mode, StartupMode::Gui) {
+        attach_parent_console_for_cli();
+    }
     if matches!(&mode, StartupMode::Version) {
         println!("{APP_TITLE}");
         return Ok(());
@@ -241,12 +258,11 @@ fn main() -> eframe::Result<()> {
         let fallback = PathBuf::from(".");
         (fallback.join("index.sqlite3"), fallback.join("models"))
     });
-    let _ = db::open(&db_path);
-
-    // GUI startup performs portable-root hydration in ImageSearchApp::new so it
-    // can surface unavailable-drive warnings. CLI diagnostics have no UI layer,
-    // so hydrate the rebuildable aggregate session here exactly once for them.
+    // Keep GUI launch lightweight: database open/migration, portable-root hydration,
+    // and the initial image list are loaded by ImageSearchApp on a background thread.
+    // CLI modes still prepare the database synchronously before running diagnostics.
     if !matches!(&mode, StartupMode::Gui) {
+        let _ = db::open(&db_path);
         let registered_roots = db::load_roots(&db_path).unwrap_or_default();
         let _ = portable::prepare_registered_roots(&db_path, &registered_roots);
     }

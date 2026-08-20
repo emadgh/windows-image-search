@@ -45,6 +45,11 @@ pub fn load_cached_for_root(root: &Path, source: &Path) -> Option<DynamicImage> 
     load_cached_path(path)
 }
 
+pub fn valid_cache_path_for_root(root: &Path, source: &Path) -> Option<PathBuf> {
+    let path = cache_path_for_root(root, source).ok()?;
+    load_cached_path(path.clone()).map(|_| path)
+}
+
 pub fn store_from_decoded(
     cache_dir: &Path,
     source: &Path,
