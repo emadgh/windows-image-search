@@ -980,8 +980,12 @@ pub fn load_ann_embeddings(db_path: &Path) -> Result<Vec<AnnEmbedding>> {
 
 pub fn ann_index_signature(db_path: &Path) -> Result<u64> {
     let conn = open(db_path)?;
+    ann_index_signature_on(&conn)
+}
+
+pub(crate) fn ann_index_signature_on(conn: &Connection) -> Result<u64> {
     let mut stmt = conn.prepare(
-        "SELECT rowid, path, size, modified, COALESCE(embedding_dim, 0), embedding_normalized FROM images WHERE embedding IS NOT NULL ORDER BY rowid",
+        "SELECT rowid, path, size, modified, COALESCE(embedding_dim, 0), embedding_normalized, embedding FROM images WHERE embedding IS NOT NULL ORDER BY rowid",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok((
@@ -991,18 +995,20 @@ pub fn ann_index_signature(db_path: &Path) -> Result<u64> {
             row.get::<_, i64>(3)?,
             row.get::<_, i64>(4)?,
             row.get::<_, bool>(5)?,
+            row.get::<_, Vec<u8>>(6)?,
         ))
     })?;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    1_u32.hash(&mut hasher); // bump when embedding/index semantics change.
+    2_u32.hash(&mut hasher); // v2 includes the durable vector bytes themselves.
     for row in rows {
-        let (rowid, path, size, modified, dim, normalized) = row?;
+        let (rowid, path, size, modified, dim, normalized, embedding) = row?;
         rowid.hash(&mut hasher);
         path.hash(&mut hasher);
         size.hash(&mut hasher);
         modified.hash(&mut hasher);
         dim.hash(&mut hasher);
         normalized.hash(&mut hasher);
+        embedding.hash(&mut hasher);
     }
     Ok(hasher.finish())
 }
@@ -1052,6 +1058,46 @@ mod tests {
             "windows-image-search-{label}-{}-{nonce}.sqlite3",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn ann_signature_changes_when_same_dimension_embedding_content_changes() {
+        let db_path = temp_db_path("ann-signature-content");
+        let root = std::env::temp_dir().join("windows-image-search-ann-signature-root");
+        let image = root.join("a.jpg");
+        {
+            let conn = open(&db_path).unwrap();
+            upsert_image(
+                &conn,
+                &image,
+                &root,
+                "a.jpg",
+                "jpg",
+                100,
+                200,
+                32,
+                32,
+                "",
+                "",
+                [1, 2, 3],
+                7,
+                &[1.0, 0.0],
+            )
+            .unwrap();
+            set_embedding(&conn, &image, &[1.0, 0.0]).unwrap();
+        }
+        let first = ann_index_signature(&db_path).unwrap();
+        let unchanged = ann_index_signature(&db_path).unwrap();
+        assert_eq!(first, unchanged);
+        {
+            let conn = open(&db_path).unwrap();
+            set_embedding(&conn, &image, &[0.0, 1.0]).unwrap();
+        }
+        let second = ann_index_signature(&db_path).unwrap();
+        assert_ne!(first, second);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(format!("{}-wal", db_path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", db_path.display()));
     }
 
     #[test]
