@@ -1,0 +1,56 @@
+name: Validate face embedding alpha5
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.head_ref == 'feat/face-embedding-foundation-v0.3-alpha5'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/face-embedding-foundation-v0.3-alpha5
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Apply alpha5 integration
+        run: python scripts/apply_face_embedding_alpha5.py
+
+      - name: Format
+        run: cargo fmt --all
+
+      - name: Cargo check
+        run: cargo check --all-targets
+
+      - name: Future-incompatible warnings are errors
+        shell: pwsh
+        run: |
+          $env:RUSTFLAGS = '-Dfuture-incompatible'
+          cargo check --all-targets
+
+      - name: Regression tests
+        run: cargo test --all-targets
+
+      - name: Release build
+        run: cargo build --release
+
+      - name: Commit validated source
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock src\main.rs src\face_embedding.rs src\face_embedding_store.rs src\face_embedding_pipeline.rs
+          if (git status --porcelain -- Cargo.toml Cargo.lock src\main.rs src\face_embedding.rs src\face_embedding_store.rs src\face_embedding_pipeline.rs) {
+            git commit -m "feat: add face embedding foundation alpha5"
+            git push origin HEAD:feat/face-embedding-foundation-v0.3-alpha5
+          }
