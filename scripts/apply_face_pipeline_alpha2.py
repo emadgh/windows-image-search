@@ -69,3 +69,9 @@ insert_after_once(
     '''                CollectionAction::Rename(id, name) => {\n                    db::rename_collection(&self.db_path, id, &name)?;\n                    format!("Renamed collection to ‘{name}’")\n                }\n''',
     '''                CollectionAction::SetFaceDetection(id, enabled) => {\n                    face_scope::set_collection_enabled(&self.db_path, id, enabled)?;\n                    if enabled {\n                        "Face detection enabled for this collection".to_owned()\n                    } else {\n                        "Face detection disabled for this collection; existing face data was kept".to_owned()\n                    }\n                }\n''',
 )
+
+replace_once(
+    "src/face_scope.rs",
+    r"IN ('\\', '/')",
+    r"IN ('\', '/')",
+)
