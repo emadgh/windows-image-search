@@ -4,7 +4,10 @@ pub fn show_context_menu(path: PathBuf) {
     #[cfg(target_os = "windows")]
     std::thread::spawn(move || {
         if let Err(err) = windows_context_menu(&path) {
-            eprintln!("Windows shell context menu failed for {}: {err}", path.display());
+            eprintln!(
+                "Windows shell context menu failed for {}: {err}",
+                path.display()
+            );
         }
     });
 
@@ -19,12 +22,10 @@ fn windows_context_menu(path: &std::path::Path) -> windows::core::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::{PCSTR, PCWSTR};
     use windows::Win32::Foundation::POINT;
-    use windows::Win32::System::Com::{
-        CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
-    };
+    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
     use windows::Win32::UI::Shell::{
-        IContextMenu, IShellItem, CMINVOKECOMMANDINFO, CMF_NORMAL, BHID_SFUIObject,
-        SHCreateItemFromParsingName,
+        BHID_SFUIObject, IContextMenu, IShellItem, SHCreateItemFromParsingName, CMF_NORMAL,
+        CMINVOKECOMMANDINFO,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CreatePopupMenu, DestroyMenu, GetCursorPos, GetForegroundWindow, TrackPopupMenuEx,

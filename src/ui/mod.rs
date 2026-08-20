@@ -32,6 +32,22 @@ pub(super) enum ThumbnailFit {
     Cover,
 }
 
+enum StartupMessage {
+    Stage {
+        status: String,
+        done: usize,
+        total: usize,
+    },
+    Ready {
+        roots: Vec<PathBuf>,
+        images: Vec<ImageSummary>,
+        collections: collections::CollectionsState,
+        root_counts: HashMap<PathBuf, (usize, usize)>,
+        warnings: Vec<String>,
+    },
+    Error(String),
+}
+
 pub struct ImageSearchApp {
     pub(super) db_path: PathBuf,
     embedding_service: EmbeddingService,
@@ -66,6 +82,11 @@ pub struct ImageSearchApp {
     thumb_pool: ThumbnailPool,
     pub(super) tx: Sender<WorkerMessage>,
     pub(super) rx: Receiver<WorkerMessage>,
+    startup_rx: Receiver<StartupMessage>,
+    index_control: Option<indexer::IndexControl>,
+    index_paused: bool,
+    current_file: Option<String>,
+    root_counts: HashMap<PathBuf, (usize, usize)>,
     pub(super) busy: bool,
     pub(super) indexing: bool,
     pub(super) status: String,
@@ -79,32 +100,60 @@ pub struct ImageSearchApp {
 impl ImageSearchApp {
     pub fn new(db_path: PathBuf, model_cache: PathBuf) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
+        let (startup_tx, startup_rx) = std::sync::mpsc::channel();
         let app_data_dir = db_path.parent().unwrap_or_else(|| Path::new("."));
         let thumbnail_cache = thumbnail_cache::cache_dir_for_db(&db_path);
         let settings_path = app_data_dir.join("performance-settings.ini");
         let indexing_settings = settings::load(&settings_path);
         let embedding_service = EmbeddingService::new(model_cache);
         let text_search_service = TextSearchService::new(db_path.clone());
-        let roots = db::load_roots(&db_path).unwrap_or_default();
-        let portable_warnings = portable::prepare_registered_roots(&db_path, &roots);
-        let fs_watch_service = FsWatchService::new(roots.clone());
-        let images = db::load_image_summaries(&db_path).unwrap_or_default();
-        let image_positions = images
-            .iter()
-            .enumerate()
-            .map(|(index, record)| (record.path.clone(), index))
-            .collect();
-        let collections =
-            collections::CollectionsState::load(&db_path, &images).unwrap_or_default();
-        let thumb_pool = ThumbnailPool::new(thumbnail_cache, roots.clone());
-        let initial_status = portable_warnings
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "Ready".to_owned());
+        let fs_watch_service = FsWatchService::new(Vec::new());
+        let thumb_pool = ThumbnailPool::new(thumbnail_cache, Vec::new());
+
+        let startup_db = db_path.clone();
+        std::thread::spawn(move || {
+            let send_stage = |status: &str, done: usize| {
+                let _ = startup_tx.send(StartupMessage::Stage {
+                    status: status.to_owned(),
+                    done,
+                    total: 4,
+                });
+            };
+            let result = (|| -> anyhow::Result<_> {
+                send_stage("Opening index database…", 1);
+                let _ = db::open(&startup_db)?;
+                send_stage("Loading indexed roots…", 2);
+                let roots = db::load_roots(&startup_db)?;
+                send_stage("Attaching portable indexes…", 3);
+                let warnings = portable::prepare_registered_roots(&startup_db, &roots);
+                send_stage("Loading indexed image catalog…", 4);
+                let images = db::load_image_summaries(&startup_db)?;
+                let collections = collections::CollectionsState::load(&startup_db, &images)?;
+                let root_counts = db::load_root_counts(&startup_db)?;
+                Ok((roots, images, collections, root_counts, warnings))
+            })();
+            match result {
+                Ok((roots, images, collections, root_counts, warnings)) => {
+                    let _ = startup_tx.send(StartupMessage::Ready {
+                        roots,
+                        images,
+                        collections,
+                        root_counts,
+                        warnings,
+                    });
+                }
+                Err(err) => {
+                    let _ = startup_tx.send(StartupMessage::Error(format!(
+                        "Startup index load failed: {err:#}"
+                    )));
+                }
+            }
+        });
+
         Self {
-            roots,
-            images,
-            image_positions,
+            roots: Vec::new(),
+            images: Vec::new(),
+            image_positions: HashMap::new(),
             db_path,
             embedding_service,
             fs_watch_service,
@@ -115,7 +164,7 @@ impl ImageSearchApp {
             similarity_settings: indexer::SimilaritySettings::default(),
             indexing_settings,
             settings_path,
-            collections,
+            collections: collections::CollectionsState::default(),
             search_text: String::new(),
             text_search_service,
             text_search_matches: None,
@@ -135,10 +184,15 @@ impl ImageSearchApp {
             thumb_pool,
             tx,
             rx,
-            busy: false,
+            startup_rx,
+            index_control: None,
+            index_paused: false,
+            current_file: None,
+            root_counts: HashMap::new(),
+            busy: true,
             indexing: false,
-            status: initial_status,
-            progress: None,
+            status: "Starting application…".to_owned(),
+            progress: Some((0, 4)),
             last_error: None,
             settings_open: false,
             close_confirmation_open: false,
@@ -146,10 +200,53 @@ impl ImageSearchApp {
         }
     }
 
+    fn process_startup_messages(&mut self) {
+        while let Ok(message) = self.startup_rx.try_recv() {
+            match message {
+                StartupMessage::Stage {
+                    status,
+                    done,
+                    total,
+                } => {
+                    self.status = status;
+                    self.progress = Some((done, total));
+                }
+                StartupMessage::Ready {
+                    roots,
+                    images,
+                    collections,
+                    root_counts,
+                    warnings,
+                } => {
+                    self.roots = roots;
+                    self.images = images;
+                    self.rebuild_image_positions();
+                    self.collections = collections;
+                    self.root_counts = root_counts;
+                    self.thumb_pool.set_roots(self.roots.clone());
+                    self.fs_watch_service.set_roots(self.roots.clone());
+                    self.busy = false;
+                    self.progress = None;
+                    self.status = warnings
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "Ready".to_owned());
+                }
+                StartupMessage::Error(error) => {
+                    self.busy = false;
+                    self.progress = None;
+                    self.status = "Startup load failed".to_owned();
+                    self.last_error = Some(error);
+                }
+            }
+        }
+    }
+
     fn process_worker_messages(&mut self) {
         while let Ok(message) = self.rx.try_recv() {
             match message {
                 WorkerMessage::Status(status) => self.status = status,
+                WorkerMessage::CurrentFile(file_name) => self.current_file = Some(file_name),
                 WorkerMessage::Progress { done, total } => self.progress = Some((done, total)),
                 WorkerMessage::IndexedBatch(records) => {
                     self.merge_indexed_batch(records);
@@ -162,15 +259,16 @@ impl ImageSearchApp {
                     self.refresh_text_search_after_data_change();
                 }
                 WorkerMessage::Reload => {
-                    match db::load_image_summaries(&self.db_path) {
-                        Ok(images) => {
-                            self.images = images;
-                            self.rebuild_image_positions();
-                        }
-                        Err(err) => self.last_error = Some(format!("Reload failed: {err:#}")),
-                    }
+                    // Legacy message retained for compatibility; avoid blocking the UI on a
+                    // synchronous full catalog reload. New workers send ReplaceImages instead.
                     self.progress = None;
+                }
+                WorkerMessage::ReplaceImages(images) => {
+                    self.images = images;
+                    self.rebuild_image_positions();
                     self.refresh_collection_effective_membership();
+                    let _ = self.collections.refresh_discovered_counts(&self.db_path);
+                    self.root_counts = db::load_root_counts(&self.db_path).unwrap_or_default();
                     self.refresh_text_search_after_data_change();
                 }
                 WorkerMessage::SimilarityResults(results) => {
@@ -184,6 +282,10 @@ impl ImageSearchApp {
                 WorkerMessage::Idle => {
                     self.busy = false;
                     self.indexing = false;
+                    self.index_paused = false;
+                    self.index_control = None;
+                    self.current_file = None;
+                    self.progress = None;
                     self.close_confirmation_open = false;
                 }
             }
@@ -269,6 +371,9 @@ impl ImageSearchApp {
         self.close_confirmation_open = false;
         self.similarity_results = None;
         self.selected_paths.clear();
+        let control = indexer::IndexControl::default();
+        self.index_control = Some(control.clone());
+        self.index_paused = false;
         self.status = format!(
             "Live filesystem update: {} changed path{} queued",
             paths.len(),
@@ -280,6 +385,7 @@ impl ImageSearchApp {
             paths,
             self.indexing_settings,
             self.embedding_service.clone(),
+            control,
             self.tx.clone(),
         );
     }
@@ -342,14 +448,59 @@ impl ImageSearchApp {
         self.last_error = None;
         self.similarity_results = None;
         self.selected_paths.clear();
+        let control = indexer::IndexControl::default();
+        self.index_control = Some(control.clone());
+        self.index_paused = false;
         self.status = "Starting recursive rescan…".into();
         indexer::spawn_rescan(
             self.db_path.clone(),
             self.roots.clone(),
             self.indexing_settings,
             self.embedding_service.clone(),
+            control,
             self.tx.clone(),
         );
+    }
+
+    fn start_force_rescan(&mut self) {
+        if self.busy || self.roots.is_empty() {
+            return;
+        }
+        self.busy = true;
+        self.indexing = true;
+        self.allow_close = false;
+        self.close_confirmation_open = false;
+        self.progress = None;
+        self.last_error = None;
+        self.similarity_results = None;
+        self.selected_paths.clear();
+        let control = indexer::IndexControl::default();
+        self.index_control = Some(control.clone());
+        self.index_paused = false;
+        self.status = "Force rescanning all images; valid thumbnails will be preferred…".into();
+        indexer::spawn_force_rescan(
+            self.db_path.clone(),
+            self.roots.clone(),
+            self.indexing_settings,
+            self.embedding_service.clone(),
+            control,
+            self.tx.clone(),
+        );
+    }
+
+    fn toggle_index_pause(&mut self) {
+        let Some(control) = self.index_control.clone() else {
+            return;
+        };
+        if control.is_paused() {
+            control.resume();
+            self.index_paused = false;
+            self.status = "Indexing resumed".to_owned();
+        } else {
+            control.pause();
+            self.index_paused = true;
+            self.status = "Indexing paused".to_owned();
+        }
     }
 
     fn add_folder(&mut self) {
@@ -362,6 +513,7 @@ impl ImageSearchApp {
         match portable::attach_root(&self.db_path, &folder) {
             Ok(outcome) => {
                 self.roots = db::load_roots(&self.db_path).unwrap_or_default();
+                self.root_counts = db::load_root_counts(&self.db_path).unwrap_or_default();
                 self.thumb_pool.set_roots(self.roots.clone());
                 self.fs_watch_service.set_roots(self.roots.clone());
                 self.images = db::load_image_summaries(&self.db_path).unwrap_or_default();
@@ -398,6 +550,7 @@ impl ImageSearchApp {
         match db::remove_root(&self.db_path, folder) {
             Ok(()) => {
                 self.roots = db::load_roots(&self.db_path).unwrap_or_default();
+                self.root_counts = db::load_root_counts(&self.db_path).unwrap_or_default();
                 self.thumb_pool.set_roots(self.roots.clone());
                 self.images = db::load_image_summaries(&self.db_path).unwrap_or_default();
                 self.rebuild_image_positions();
@@ -584,7 +737,12 @@ impl ImageSearchApp {
             .open(&mut open)
             .resizable(true)
             .default_width(920.0)
+            .default_height(700.0)
+            .max_height((ctx.available_rect().height() - 48.0).max(320.0))
             .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
                 ui.heading("Indexed folders");
                 ui.label(
                     "Recursive indexing is enabled for every root and includes all subfolders.",
@@ -599,11 +757,21 @@ impl ImageSearchApp {
                     if ui
                         .add_enabled(
                             !self.busy && !self.roots.is_empty(),
-                            egui::Button::new("⟳ Rescan all folders"),
+                            egui::Button::new("⟳ Rescan changed"),
                         )
                         .clicked()
                     {
                         self.start_rescan();
+                    }
+                    if ui
+                        .add_enabled(
+                            !self.busy && !self.roots.is_empty(),
+                            egui::Button::new("⟳ Force rescan all"),
+                        )
+                        .on_hover_text("Rebuild all visual/CLIP descriptors; valid cached thumbnails are used instead of large originals when safe.")
+                        .clicked()
+                    {
+                        self.start_force_rescan();
                     }
                 });
                 ui.separator();
@@ -613,6 +781,12 @@ impl ImageSearchApp {
                     for root in &self.roots {
                         ui.horizontal(|ui| {
                             ui.label(root.display().to_string());
+                            let (discovered, indexed) = self
+                                .root_counts
+                                .get(root)
+                                .copied()
+                                .unwrap_or((0, self.images.iter().filter(|image| &image.root == root).count()));
+                            ui.small(format!("{indexed}/{discovered} indexed"));
                             if portable::is_indexed_root(root) {
                                 ui.small("✓ .imagesearch");
                             }
@@ -731,6 +905,7 @@ impl ImageSearchApp {
                 if ui.button("Clear thumbnail cache").clicked() {
                     clear_cache = true;
                 }
+                    });
             });
 
         self.settings_open = open;
@@ -952,6 +1127,7 @@ impl ImageSearchApp {
 
 impl eframe::App for ImageSearchApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.process_startup_messages();
         self.process_worker_messages();
         self.process_fs_watch_messages();
         self.process_thumbnail_messages(ctx);
@@ -1008,13 +1184,29 @@ impl eframe::App for ImageSearchApp {
                     ui.spinner();
                 }
                 ui.label(&self.status);
-                if let Some((done, total)) = self.progress.filter(|(_, total)| *total > 0) {
-                    ui.add(
-                        egui::ProgressBar::new(done as f32 / total as f32)
-                            .desired_width(220.0)
-                            .text(format!("{done}/{total}")),
-                    );
+                if let Some(file_name) = &self.current_file {
+                    ui.separator();
+                    ui.small(file_name);
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if self.indexing && self.index_control.is_some() {
+                        let label = if self.index_paused {
+                            "▶ Resume"
+                        } else {
+                            "⏸ Pause"
+                        };
+                        if ui.button(label).clicked() {
+                            self.toggle_index_pause();
+                        }
+                    }
+                    if let Some((done, total)) = self.progress.filter(|(_, total)| *total > 0) {
+                        ui.add(
+                            egui::ProgressBar::new(done as f32 / total as f32)
+                                .desired_width(260.0)
+                                .text(format!("{done}/{total}")),
+                        );
+                    }
+                });
             });
         });
 

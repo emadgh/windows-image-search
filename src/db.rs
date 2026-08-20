@@ -105,6 +105,16 @@ pub fn open(db_path: &Path) -> Result<Connection> {
         CREATE INDEX IF NOT EXISTS idx_images_root ON images(root);
         CREATE INDEX IF NOT EXISTS idx_images_file_name ON images(file_name);
 
+        CREATE TABLE IF NOT EXISTS discovered_images (
+            path TEXT PRIMARY KEY NOT NULL,
+            root TEXT NOT NULL,
+            last_seen_scan INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_discovered_images_root
+            ON discovered_images(root);
+        CREATE INDEX IF NOT EXISTS idx_discovered_images_root_scan
+            ON discovered_images(root, last_seen_scan);
+
         CREATE TABLE IF NOT EXISTS collections (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL COLLATE NOCASE UNIQUE
@@ -313,6 +323,10 @@ pub fn remove_root(db_path: &Path, root: &Path) -> Result<()> {
     let root_text = root.to_string_lossy().to_string();
     tx.execute("DELETE FROM roots WHERE path = ?1", params![root_text])?;
     tx.execute("DELETE FROM images WHERE root = ?1", params![root_text])?;
+    tx.execute(
+        "DELETE FROM discovered_images WHERE root = ?1",
+        params![root_text],
+    )?;
     tx.commit()?;
     Ok(())
 }
@@ -464,22 +478,32 @@ pub fn load_collection_membership(
 pub struct FileState {
     pub size: u64,
     pub modified: i64,
+    pub width: u32,
+    pub height: u32,
+    pub content_fingerprint: Option<u64>,
     pub has_embedding: bool,
 }
 
 pub fn load_file_states(conn: &Connection) -> Result<HashMap<PathBuf, FileState>> {
-    let mut stmt =
-        conn.prepare("SELECT path, size, modified, embedding IS NOT NULL FROM images")?;
+    let mut stmt = conn.prepare(
+        "SELECT path, size, modified, width, height, content_fingerprint, embedding IS NOT NULL FROM images",
+    )?;
     let rows = stmt.query_map([], |row| {
         let path = PathBuf::from(row.get::<_, String>(0)?);
         let size = row.get::<_, i64>(1)?.max(0) as u64;
         let modified = row.get::<_, i64>(2)?;
-        let has_embedding = row.get::<_, bool>(3)?;
+        let width = row.get::<_, i64>(3)?.max(0) as u32;
+        let height = row.get::<_, i64>(4)?.max(0) as u32;
+        let content_fingerprint = row.get::<_, Option<i64>>(5)?.map(|value| value as u64);
+        let has_embedding = row.get::<_, bool>(6)?;
         Ok((
             path,
             FileState {
                 size,
                 modified,
+                width,
+                height,
+                content_fingerprint,
                 has_embedding,
             },
         ))
@@ -683,12 +707,13 @@ pub fn delete_path_tree(conn: &Connection, target: &Path) -> Result<Vec<PathBuf>
 
 pub fn next_scan_generation(conn: &Connection) -> Result<i64> {
     let current: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(last_seen_scan), 0) FROM images",
+        "SELECT MAX(value) FROM (SELECT COALESCE(MAX(last_seen_scan), 0) AS value FROM images UNION ALL SELECT COALESCE(MAX(last_seen_scan), 0) AS value FROM discovered_images)",
         [],
-        |row| row.get(0),
+        |row| row.get::<_, Option<i64>>(0).map(|value| value.unwrap_or(0)),
     )?;
     if current == i64::MAX {
         conn.execute("UPDATE images SET last_seen_scan = 0", [])?;
+        conn.execute("UPDATE discovered_images SET last_seen_scan = 0", [])?;
         Ok(1)
     } else {
         Ok((current + 1).max(1))
@@ -717,6 +742,74 @@ pub fn delete_stale_for_root(conn: &Connection, root: &Path, generation: i64) ->
         "DELETE FROM images WHERE root = ?1 AND last_seen_scan <> ?2",
         params![root_text, generation],
     )?)
+}
+
+pub fn mark_discovered_paths_seen(
+    conn: &mut Connection,
+    generation: i64,
+    candidates: &[(PathBuf, PathBuf)],
+) -> Result<usize> {
+    let tx = conn.transaction()?;
+    let mut updated = 0usize;
+    {
+        let mut stmt = tx.prepare(
+            "INSERT INTO discovered_images(path, root, last_seen_scan) VALUES(?1, ?2, ?3) ON CONFLICT(path) DO UPDATE SET root = excluded.root, last_seen_scan = excluded.last_seen_scan",
+        )?;
+        for (root, path) in candidates {
+            updated += stmt.execute(params![
+                path.to_string_lossy().to_string(),
+                root.to_string_lossy().to_string(),
+                generation,
+            ])?;
+        }
+    }
+    tx.commit()?;
+    Ok(updated)
+}
+
+pub fn delete_stale_discovered_for_root(
+    conn: &Connection,
+    root: &Path,
+    generation: i64,
+) -> Result<usize> {
+    Ok(conn.execute(
+        "DELETE FROM discovered_images WHERE root = ?1 AND last_seen_scan <> ?2",
+        params![root.to_string_lossy().to_string(), generation],
+    )?)
+}
+
+pub fn load_discovered_paths(db_path: &Path) -> Result<Vec<PathBuf>> {
+    let conn = open(db_path)?;
+    let mut stmt =
+        conn.prepare("SELECT path FROM discovered_images ORDER BY path COLLATE NOCASE")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    Ok(rows.filter_map(|row| row.ok()).map(PathBuf::from).collect())
+}
+
+pub fn load_root_counts(db_path: &Path) -> Result<HashMap<PathBuf, (usize, usize)>> {
+    let conn = open(db_path)?;
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT r.path,
+               (SELECT COUNT(*) FROM discovered_images d WHERE d.root = r.path),
+               (SELECT COUNT(*) FROM images i WHERE i.root = r.path)
+        FROM roots r
+        ORDER BY r.path COLLATE NOCASE
+        "#,
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            PathBuf::from(row.get::<_, String>(0)?),
+            row.get::<_, i64>(1)?.max(0) as usize,
+            row.get::<_, i64>(2)?.max(0) as usize,
+        ))
+    })?;
+    let mut counts = HashMap::new();
+    for row in rows {
+        let (root, discovered, indexed) = row?;
+        counts.insert(root, (discovered.max(indexed), indexed));
+    }
+    Ok(counts)
 }
 
 pub fn load_image_summaries(db_path: &Path) -> Result<Vec<ImageSummary>> {
@@ -1313,6 +1406,9 @@ mod tests {
                 Some(&FileState {
                     size: 111,
                     modified: 1001,
+                    width: 32,
+                    height: 32,
+                    content_fingerprint: None,
                     has_embedding: false,
                 })
             );
@@ -1321,6 +1417,9 @@ mod tests {
                 Some(&FileState {
                     size: 222,
                     modified: 2002,
+                    width: 64,
+                    height: 64,
+                    content_fingerprint: None,
                     has_embedding: true,
                 })
             );

@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::UNIX_EPOCH;
 use walkdir::WalkDir;
 
@@ -21,12 +22,53 @@ const MAX_SIMILARITY_RESULTS: usize = 2_000;
 const CANDIDATE_PIPELINE_MIN_RECORDS: usize = 4_000;
 const MAX_COMPONENT_CANDIDATES: usize = 3_000;
 
+#[derive(Clone, Default)]
+pub struct IndexControl {
+    inner: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl IndexControl {
+    pub fn pause(&self) {
+        let (lock, _) = &*self.inner;
+        *lock.lock().unwrap_or_else(|err| err.into_inner()) = true;
+    }
+
+    pub fn resume(&self) {
+        let (lock, condvar) = &*self.inner;
+        *lock.lock().unwrap_or_else(|err| err.into_inner()) = false;
+        condvar.notify_all();
+    }
+
+    pub fn is_paused(&self) -> bool {
+        let (lock, _) = &*self.inner;
+        *lock.lock().unwrap_or_else(|err| err.into_inner())
+    }
+
+    fn wait_if_paused(&self) {
+        let (lock, condvar) = &*self.inner;
+        let mut paused = lock.lock().unwrap_or_else(|err| err.into_inner());
+        while *paused {
+            paused = condvar.wait(paused).unwrap_or_else(|err| err.into_inner());
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RescanMode {
+    ChangedOnly,
+    ForcePreferThumbnail,
+}
+
 #[derive(Clone)]
 struct PendingImage {
     root: PathBuf,
     path: PathBuf,
     size: u64,
     modified: i64,
+    previous_width: u32,
+    previous_height: u32,
+    previous_fingerprint: Option<u64>,
+    prefer_thumbnail: bool,
 }
 
 struct PreparedImage {
@@ -94,8 +136,10 @@ impl Default for SimilaritySettings {
 #[derive(Debug)]
 pub enum WorkerMessage {
     Status(String),
+    CurrentFile(String),
     Progress { done: usize, total: usize },
     Reload,
+    ReplaceImages(Vec<ImageSummary>),
     IndexedBatch(Vec<ImageSummary>),
     RemovedPaths(Vec<PathBuf>),
     SimilarityResults(Vec<ImageSummary>),
@@ -108,14 +152,71 @@ pub fn spawn_rescan(
     roots: Vec<PathBuf>,
     indexing_settings: IndexingSettings,
     embedding_service: EmbeddingService,
+    control: IndexControl,
+    tx: Sender<WorkerMessage>,
+) {
+    spawn_rescan_with_mode(
+        db_path,
+        roots,
+        indexing_settings,
+        embedding_service,
+        control,
+        RescanMode::ChangedOnly,
+        tx,
+    );
+}
+
+pub fn spawn_force_rescan(
+    db_path: PathBuf,
+    roots: Vec<PathBuf>,
+    indexing_settings: IndexingSettings,
+    embedding_service: EmbeddingService,
+    control: IndexControl,
+    tx: Sender<WorkerMessage>,
+) {
+    spawn_rescan_with_mode(
+        db_path,
+        roots,
+        indexing_settings,
+        embedding_service,
+        control,
+        RescanMode::ForcePreferThumbnail,
+        tx,
+    );
+}
+
+fn spawn_rescan_with_mode(
+    db_path: PathBuf,
+    roots: Vec<PathBuf>,
+    indexing_settings: IndexingSettings,
+    embedding_service: EmbeddingService,
+    control: IndexControl,
+    mode: RescanMode,
     tx: Sender<WorkerMessage>,
 ) {
     std::thread::spawn(move || {
-        let result = rescan(&db_path, &roots, indexing_settings, &embedding_service, &tx);
+        let result = rescan(
+            &db_path,
+            &roots,
+            indexing_settings,
+            &embedding_service,
+            mode,
+            &control,
+            &tx,
+        );
         if let Err(err) = result {
             let _ = tx.send(WorkerMessage::Error(format!("Indexing failed: {err:#}")));
         }
-        let _ = tx.send(WorkerMessage::Reload);
+        match db::load_image_summaries(&db_path) {
+            Ok(images) => {
+                let _ = tx.send(WorkerMessage::ReplaceImages(images));
+            }
+            Err(err) => {
+                let _ = tx.send(WorkerMessage::Error(format!(
+                    "Final index reload failed: {err:#}"
+                )));
+            }
+        }
         let _ = tx.send(WorkerMessage::Idle);
     });
 }
@@ -126,6 +227,7 @@ pub fn spawn_incremental_update(
     changed_paths: Vec<PathBuf>,
     indexing_settings: IndexingSettings,
     embedding_service: EmbeddingService,
+    control: IndexControl,
     tx: Sender<WorkerMessage>,
 ) {
     std::thread::spawn(move || {
@@ -135,6 +237,7 @@ pub fn spawn_incremental_update(
             &changed_paths,
             indexing_settings,
             &embedding_service,
+            &control,
             &tx,
         );
         if let Err(err) = result {
@@ -152,6 +255,7 @@ fn incremental_update(
     changed_paths: &[PathBuf],
     indexing_settings: IndexingSettings,
     embedding_service: &EmbeddingService,
+    control: &IndexControl,
     tx: &Sender<WorkerMessage>,
 ) -> Result<()> {
     let indexing_settings = indexing_settings.sanitized();
@@ -227,6 +331,10 @@ fn incremental_update(
             path,
             size,
             modified,
+            previous_width: 0,
+            previous_height: 0,
+            previous_fingerprint: None,
+            prefer_thumbnail: false,
         });
     }
 
@@ -250,11 +358,20 @@ fn incremental_update(
     let done = AtomicUsize::new(0);
 
     for batch in pending.chunks(batch_size) {
+        control.wait_if_paused();
         let prepared: Vec<PreparedImage> = pool.install(|| {
             batch
                 .par_iter()
                 .filter_map(|item| {
-                    let result = inspect_image(&item.path, &item.root).map(
+                    control.wait_if_paused();
+                    let _ = tx.send(WorkerMessage::CurrentFile(
+                        item.path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or_default()
+                            .to_owned(),
+                    ));
+                    let result = inspect_pending_image(item).map(
                         |(
                             width,
                             height,
@@ -355,6 +472,9 @@ fn incremental_update(
             &committed_paths,
             indexing_settings,
             embedding_service,
+            roots,
+            false,
+            control,
             tx,
         ) {
             let _ = tx.send(WorkerMessage::Error(format!(
@@ -382,11 +502,14 @@ fn rescan(
     roots: &[PathBuf],
     indexing_settings: IndexingSettings,
     embedding_service: &EmbeddingService,
+    mode: RescanMode,
+    control: &IndexControl,
     tx: &Sender<WorkerMessage>,
 ) -> Result<()> {
     let indexing_settings = indexing_settings.sanitized();
     let mut conn = db::open(db_path)?;
     let existing_file_states = db::load_file_states(&conn)?;
+    let force_rescan = mode == RescanMode::ForcePreferThumbnail;
     let mut candidates: Vec<(PathBuf, PathBuf)> = Vec::new();
 
     let _ = tx.send(WorkerMessage::Status(format!(
@@ -440,6 +563,15 @@ fn rescan(
     }
 
     let total = candidates.len();
+    let scan_generation = db::next_scan_generation(&conn)?;
+    let discovered_marked =
+        db::mark_discovered_paths_seen(&mut conn, scan_generation, &candidates)?;
+    for root in &prunable_roots {
+        let _ = db::delete_stale_discovered_for_root(&conn, root, scan_generation)?;
+    }
+    let _ = tx.send(WorkerMessage::Status(format!(
+        "Discovered {discovered_marked}/{total} image paths; checking index state…"
+    )));
     let mut pending = Vec::<PendingImage>::new();
 
     // Keep filesystem/SQLite state checks cheap and serialized, but move image
@@ -464,16 +596,20 @@ fn rescan(
             .map(|duration| duration.as_secs() as i64)
             .unwrap_or(0);
 
-        let unchanged = existing_file_states
-            .get(path)
-            .is_some_and(|state| state.size == size && state.modified == modified);
+        let previous = existing_file_states.get(path);
+        let unchanged =
+            previous.is_some_and(|state| state.size == size && state.modified == modified);
 
-        if !unchanged {
+        if force_rescan || !unchanged {
             pending.push(PendingImage {
                 root: root.clone(),
                 path: path.clone(),
                 size,
                 modified,
+                previous_width: previous.map_or(0, |state| state.width),
+                previous_height: previous.map_or(0, |state| state.height),
+                previous_fingerprint: previous.and_then(|state| state.content_fingerprint),
+                prefer_thumbnail: force_rescan && unchanged,
             });
         }
 
@@ -489,7 +625,7 @@ fn rescan(
     let workers = indexing_settings.decode_workers;
     let batch_size = indexing_settings.batch_size;
     let _ = tx.send(WorkerMessage::Status(format!(
-        "Preparing {changed_total} changed image{} with {workers} decode worker{}; committing every {batch_size} images…",
+        "Preparing {changed_total} image{} with {workers} decode worker{}; committing every {batch_size} images…",
         if changed_total == 1 { "" } else { "s" },
         if workers == 1 { "" } else { "s" },
     )));
@@ -550,9 +686,10 @@ fn rescan(
 
                     let done = prepared_count.fetch_add(1, Ordering::Relaxed) + 1;
                     if done % 8 == 0 || done == changed_total {
-                        let _ = tx.send(WorkerMessage::Status(format!(
-                            "Decoding/reading metadata: {done}/{changed_total}; committed {changed}"
-                        )));
+                        let _ = tx.send(WorkerMessage::Progress {
+                            done,
+                            total: changed_total,
+                        });
                     }
 
                     match result {
@@ -632,7 +769,13 @@ fn rescan(
             missing_visual.len(),
             if missing_visual.len() == 1 { "" } else { "s" }
         )));
-        build_visual_descriptors(&mut conn, &missing_visual, indexing_settings, tx)?;
+        build_visual_descriptors(
+            &mut conn,
+            &missing_visual,
+            indexing_settings,
+            Some(control),
+            tx,
+        )?;
     }
 
     let _ = tx.send(WorkerMessage::Status(format!(
@@ -646,6 +789,9 @@ fn rescan(
             &missing,
             indexing_settings,
             embedding_service,
+            roots,
+            force_rescan,
+            control,
             tx,
         ) {
             let _ = tx.send(WorkerMessage::Error(format!(
@@ -672,6 +818,7 @@ fn build_visual_descriptors(
     conn: &mut rusqlite::Connection,
     paths: &[PathBuf],
     indexing_settings: IndexingSettings,
+    control: Option<&IndexControl>,
     tx: &Sender<WorkerMessage>,
 ) -> Result<()> {
     let indexing_settings = indexing_settings.sanitized();
@@ -698,6 +845,9 @@ fn build_visual_descriptors(
     )));
 
     for batch in paths.chunks(batch_size) {
+        if let Some(control) = control {
+            control.wait_if_paused();
+        }
         let committed_before_batch = committed;
         // Hold only one bounded descriptor batch in memory. Each successfully
         // decoded batch is committed before the next batch is decoded.
@@ -705,6 +855,12 @@ fn build_visual_descriptors(
             batch
                 .par_iter()
                 .filter_map(|path| {
+                    if let Some(control) = control {
+                        control.wait_if_paused();
+                    }
+                    let _ = tx.send(WorkerMessage::CurrentFile(
+                        path.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_owned(),
+                    ));
                     let result = decode_image(path).map(|image| {
                         let fingerprint = decoded_content_fingerprint(&image);
                         let (_, visual_hash, color_histogram, material_texture) = visual_descriptor(&image);
@@ -782,6 +938,9 @@ fn build_embeddings(
     paths: &[PathBuf],
     indexing_settings: IndexingSettings,
     embedding_service: &EmbeddingService,
+    roots: &[PathBuf],
+    prefer_thumbnails: bool,
+    control: &IndexControl,
     tx: &Sender<WorkerMessage>,
 ) -> Result<()> {
     let indexing_settings = indexing_settings.sanitized();
@@ -792,9 +951,30 @@ fn build_embeddings(
     let total = paths.len();
     let batch_size = indexing_settings.batch_size;
     for (batch_index, batch) in paths.chunks(batch_size).enumerate() {
+        control.wait_if_paused();
+        let input_paths: Vec<PathBuf> = batch
+            .iter()
+            .map(|path| {
+                if prefer_thumbnails {
+                    indexed_root_for_path(path, roots)
+                        .and_then(|root| thumbnail_cache::valid_cache_path_for_root(root, path))
+                        .unwrap_or_else(|| path.clone())
+                } else {
+                    path.clone()
+                }
+            })
+            .collect();
+        if let Some(path) = batch.first() {
+            let _ = tx.send(WorkerMessage::CurrentFile(
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default()
+                    .to_owned(),
+            ));
+        }
         let response = embedding_service
             .embed_with_provider(
-                batch.to_vec(),
+                input_paths,
                 batch_size,
                 indexing_settings.clip_threads,
                 indexing_settings.clip_execution_provider,
@@ -836,9 +1016,12 @@ fn build_embeddings(
         }
         portable::sync_paths_from_session(conn, batch)?;
         let done = ((batch_index + 1) * batch_size).min(total);
-        let _ = tx.send(WorkerMessage::Status(format!(
-            "Building CLIP index: {done}/{total} (committed; persistent model)"
-        )));
+        let _ = tx.send(WorkerMessage::Progress { done, total });
+        let _ = tx.send(WorkerMessage::Status(if prefer_thumbnails {
+            format!("Building CLIP index from cached thumbnails: {done}/{total}")
+        } else {
+            format!("Building CLIP index: {done}/{total}")
+        }));
     }
     Ok(())
 }
@@ -1003,7 +1186,7 @@ fn similarity_search(
             missing_visual.len(),
             if missing_visual.len() == 1 { "" } else { "s" }
         )));
-        build_visual_descriptors(&mut conn, &missing_visual, indexing_settings, tx)?;
+        build_visual_descriptors(&mut conn, &missing_visual, indexing_settings, None, tx)?;
     }
 
     let query_image = decode_image(query_path)?;
@@ -1376,6 +1559,40 @@ fn normalized_path_key(path: &Path) -> String {
     }
 }
 
+fn inspect_pending_image(
+    item: &PendingImage,
+) -> Result<(u32, u32, [u8; 3], u64, Vec<f32>, Vec<f32>, u64)> {
+    if item.prefer_thumbnail {
+        if let (Some(image), Some(fingerprint)) = (
+            thumbnail_cache::load_cached_for_root(&item.root, &item.path),
+            item.previous_fingerprint,
+        ) {
+            let (dominant, visual_hash, color_histogram, material_texture) =
+                visual_descriptor(&image);
+            let width = if item.previous_width > 0 {
+                item.previous_width
+            } else {
+                image.width()
+            };
+            let height = if item.previous_height > 0 {
+                item.previous_height
+            } else {
+                image.height()
+            };
+            return Ok((
+                width,
+                height,
+                dominant,
+                visual_hash,
+                color_histogram,
+                material_texture,
+                fingerprint,
+            ));
+        }
+    }
+    inspect_image(&item.path, &item.root)
+}
+
 fn inspect_image(
     path: &Path,
     root: &Path,
@@ -1516,6 +1733,58 @@ pub fn is_supported_image(path: &Path) -> bool {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn index_control_pause_resume_is_cooperative() {
+        let control = IndexControl::default();
+        control.pause();
+        assert!(control.is_paused());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker_control = control.clone();
+        std::thread::spawn(move || {
+            worker_control.wait_if_paused();
+            let _ = tx.send(());
+        });
+        assert!(rx
+            .recv_timeout(std::time::Duration::from_millis(80))
+            .is_err());
+        control.resume();
+        rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
+        assert!(!control.is_paused());
+    }
+
+    #[test]
+    fn force_inspection_reuses_valid_thumbnail_and_preserves_source_identity() {
+        use image::{ImageBuffer, Rgb};
+        let root = std::env::temp_dir().join(format!(
+            "wis-force-thumb-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("tiles")).unwrap();
+        let source = root.join("tiles").join("large.png");
+        let original =
+            DynamicImage::ImageRgb8(ImageBuffer::from_pixel(900, 700, Rgb([20, 40, 60])));
+        original.save(&source).unwrap();
+        thumbnail_cache::store_from_decoded_for_root(&root, &source, &original).unwrap();
+        let pending = PendingImage {
+            root: root.clone(),
+            path: source,
+            size: 1,
+            modified: 1,
+            previous_width: 900,
+            previous_height: 700,
+            previous_fingerprint: Some(123456789),
+            prefer_thumbnail: true,
+        };
+        let (width, height, _, _, _, _, fingerprint) = inspect_pending_image(&pending).unwrap();
+        assert_eq!((width, height), (900, 700));
+        assert_eq!(fingerprint, 123456789);
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn normalized_query_similarity_matches_legacy_candidate_fallback() {

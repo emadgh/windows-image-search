@@ -44,77 +44,78 @@ impl ImageSearchApp {
         let rows = visible.len().div_ceil(columns);
         let row_height = self.thumb_size + 62.0;
 
-        egui::ScrollArea::vertical().show_rows(ui, row_height, rows, |ui, row_range| {
-            for row in row_range {
-                ui.horizontal(|ui| {
-                    for column in 0..columns {
-                        let pos = row * columns + column;
-                        if pos >= visible.len() {
-                            break;
-                        }
-                        let record = self.record_view(visible[pos]);
-                        let selected = self.selected_paths.contains(&record.path);
-                        let fit = self.thumb_fit;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show_rows(ui, row_height, rows, |ui, row_range| {
+                for row in row_range {
+                    ui.horizontal(|ui| {
+                        for column in 0..columns {
+                            let pos = row * columns + column;
+                            if pos >= visible.len() {
+                                break;
+                            }
+                            let record = self.record_view(visible[pos]);
+                            let selected = self.selected_paths.contains(&record.path);
+                            let fit = self.thumb_fit;
 
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(cell_width, row_height),
-                            egui::Layout::top_down(egui::Align::Center),
-                            |ui| {
-                                let response = if let Some(texture) = self.thumbnail(&record.path) {
-                                    thumbnail_widget(
-                                        ui,
-                                        &texture,
-                                        egui::vec2(self.thumb_size, self.thumb_size),
-                                        fit,
-                                        selected,
-                                        egui::Sense::click_and_drag(),
-                                    )
-                                } else {
-                                    let response = ui.add_sized(
-                                        [self.thumb_size, self.thumb_size],
-                                        egui::Button::new("Loading thumbnail…")
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(cell_width, row_height),
+                                egui::Layout::top_down(egui::Align::Center),
+                                |ui| {
+                                    let response =
+                                        if let Some(texture) = self.thumbnail(&record.path) {
+                                            thumbnail_widget(
+                                                ui,
+                                                &texture,
+                                                egui::vec2(self.thumb_size, self.thumb_size),
+                                                fit,
+                                                selected,
+                                                egui::Sense::click_and_drag(),
+                                            )
+                                        } else {
+                                            let response = ui.add_sized(
+                                                [self.thumb_size, self.thumb_size],
+                                                egui::Button::new("Loading thumbnail…")
+                                                    .sense(egui::Sense::click_and_drag()),
+                                            );
+                                            if selected {
+                                                ui.painter().rect_stroke(
+                                                    response.rect,
+                                                    4.0,
+                                                    egui::Stroke::new(
+                                                        2.0_f32,
+                                                        ui.visuals().selection.stroke.color,
+                                                    ),
+                                                    egui::StrokeKind::Inside,
+                                                );
+                                            }
+                                            response
+                                        };
+
+                                    self.handle_result_response(&response, &record.path);
+                                    self.attach_collection_drag_source(&response, &record.path);
+
+                                    let label = ui.add(
+                                        egui::Label::new(truncate_middle(&record.file_name, 30))
                                             .sense(egui::Sense::click_and_drag()),
                                     );
-                                    if selected {
-                                        ui.painter().rect_stroke(
-                                            response.rect,
-                                            4.0,
-                                            egui::Stroke::new(
-                                                2.0_f32,
-                                                ui.visuals().selection.stroke.color,
-                                            ),
-                                            egui::StrokeKind::Inside,
-                                        );
-                                    }
-                                    response
-                                };
+                                    self.handle_result_response(&label, &record.path);
+                                    self.attach_collection_drag_source(&label, &record.path);
+                                    label.on_hover_text(record.path.display().to_string());
 
-                                self.handle_result_response(&response, &record.path);
-                                self.attach_collection_drag_source(&response, &record.path);
-                                response.context_menu(|ui| file_context_menu(ui, &record.path));
-
-                                let label = ui.add(
-                                    egui::Label::new(truncate_middle(&record.file_name, 30))
-                                        .sense(egui::Sense::click_and_drag()),
-                                );
-                                self.handle_result_response(&label, &record.path);
-                                self.attach_collection_drag_source(&label, &record.path);
-                                label.context_menu(|ui| file_context_menu(ui, &record.path));
-                                label.on_hover_text(record.path.display().to_string());
-
-                                ui.horizontal(|ui| {
-                                    swatch(ui, record.dominant);
-                                    ui.small(format!("{}×{}", record.width, record.height));
-                                    if let Some(score) = record.score {
-                                        ui.small(format!("{:.1}%", score * 100.0));
-                                    }
-                                });
-                            },
-                        );
-                    }
-                });
-            }
-        });
+                                    ui.horizontal(|ui| {
+                                        swatch(ui, record.dominant);
+                                        ui.small(format!("{}×{}", record.width, record.height));
+                                        if let Some(score) = record.score {
+                                            ui.small(format!("{:.1}%", score * 100.0));
+                                        }
+                                    });
+                                },
+                            );
+                        }
+                    });
+                }
+            });
     }
 
     pub(super) fn show_details(&mut self, ui: &mut egui::Ui, visible: &[usize]) {
@@ -151,7 +152,6 @@ impl ImageSearchApp {
                         };
                         self.handle_result_response(&response, &record.path);
                         self.attach_collection_drag_source(&response, &record.path);
-                        response.context_menu(|ui| file_context_menu(ui, &record.path));
 
                         ui.allocate_ui_with_layout(
                             egui::vec2(widths.name, 56.0),
@@ -163,7 +163,6 @@ impl ImageSearchApp {
                                 );
                                 self.handle_result_response(&name, &record.path);
                                 self.attach_collection_drag_source(&name, &record.path);
-                                name.context_menu(|ui| file_context_menu(ui, &record.path));
                                 name.on_hover_text(record.path.display().to_string());
                                 ui.small(truncate_middle(&record.root.display().to_string(), 48));
                             },
@@ -228,8 +227,11 @@ impl ImageSearchApp {
     }
 
     fn handle_result_response(&mut self, response: &egui::Response, path: &Path) {
-        if response.secondary_clicked() && !self.selected_paths.contains(path) {
-            self.select_path(path, false);
+        if response.secondary_clicked() {
+            if !self.selected_paths.contains(path) {
+                self.select_path(path, false);
+            }
+            crate::windows_shell::show_context_menu(path.to_path_buf());
         }
         if response.clicked() {
             let additive = response
@@ -383,42 +385,6 @@ fn thumbnail_widget(
         );
     }
     response
-}
-
-fn file_context_menu(ui: &mut egui::Ui, path: &Path) {
-    if ui.button("Open").clicked() {
-        let _ = open::that(path);
-        ui.close();
-    }
-    if ui.button("Show in Explorer").clicked() {
-        show_in_explorer(path);
-        ui.close();
-    }
-    if ui.button("Open containing folder").clicked() {
-        if let Some(parent) = path.parent() {
-            let _ = open::that(parent);
-        }
-        ui.close();
-    }
-    if ui.button("Copy path").clicked() {
-        ui.ctx().copy_text(path.display().to_string());
-        ui.close();
-    }
-}
-
-fn show_in_explorer(path: &Path) {
-    #[cfg(target_os = "windows")]
-    {
-        let _ = std::process::Command::new("explorer.exe")
-            .arg(format!("/select,\"{}\"", path.display()))
-            .spawn();
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        if let Some(parent) = path.parent() {
-            let _ = open::that(parent);
-        }
-    }
 }
 
 fn swatch(ui: &mut egui::Ui, rgb: [u8; 3]) {
