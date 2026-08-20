@@ -81,11 +81,15 @@ where
     let model_version = embedder.model_version();
     let dimension = embedder.embedding_dimension();
     let input_size = embedder.input_size();
+    let alignment_revision = embedder.alignment_revision();
     if dimension == 0 {
         anyhow::bail!("face embedder dimension must be non-zero");
     }
     if input_size == 0 {
         anyhow::bail!("face embedder input size must be non-zero");
+    }
+    if alignment_revision <= 0 {
+        anyhow::bail!("face embedder alignment revision must be positive");
     }
 
     let mut summary = FaceEmbeddingPipelineSummary::default();
@@ -110,7 +114,7 @@ where
             model_id,
             model_version,
             dimension,
-            face_embedding::ALIGNMENT_REVISION,
+            alignment_revision,
         )?;
         summary.faces_pending += pending;
         emit(FaceEmbeddingPipelineEvent::RootStarted {
@@ -130,7 +134,7 @@ where
                 model_id,
                 model_version,
                 dimension,
-                face_embedding::ALIGNMENT_REVISION,
+                alignment_revision,
                 options.batch_size,
             )?;
             if batch.is_empty() {
@@ -168,12 +172,8 @@ where
 
                 let result = (|| -> Result<()> {
                     let oriented = crate::face_detection::decode_oriented(&absolute)?;
-                    let aligned = face_embedding::aligned_face_crop(
-                        &oriented,
-                        candidate.bbox,
-                        &candidate.landmarks,
-                        input_size,
-                    )?;
+                    let aligned =
+                        embedder.align_face(&oriented, candidate.bbox, &candidate.landmarks)?;
                     let raw = embedder.embed(&aligned)?;
                     let normalized = face_embedding::normalize_embedding(raw, dimension)?;
                     face_embedding_store::replace_embedding(
@@ -181,7 +181,7 @@ where
                         &candidate,
                         model_id,
                         model_version,
-                        face_embedding::ALIGNMENT_REVISION,
+                        alignment_revision,
                         &normalized,
                     )?;
                     Ok(())

@@ -8,14 +8,29 @@ const CROP_MARGIN: f32 = 0.18;
 
 /// Replaceable contract for v0.3 face identity embedders.
 ///
-/// Implementations receive a deterministic, EXIF-corrected square face crop
-/// resized to `input_size()`. The pipeline normalizes returned vectors before
-/// persistence, so model adapters may return their native finite output.
+/// The pipeline owns source-state checks and persistence, while each model may
+/// override alignment/preprocessing geometry. This keeps a generic default crop
+/// for simple embedders without locking production models (for example SFace)
+/// to an incompatible alignment contract.
 pub trait FaceEmbedder: Send {
     fn model_id(&self) -> &'static str;
     fn model_version(&self) -> &'static str;
     fn input_size(&self) -> u32;
     fn embedding_dimension(&self) -> usize;
+
+    fn alignment_revision(&self) -> i64 {
+        ALIGNMENT_REVISION
+    }
+
+    fn align_face(
+        &self,
+        image: &DynamicImage,
+        bbox: FaceBox,
+        landmarks: &[FaceLandmark],
+    ) -> Result<DynamicImage> {
+        aligned_face_crop(image, bbox, landmarks, self.input_size())
+    }
+
     fn embed(&mut self, aligned_face: &DynamicImage) -> Result<Vec<f32>>;
 }
 
