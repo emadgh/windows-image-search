@@ -10,33 +10,18 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: feat/face-similarity-core-v3
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-
-      - name: Format face similarity branch
-        shell: pwsh
-        run: |
-          cargo fmt --all
-          $changes = git status --porcelain
-          if ($changes) {
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add src/main.rs src/face_similarity.rs Cargo.toml Cargo.lock
-            git commit -m "style: format face similarity core"
-            git push origin HEAD:feat/face-similarity-core-v3
-          }
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
