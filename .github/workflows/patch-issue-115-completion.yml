@@ -1,0 +1,60 @@
+name: Patch issue 115 completion
+
+on:
+  push:
+    branches:
+      - fix/issue-115-completion
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/issue-115-completion
+
+      - name: Complete compact full-rescan decode warning path
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path("src/indexer.rs")
+          text = path.read_text(encoding="utf-8")
+          old = '''                        Err(err) => {
+                            let _ = tx.send(WorkerMessage::Error(format!(
+                                "Cannot decode {}: {err:#}",
+                                item.path.display()
+                            )));
+                            None
+                        }'''
+          new = '''                        Err(err) => {
+                            let _ = tx.send(WorkerMessage::Warning(compact_decode_failure(
+                                &item.path, &err,
+                            )));
+                            None
+                        }'''
+
+          if old in text:
+              text = text.replace(old, new, 1)
+              path.write_text(text, encoding="utf-8")
+          elif new not in text:
+              raise SystemExit("Expected full-rescan decode failure block was not found")
+
+      - name: Format
+        run: cargo fmt --all
+
+      - name: Commit patch
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "No patch needed"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/indexer.rs
+          git commit -m "fix: compact full-rescan decode warnings"
+          git push origin HEAD:fix/issue-115-completion
