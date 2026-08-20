@@ -1,0 +1,6 @@
+candidate_id	role	model_revision	upstream	weight_license	redistributable	commercial_use	distribution_policy	provenance	checked_at	notes
+yunet-opencv-zoo	detector	2026may	opencv/opencv_zoo	MIT	true	true	bundled	models/face_detection_yunet/face_detection_yunet_2026may.onnx	2026-08-20	Retain MIT notice; benchmark before production selection.
+sface-opencv-zoo	embedder	2021dec	opencv/opencv_zoo	Apache-2.0	true	true	bundled	models/face_recognition_sface/face_recognition_sface_2021dec.onnx	2026-08-20	Include Apache-2.0 license and any required notices in packaged distribution.
+insightface-scrfd-upstream	detector	user-supplied	deepinsight/insightface	upstream pretrained-model non-commercial research policy	false	false	external	detection/scrfd / user-supplied ONNX	2026-08-20	Do not auto-download or bundle upstream pretrained weights without separate artifact license.
+insightface-arcface-buffalo	embedder	user-supplied	deepinsight/insightface	upstream pretrained-model non-commercial research policy	false	false	external	buffalo_l / user-supplied ONNX	2026-08-20	Recognition package requires separate licensing for commercial redistribution; default is external only.
+user-onnx	any	user-supplied	user	unknown	false	false	external	local file path	2026-08-20	Manifest must record exact license/provenance; cannot be promoted to bundled without verified rights.
