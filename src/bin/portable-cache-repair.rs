@@ -454,10 +454,11 @@ fn inspect_ann(db_path: &Path) -> Result<AnnState> {
         return Ok(AnnState::Corrupt);
     }
     let mut loader = HnswIo::new(&ann_dir, &manifest.basename);
-    match loader.load_hnsw::<f32, DistCosine>() {
-        Ok(_) => Ok(AnnState::Current),
-        Err(_) => Ok(AnnState::Corrupt),
-    }
+    let state = match loader.load_hnsw::<f32, DistCosine>() {
+        Ok(_) => AnnState::Current,
+        Err(_) => AnnState::Corrupt,
+    };
+    Ok(state)
 }
 
 fn rebuild_ann(db_path: &Path) -> Result<()> {
