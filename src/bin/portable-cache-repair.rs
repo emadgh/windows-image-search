@@ -283,13 +283,16 @@ where
             LIMIT ?2
             "#,
         )?;
-        let rows = stmt.query_map(params![cursor.as_deref(), options.batch_size as i64], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
-        })?;
+        let rows = stmt.query_map(
+            params![cursor.as_deref(), options.batch_size as i64],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
         let batch = rows.collect::<std::result::Result<Vec<_>, _>>()?;
         if batch.is_empty() {
             break;
@@ -652,8 +655,8 @@ fn preflight(root: &Path, db_path: &Path) -> Result<PortableMetadata> {
             bail!("unknown portable index format marker {marker:?}; refusing repair");
         }
     }
-    let library_id = meta_value(&conn, "library_id")?
-        .context("portable index has no library_id metadata")?;
+    let library_id =
+        meta_value(&conn, "library_id")?.context("portable index has no library_id metadata")?;
     if library_id.trim().is_empty() {
         bail!("portable library_id is empty; refusing repair");
     }
@@ -865,7 +868,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(dry.thumbnail_missing, 1);
-        let cache = portable_thumbnail_path(&root, Path::new("face.png"), &std::fs::metadata(&source).unwrap());
+        let cache = portable_thumbnail_path(
+            &root,
+            Path::new("face.png"),
+            &std::fs::metadata(&source).unwrap(),
+        );
         assert!(!cache.exists());
 
         let applied = repair_root(
@@ -899,7 +906,11 @@ mod tests {
     #[test]
     fn corrupt_thumbnail_is_reported_and_rebuilt() {
         let (root, source) = fixture("corrupt-thumb", false);
-        let cache = portable_thumbnail_path(&root, Path::new("face.png"), &std::fs::metadata(&source).unwrap());
+        let cache = portable_thumbnail_path(
+            &root,
+            Path::new("face.png"),
+            &std::fs::metadata(&source).unwrap(),
+        );
         std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
         std::fs::write(&cache, b"not a jpeg").unwrap();
 
