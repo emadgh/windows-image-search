@@ -1,6 +1,8 @@
 use crate::face_detection::{FaceBox, FaceLandmark};
 use crate::face_embedding::{self, FaceEmbedder};
-use crate::face_embedding_pipeline::{self, FaceEmbeddingPipelineEvent, FaceEmbeddingPipelineOptions, FaceEmbeddingPipelineSummary};
+use crate::face_embedding_pipeline::{
+    self, FaceEmbeddingPipelineEvent, FaceEmbeddingPipelineOptions, FaceEmbeddingPipelineSummary,
+};
 use crate::face_settings::FaceEmbeddingSettings;
 use crate::face_sface_adapter::{
     align_sface_112, LandmarkPoint, SFaceExecutionProvider, SFaceOnnxAdapter,
@@ -166,7 +168,9 @@ mod tests {
     #[test]
     fn missing_external_model_is_rejected_without_download() {
         let settings = FaceEmbeddingSettings::default();
-        let err = SFaceProductionEmbedder::load(&settings).unwrap_err();
+        let err = SFaceProductionEmbedder::load(&settings)
+            .err()
+            .expect("missing external model must fail");
         assert!(err.to_string().contains("not configured"));
     }
 }
