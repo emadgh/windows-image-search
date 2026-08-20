@@ -1,0 +1,83 @@
+name: Rebuild PR 116 on current main
+
+on:
+  push:
+    branches:
+      - fix/indexing-pause-progress-discovery-v2
+
+permissions:
+  contents: write
+
+jobs:
+  rebuild:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: fix/indexing-pause-progress-discovery-v2
+      - name: Reapply indexing UX changes on current main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin fix/indexing-pause-progress-discovery-v0.3 main
+          set +e
+          git merge --no-commit --no-ff origin/fix/indexing-pause-progress-discovery-v0.3
+          set -e
+          git checkout origin/fix/indexing-pause-progress-discovery-v0.3 -- src/db.rs src/indexer.rs src/ui/mod.rs
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('src/db.rs')
+          text = path.read_text(encoding='utf-8')
+          start = text.index('pub fn ann_index_signature(db_path: &Path) -> Result<u64> {')
+          end = text.index('\n}\n', start) + 3
+          current = text[start:end]
+          replacement = '''pub fn ann_index_signature(db_path: &Path) -> Result<u64> {
+    let conn = open(db_path)?;
+    ann_index_signature_on(&conn)
+}
+
+pub(crate) fn ann_index_signature_on(conn: &Connection) -> Result<u64> {
+    let mut stmt = conn.prepare(
+        "SELECT rowid, path, size, modified, COALESCE(embedding_dim, 0), embedding_normalized, embedding FROM images WHERE embedding IS NOT NULL ORDER BY rowid",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, bool>(5)?,
+            row.get::<_, Vec<u8>>(6)?,
+        ))
+    })?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    2_u32.hash(&mut hasher); // v2 includes the durable vector bytes themselves.
+    for row in rows {
+        let (rowid, path, size, modified, dim, normalized, embedding) = row?;
+        rowid.hash(&mut hasher);
+        path.hash(&mut hasher);
+        size.hash(&mut hasher);
+        modified.hash(&mut hasher);
+        dim.hash(&mut hasher);
+        normalized.hash(&mut hasher);
+        embedding.hash(&mut hasher);
+    }
+    Ok(hasher.finish())
+}
+'''
+          text = text[:start] + replacement + text[end:]
+          path.write_text(text, encoding='utf-8')
+          PY
+          git add src/db.rs src/indexer.rs src/ui/mod.rs
+          git rm .github/workflows/rebuild-pr116.yml
+          if git ls-files -u | grep -q .; then
+            git status --short
+            exit 1
+          fi
+          git commit -m "fix: reapply indexing pause and discovery UX on current main"
+          git push origin HEAD:fix/indexing-pause-progress-discovery-v2
