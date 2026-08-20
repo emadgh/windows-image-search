@@ -58,3 +58,5 @@ jobs:
           git add src/indexer.rs
           git commit -m "fix: compact full-rescan decode warnings"
           git push origin HEAD:fix/issue-115-completion
+
+# Re-triggered after PR creation so the idempotent patch runs on the PR branch.
