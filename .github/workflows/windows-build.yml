@@ -53,3 +53,20 @@ jobs:
         run: cargo test --all-targets
       - name: Release build
         run: cargo build --release
+      - name: Prepare Windows test bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifact | Out-Null
+          Copy-Item target/release/windows-image-search.exe artifact/
+          Copy-Item scripts/run-indexed-sample-benchmark.ps1 artifact/
+          Copy-Item scripts/run-v0.2-benchmark-gate.ps1 artifact/
+          Copy-Item README.md artifact/
+          Copy-Item LICENSE artifact/
+          git rev-parse HEAD | Set-Content artifact/COMMIT.txt -Encoding ascii
+      - name: Upload Windows test bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-image-search-pr133-test
+          path: artifact
+          if-no-files-found: error
+          retention-days: 14
