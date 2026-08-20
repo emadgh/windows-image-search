@@ -1,0 +1,40 @@
+name: YuNet production patch
+
+on:
+  push:
+    branches:
+      - feat/yunet-production-detector
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/yunet-production-detector
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Apply production detector patch
+        shell: pwsh
+        run: python .github/patch_yunet.py
+      - name: Format
+        shell: pwsh
+        run: cargo fmt --all
+      - name: Check
+        shell: pwsh
+        run: cargo check --all-targets
+      - name: Test
+        shell: pwsh
+        run: cargo test --all-targets
+      - name: Commit verified source
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m "feat: integrate YuNet production face detector"
+          git push origin HEAD:feat/yunet-production-detector
