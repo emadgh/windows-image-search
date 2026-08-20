@@ -753,9 +753,8 @@ fn rescan(
                     match result {
                         Ok(value) => Some(value),
                         Err(err) => {
-                            let _ = tx.send(WorkerMessage::Error(format!(
-                                "Cannot decode {}: {err:#}",
-                                item.path.display()
+                            let _ = tx.send(WorkerMessage::Warning(compact_decode_failure(
+                                &item.path, &err,
                             )));
                             None
                         }
