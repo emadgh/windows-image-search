@@ -3,39 +3,101 @@ from pathlib import Path
 path = Path("scripts/apply_ui_stabilization_alpha4.py")
 text = path.read_text(encoding="utf-8")
 
+
+def replace_one(old: str, new: str, label: str) -> None:
+    global text
+    if new in text:
+        return
+    count = text.count(old)
+    if count != 1:
+        raise SystemExit(f"{label} count={count}")
+    text = text.replace(old, new, 1)
+
+
 # build_visual_descriptors is shared by indexing and on-demand similarity search.
-# Make pause control optional so only indexing paths block on Pause.
-old_sig = '''    \'\'\'\'fn build_visual_descriptors(\n    conn: &mut rusqlite::Connection,\n    paths: &[PathBuf],\n    indexing_settings: IndexingSettings,\n    control: &IndexControl,\n    tx: &Sender<WorkerMessage>,\n) -> Result<()> {\n\'\'\',\n)'''
-new_sig = '''    \'\'\'\'fn build_visual_descriptors(\n    conn: &mut rusqlite::Connection,\n    paths: &[PathBuf],\n    indexing_settings: IndexingSettings,\n    control: Option<&IndexControl>,\n    tx: &Sender<WorkerMessage>,\n) -> Result<()> {\n\'\'\',\n)'''
-if new_sig not in text:
-    if text.count(old_sig) != 1:
-        raise SystemExit(f"visual signature replacement count={text.count(old_sig)}")
-    text = text.replace(old_sig, new_sig, 1)
+# Only indexing owns an IndexControl, so the helper accepts optional pause control.
+replace_one(
+    """    '''fn build_visual_descriptors(
+    conn: &mut rusqlite::Connection,
+    paths: &[PathBuf],
+    indexing_settings: IndexingSettings,
+    control: &IndexControl,
+    tx: &Sender<WorkerMessage>,
+) -> Result<()> {
+''',
+)""",
+    """    '''fn build_visual_descriptors(
+    conn: &mut rusqlite::Connection,
+    paths: &[PathBuf],
+    indexing_settings: IndexingSettings,
+    control: Option<&IndexControl>,
+    tx: &Sender<WorkerMessage>,
+) -> Result<()> {
+''',
+)""",
+    "visual signature replacement",
+)
 
-old_rescan_call = '''    \'\'\'\'        build_visual_descriptors(&mut conn, &missing_visual, indexing_settings, control, tx)?;\n\'\'\',\n)'''
-new_rescan_call = '''    \'\'\'\'        build_visual_descriptors(&mut conn, &missing_visual, indexing_settings, Some(control), tx)?;\n\'\'\',\n)'''
-if new_rescan_call not in text:
-    if text.count(old_rescan_call) != 1:
-        raise SystemExit(f"rescan visual call replacement count={text.count(old_rescan_call)}")
-    text = text.replace(old_rescan_call, new_rescan_call, 1)
+replace_one(
+    """    '''        build_visual_descriptors(&mut conn, &missing_visual, indexing_settings, control, tx)?;
+''',
+)""",
+    """    '''        build_visual_descriptors(&mut conn, &missing_visual, indexing_settings, Some(control), tx)?;
+''',
+)""",
+    "rescan visual call replacement",
+)
 
-old_batch = '''    \'\'\'\'    for batch in paths.chunks(batch_size) {\n        control.wait_if_paused();\n        let committed_before_batch = committed;\n\'\'\',\n)'''
-new_batch = '''    \'\'\'\'    for batch in paths.chunks(batch_size) {\n        if let Some(control) = control {\n            control.wait_if_paused();\n        }\n        let committed_before_batch = committed;\n\'\'\',\n)'''
-if new_batch not in text:
-    if text.count(old_batch) != 1:
-        raise SystemExit(f"visual batch pause replacement count={text.count(old_batch)}")
-    text = text.replace(old_batch, new_batch, 1)
+replace_one(
+    """    '''    for batch in paths.chunks(batch_size) {
+        control.wait_if_paused();
+        let committed_before_batch = committed;
+''',
+)""",
+    """    '''    for batch in paths.chunks(batch_size) {
+        if let Some(control) = control {
+            control.wait_if_paused();
+        }
+        let committed_before_batch = committed;
+''',
+)""",
+    "visual batch pause replacement",
+)
 
-old_decode = '''    \'\'\'\'                .filter_map(|path| {\n                    control.wait_if_paused();\n                    let _ = tx.send(WorkerMessage::CurrentFile(\n                        path.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_owned(),\n                    ));\n                    let result = decode_image(path).map(|image| {\n\'\'\',\n)'''
-new_decode = '''    \'\'\'\'                .filter_map(|path| {\n                    if let Some(control) = control {\n                        control.wait_if_paused();\n                    }\n                    let _ = tx.send(WorkerMessage::CurrentFile(\n                        path.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_owned(),\n                    ));\n                    let result = decode_image(path).map(|image| {\n\'\'\',\n)'''
-if new_decode not in text:
-    if text.count(old_decode) != 1:
-        raise SystemExit(f"visual decode pause replacement count={text.count(old_decode)}")
-    text = text.replace(old_decode, new_decode, 1)
+replace_one(
+    """    '''                .filter_map(|path| {
+                    control.wait_if_paused();
+                    let _ = tx.send(WorkerMessage::CurrentFile(
+                        path.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_owned(),
+                    ));
+                    let result = decode_image(path).map(|image| {
+''',
+)""",
+    """    '''                .filter_map(|path| {
+                    if let Some(control) = control {
+                        control.wait_if_paused();
+                    }
+                    let _ = tx.send(WorkerMessage::CurrentFile(
+                        path.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_owned(),
+                    ));
+                    let result = decode_image(path).map(|image| {
+''',
+)""",
+    "visual decode pause replacement",
+)
 
-# After v8, only the similarity-search descriptor-upgrade call remains in four-arg form.
-anchor = '''# build_visual_descriptors signature/pause.\n'''
-addition = '''replace_once(\n    "src/indexer.rs",\n    \'\'\'        build_visual_descriptors(&mut conn, &missing_visual, indexing_settings, tx)?;\n\'\'\',\n    \'\'\'        build_visual_descriptors(&mut conn, &missing_visual, indexing_settings, None, tx)?;\n\'\'\',\n)\n'''
+# v8 changes the rescan replacement to replace_first, leaving the second four-argument
+# call (similarity-search backfill) untouched. Patch that remaining call after the
+# rescan replacement has executed.
+anchor = "# build_visual_descriptors signature/pause.\n"
+addition = """replace_once(
+    "src/indexer.rs",
+    '''        build_visual_descriptors(&mut conn, &missing_visual, indexing_settings, tx)?;
+''',
+    '''        build_visual_descriptors(&mut conn, &missing_visual, indexing_settings, None, tx)?;
+''',
+)
+"""
 if addition not in text:
     if text.count(anchor) != 1:
         raise SystemExit(f"visual helper anchor count={text.count(anchor)}")
