@@ -27,6 +27,7 @@ jobs:
         run: |
           python scripts/fix_ui_stabilization_patch_v2.py
           python scripts/fix_ui_stabilization_patch_v3.py
+          python scripts/fix_ui_stabilization_patch_v4.py
 
       - name: Apply alpha4 integration
         run: python scripts/apply_ui_stabilization_alpha4.py
