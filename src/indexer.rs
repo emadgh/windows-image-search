@@ -143,7 +143,10 @@ pub enum WorkerMessage {
     IndexedBatch(Vec<ImageSummary>),
     RemovedPaths(Vec<PathBuf>),
     SimilarityResults(Vec<ImageSummary>),
+    RootCounts(HashMap<PathBuf, (usize, usize)>),
+    Warning(String),
     Error(String),
+    SearchIdle,
     Idle,
 }
 
@@ -265,6 +268,7 @@ fn incremental_update(
     let mut removed_targets = Vec::<PathBuf>::new();
 
     for changed in unique_paths {
+        control.wait_if_paused();
         let Some(root) = indexed_root_for_path(&changed, roots) else {
             continue;
         };
@@ -279,6 +283,7 @@ fn incremental_update(
                     .into_iter()
                     .filter_entry(|entry| entry.file_name() != portable::INDEX_DIR_NAME)
                 {
+                    control.wait_if_paused();
                     match entry {
                         Ok(entry)
                             if entry.file_type().is_file() && is_supported_image(entry.path()) =>
@@ -300,8 +305,19 @@ fn incremental_update(
         }
     }
 
+    let discovery_generation = db::next_scan_generation(&conn)?;
+    let discovered_candidates: Vec<(PathBuf, PathBuf)> = candidates
+        .iter()
+        .map(|(path, root)| (root.clone(), path.clone()))
+        .collect();
+    if !discovered_candidates.is_empty() {
+        db::mark_discovered_paths_seen(&mut conn, discovery_generation, &discovered_candidates)?;
+    }
+
     let mut removed_paths = Vec::<PathBuf>::new();
     for target in removed_targets {
+        control.wait_if_paused();
+        let _ = db::delete_discovered_path_tree(&conn, &target)?;
         removed_paths.extend(db::delete_path_tree(&conn, &target)?);
     }
     removed_paths.sort();
@@ -310,9 +326,11 @@ fn incremental_update(
         portable::remove_absolute_paths(roots, &removed_paths)?;
         let _ = tx.send(WorkerMessage::RemovedPaths(removed_paths.clone()));
     }
+    let _ = tx.send(WorkerMessage::RootCounts(db::load_root_counts(db_path)?));
 
     let mut pending = Vec::<PendingImage>::new();
     for (path, root) in candidates {
+        control.wait_if_paused();
         let meta = match std::fs::metadata(&path) {
             Ok(meta) => meta,
             Err(_) => continue,
@@ -420,9 +438,8 @@ fn incremental_update(
                     match result {
                         Ok(value) => Some(value),
                         Err(err) => {
-                            let _ = tx.send(WorkerMessage::Error(format!(
-                                "Cannot decode changed image {}: {err:#}",
-                                item.path.display()
+                            let _ = tx.send(WorkerMessage::Warning(compact_decode_failure(
+                                &item.path, &err,
                             )));
                             None
                         }
@@ -493,6 +510,34 @@ fn incremental_update(
     Ok(())
 }
 
+fn compact_decode_failure(path: &Path, err: &anyhow::Error) -> String {
+    let detail = format!("{err:#}");
+    let lower = detail.to_ascii_lowercase();
+    let reason = if lower.contains("illegal start bytes")
+        || lower.contains("format error decoding jpeg")
+        || lower.contains("jpeg") && lower.contains("format error")
+    {
+        "invalid JPEG data"
+    } else if lower.contains("unexpected eof")
+        || lower.contains("unexpected end")
+        || lower.contains("end of file")
+        || lower.contains("truncated")
+    {
+        "truncated image"
+    } else if lower.contains("unsupported") {
+        "unsupported image format"
+    } else if lower.contains("permission denied") || lower.contains("access is denied") {
+        "access denied"
+    } else {
+        "decode error"
+    };
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("image");
+    format!("Decode failed: {name} — {reason}")
+}
+
 fn indexed_root_for_path<'a>(path: &Path, roots: &'a [PathBuf]) -> Option<&'a PathBuf> {
     portable::indexed_root_for_path(path, roots)
 }
@@ -519,6 +564,7 @@ fn rescan(
     let mut traversal_errors = 0usize;
     let mut prunable_roots = Vec::<PathBuf>::new();
     for root in roots {
+        control.wait_if_paused();
         if !root.exists() {
             traversal_errors += 1;
             let _ = tx.send(WorkerMessage::Error(format!(
@@ -534,6 +580,7 @@ fn rescan(
             .into_iter()
             .filter_entry(|entry| entry.file_name() != portable::INDEX_DIR_NAME)
         {
+            control.wait_if_paused();
             match entry {
                 Ok(entry) => {
                     if entry.file_type().is_file() && is_supported_image(entry.path()) {
@@ -572,12 +619,14 @@ fn rescan(
     let _ = tx.send(WorkerMessage::Status(format!(
         "Discovered {discovered_marked}/{total} image paths; checking index state…"
     )));
+    let _ = tx.send(WorkerMessage::RootCounts(db::load_root_counts(db_path)?));
     let mut pending = Vec::<PendingImage>::new();
 
     // Keep filesystem/SQLite state checks cheap and serialized, but move image
     // decoding + metadata extraction to a small worker pool below. Completed
     // batches are committed immediately so a crash does not discard the whole run.
     for (index, (root, path)) in candidates.iter().enumerate() {
+        control.wait_if_paused();
         let meta = match std::fs::metadata(path) {
             Ok(meta) => meta,
             Err(err) => {
@@ -639,10 +688,19 @@ fn rescan(
     let mut changed = 0usize;
 
     for batch in pending.chunks(batch_size) {
+        control.wait_if_paused();
         let prepared: Vec<PreparedImage> = pool.install(|| {
             batch
                 .par_iter()
                 .filter_map(|item| {
+                    control.wait_if_paused();
+                    let _ = tx.send(WorkerMessage::CurrentFile(
+                        item.path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or_default()
+                            .to_owned(),
+                    ));
                     let result = inspect_image(&item.path, &item.root).map(
                         |(
                             width,
@@ -801,6 +859,7 @@ fn rescan(
     }
 
     for root in roots {
+        control.wait_if_paused();
         if root.exists() {
             portable::replace_root_from_session(db_path, root)?;
         }
@@ -882,9 +941,9 @@ fn build_visual_descriptors(
                         )),
                         Err(err) => {
                             failed.fetch_add(1, Ordering::Relaxed);
-                            let _ = tx.send(WorkerMessage::Error(format!(
-                                "Cannot build visual descriptor for {}: {err:#}",
-                                path.display()
+                            let _ = tx.send(WorkerMessage::Warning(compact_decode_failure(
+                                path,
+                                &err,
                             )));
                             None
                         }
@@ -1032,6 +1091,7 @@ pub fn spawn_similarity_search(
     settings: SimilaritySettings,
     indexing_settings: IndexingSettings,
     embedding_service: EmbeddingService,
+    allow_descriptor_backfill: bool,
     tx: Sender<WorkerMessage>,
 ) {
     std::thread::spawn(move || {
@@ -1044,6 +1104,7 @@ pub fn spawn_similarity_search(
             settings,
             indexing_settings,
             &embedding_service,
+            allow_descriptor_backfill,
             &tx,
         ) {
             Ok(results) => {
@@ -1059,7 +1120,7 @@ pub fn spawn_similarity_search(
                 )));
             }
         }
-        let _ = tx.send(WorkerMessage::Idle);
+        let _ = tx.send(WorkerMessage::SearchIdle);
     });
 }
 
@@ -1174,19 +1235,26 @@ fn similarity_search(
     settings: SimilaritySettings,
     indexing_settings: IndexingSettings,
     embedding_service: &EmbeddingService,
+    allow_descriptor_backfill: bool,
     tx: &Sender<WorkerMessage>,
 ) -> Result<Vec<ImageSummary>> {
     let indexing_settings = indexing_settings.sanitized();
     let mut conn = db::open(db_path)?;
 
     let missing_visual = db::paths_missing_visual_descriptor(&conn)?;
-    if !missing_visual.is_empty() {
+    if !missing_visual.is_empty() && allow_descriptor_backfill {
         let _ = tx.send(WorkerMessage::Status(format!(
             "Upgrading texture/color index: {} image{}…",
             missing_visual.len(),
             if missing_visual.len() == 1 { "" } else { "s" }
         )));
         build_visual_descriptors(&mut conn, &missing_visual, indexing_settings, None, tx)?;
+    } else if !missing_visual.is_empty() {
+        let _ = tx.send(WorkerMessage::Status(format!(
+            "Searching committed index; {} pending descriptor{} skipped while indexing is paused",
+            missing_visual.len(),
+            if missing_visual.len() == 1 { "" } else { "s" }
+        )));
     }
 
     let query_image = decode_image(query_path)?;
@@ -1751,6 +1819,19 @@ mod tests {
         control.resume();
         rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
         assert!(!control.is_paused());
+    }
+
+    #[test]
+    fn compact_decode_failure_hides_nested_decoder_chain() {
+        let err = anyhow::anyhow!(
+            "Format error decoding Jpeg: Error parsing image. Illegal start bytes:3842"
+        );
+        let message = compact_decode_failure(Path::new("R:/tiles/_1791925316.jpg"), &err);
+        assert_eq!(
+            message,
+            "Decode failed: _1791925316.jpg — invalid JPEG data"
+        );
+        assert!(!message.contains("Illegal start bytes"));
     }
 
     #[test]
