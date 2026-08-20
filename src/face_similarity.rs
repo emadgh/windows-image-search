@@ -131,8 +131,10 @@ pub fn load_query(root: &Path, face_id: &str) -> Result<FaceSimilarityQuery> {
         .optional()?;
     let (image_path, model_id, model_version, schema_version, alignment_revision, dimension, blob) =
         row.context("query face has no current compatible embedding")?;
-    let dimension = usize::try_from(dimension).context("query face embedding dimension is invalid")?;
-    let values = decode_embedding(&blob, dimension).context("query face embedding blob is corrupt")?;
+    let dimension =
+        usize::try_from(dimension).context("query face embedding dimension is invalid")?;
+    let values =
+        decode_embedding(&blob, dimension).context("query face embedding blob is corrupt")?;
     validate_normalized_embedding(&values)?;
 
     Ok(FaceSimilarityQuery {
@@ -179,12 +181,8 @@ pub fn search_available_roots(
         let mut cursor: Option<String> = None;
 
         loop {
-            let batch = load_compatible_batch(
-                &conn,
-                cursor.as_deref(),
-                &query.revision,
-                READ_BATCH_SIZE,
-            )?;
+            let batch =
+                load_compatible_batch(&conn, cursor.as_deref(), &query.revision, READ_BATCH_SIZE)?;
             if batch.is_empty() {
                 break;
             }
@@ -199,11 +197,9 @@ pub fn search_available_roots(
                     report.invalid_embeddings_skipped += 1;
                     continue;
                 }
-                let similarity = face_embedding::cosine_similarity_normalized(
-                    &query.values,
-                    &row.values,
-                )?
-                .clamp(-1.0, 1.0);
+                let similarity =
+                    face_embedding::cosine_similarity_normalized(&query.values, &row.values)?
+                        .clamp(-1.0, 1.0);
                 let absolute = match portable::absolute_source_path(root, &row.image_path) {
                     Ok(path) => path,
                     Err(_) => continue,
@@ -235,8 +231,12 @@ fn open_read_only_root(root: &Path) -> Result<Connection> {
     if !db_path.is_file() {
         bail!("portable index does not exist: {}", db_path.display());
     }
-    Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .with_context(|| format!("opening portable face index read-only {}", db_path.display()))
+    Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).with_context(|| {
+        format!(
+            "opening portable face index read-only {}",
+            db_path.display()
+        )
+    })
 }
 
 fn library_id(conn: &Connection) -> Result<String> {
@@ -442,7 +442,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("wis-face-search-{label}-{}-{nonce}", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "wis-face-search-{label}-{}-{nonce}",
+            std::process::id()
+        ))
     }
 
     fn setup_root(label: &str, library: &str) -> PathBuf {
@@ -508,16 +511,8 @@ mod tests {
             &detections,
         )
         .unwrap();
-        let candidates = face_embedding_store::candidate_batch(
-            &conn,
-            None,
-            model_id,
-            "1",
-            2,
-            1,
-            32,
-        )
-        .unwrap();
+        let candidates =
+            face_embedding_store::candidate_batch(&conn, None, model_id, "1", 2, 1, 32).unwrap();
         for (face, vector) in stored.iter().zip(vectors.iter()) {
             let candidate = candidates
                 .iter()
@@ -544,31 +539,16 @@ mod tests {
         let wrong_root = setup_root("wrong", "lib-wrong");
         let missing_root = temp_root("missing");
 
-        let query_face = add_image_faces(
-            &query_root,
-            "query.jpg",
-            &[vec![1.0, 0.0]],
-            "embedder",
-        )
-        .remove(0);
+        let query_face =
+            add_image_faces(&query_root, "query.jpg", &[vec![1.0, 0.0]], "embedder").remove(0);
         add_image_faces(
             &people_root,
             "person.jpg",
             &[vec![0.99, 0.01], vec![0.8, 0.2]],
             "embedder",
         );
-        add_image_faces(
-            &people_root,
-            "far.jpg",
-            &[vec![0.0, 1.0]],
-            "embedder",
-        );
-        add_image_faces(
-            &wrong_root,
-            "wrong.jpg",
-            &[vec![1.0, 0.0]],
-            "other-model",
-        );
+        add_image_faces(&people_root, "far.jpg", &[vec![0.0, 1.0]], "embedder");
+        add_image_faces(&wrong_root, "wrong.jpg", &[vec![1.0, 0.0]], "other-model");
 
         let query = load_query(&query_root, &query_face).unwrap();
         let report = search_available_roots(
@@ -589,7 +569,10 @@ mod tests {
         assert_eq!(report.roots_searched, 3);
         assert_eq!(report.roots_unavailable, 1);
         assert_eq!(report.matches.len(), 2);
-        assert_eq!(report.matches[0].relative_image_path, PathBuf::from("person.jpg"));
+        assert_eq!(
+            report.matches[0].relative_image_path,
+            PathBuf::from("person.jpg")
+        );
         assert!(report.matches[0].similarity > report.matches[1].similarity);
         assert!(report.matches.iter().all(|item| item.face_id != query_face));
 
@@ -602,13 +585,8 @@ mod tests {
     fn stale_detection_revision_is_excluded() {
         let query_root = setup_root("stale-query", "lib-a");
         let candidate_root = setup_root("stale-candidate", "lib-b");
-        let query_face = add_image_faces(
-            &query_root,
-            "query.jpg",
-            &[vec![1.0, 0.0]],
-            "embedder",
-        )
-        .remove(0);
+        let query_face =
+            add_image_faces(&query_root, "query.jpg", &[vec![1.0, 0.0]], "embedder").remove(0);
         let candidate_face = add_image_faces(
             &candidate_root,
             "candidate.jpg",
@@ -641,13 +619,8 @@ mod tests {
         let query_root = setup_root("tie-query", "lib-query");
         let root_b = setup_root("tie-b", "lib-b");
         let root_a = setup_root("tie-a", "lib-a");
-        let query_face = add_image_faces(
-            &query_root,
-            "query.jpg",
-            &[vec![1.0, 0.0]],
-            "embedder",
-        )
-        .remove(0);
+        let query_face =
+            add_image_faces(&query_root, "query.jpg", &[vec![1.0, 0.0]], "embedder").remove(0);
         add_image_faces(&root_b, "b.jpg", &[vec![1.0, 0.0]], "embedder");
         add_image_faces(&root_a, "a.jpg", &[vec![1.0, 0.0]], "embedder");
 
