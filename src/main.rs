@@ -1,6 +1,7 @@
 mod ann;
 mod db;
 mod embedding;
+mod face_benchmark;
 mod face_detection;
 mod face_pipeline;
 #[cfg(test)]
@@ -39,6 +40,8 @@ enum StartupMode {
     LibraryProfile,
     MaterialEval(PathBuf),
     MaterialTextureBenchmark(usize),
+    FaceBenchmark(PathBuf),
+    FaceBenchmarkValidate(PathBuf),
 }
 
 fn app_paths() -> Result<(PathBuf, PathBuf)> {
@@ -121,6 +124,24 @@ fn startup_mode() -> StartupMode {
         if arg == "--benchmark-library-profile" {
             return StartupMode::LibraryProfile;
         }
+        if let Some(value) = arg.strip_prefix("--benchmark-face=") {
+            if !value.trim().is_empty() {
+                return StartupMode::FaceBenchmark(PathBuf::from(value));
+            }
+        }
+        if arg == "--benchmark-face" {
+            return StartupMode::FaceBenchmark(args.next().map(PathBuf::from).unwrap_or_default());
+        }
+        if let Some(value) = arg.strip_prefix("--validate-face-benchmark=") {
+            if !value.trim().is_empty() {
+                return StartupMode::FaceBenchmarkValidate(PathBuf::from(value));
+            }
+        }
+        if arg == "--validate-face-benchmark" {
+            return StartupMode::FaceBenchmarkValidate(
+                args.next().map(PathBuf::from).unwrap_or_default(),
+            );
+        }
         if let Some(value) = arg.strip_prefix("--benchmark-material-eval=") {
             if !value.trim().is_empty() {
                 return StartupMode::MaterialEval(PathBuf::from(value));
@@ -174,6 +195,10 @@ fn material_eval_report_path(db_path: &Path) -> PathBuf {
 
 fn material_texture_benchmark_report_path(db_path: &Path) -> PathBuf {
     benchmark_report_path(db_path, "material-texture")
+}
+
+fn face_benchmark_report_path(db_path: &Path) -> PathBuf {
+    benchmark_report_path(db_path, "face")
 }
 
 fn benchmark_report_path(db_path: &Path, label: &str) -> PathBuf {
@@ -304,6 +329,24 @@ fn main() -> eframe::Result<()> {
                 "material texture",
             ),
             Err(err) => benchmark_failed("Material texture benchmark", &err),
+        }
+        return Ok(());
+    }
+
+    if let StartupMode::FaceBenchmarkValidate(manifest_path) = &mode {
+        match face_benchmark::validate_manifest(manifest_path) {
+            Ok(report) => println!("{report}"),
+            Err(err) => benchmark_failed("Face benchmark manifest validation", &err),
+        }
+        return Ok(());
+    }
+
+    if let StartupMode::FaceBenchmark(manifest_path) = &mode {
+        match face_benchmark::benchmark(manifest_path) {
+            Ok(report) => {
+                write_benchmark_report(&face_benchmark_report_path(&db_path), &report, "face")
+            }
+            Err(err) => benchmark_failed("Face benchmark", &err),
         }
         return Ok(());
     }

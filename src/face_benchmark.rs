@@ -31,9 +31,7 @@ impl NormalizedBox {
             || self.x + self.width > 1.000_001
             || self.y + self.height > 1.000_001
         {
-            bail!(
-                "line {line}: face box must be positive normalized coordinates inside [0,1]"
-            );
+            bail!("line {line}: face box must be positive normalized coordinates inside [0,1]");
         }
         Ok(self)
     }
@@ -50,7 +48,9 @@ impl ModelSourceMode {
         match value.trim().to_ascii_lowercase().as_str() {
             "bundled" => Ok(Self::Bundled),
             "external" => Ok(Self::External),
-            other => bail!("line {line}: model source mode must be bundled or external, got {other:?}"),
+            other => {
+                bail!("line {line}: model source mode must be bundled or external, got {other:?}")
+            }
         }
     }
 
@@ -235,7 +235,11 @@ pub fn load_manifest(path: &Path) -> Result<FaceBenchmarkManifest> {
             continue;
         }
         let columns: Vec<&str> = raw.split('\t').map(str::trim).collect();
-        let kind = columns.first().copied().unwrap_or_default().to_ascii_lowercase();
+        let kind = columns
+            .first()
+            .copied()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
         match kind.as_str() {
             "model" => {
                 expect_columns(&columns, 9, line, "model")?;
@@ -286,7 +290,8 @@ pub fn load_manifest(path: &Path) -> Result<FaceBenchmarkManifest> {
                 let query_id = required(columns[1], line, "query face id")?.to_owned();
                 let query_person = required(columns[2], line, "query person id")?.to_owned();
                 let candidate_id = required(columns[3], line, "candidate face id")?.to_owned();
-                let candidate_person = required(columns[4], line, "candidate person id")?.to_owned();
+                let candidate_person =
+                    required(columns[4], line, "candidate person id")?.to_owned();
                 if query_id == candidate_id {
                     bail!("line {line}: identity pair cannot compare a face to itself");
                 }
@@ -367,11 +372,7 @@ fn evaluate_detection(manifest: &FaceBenchmarkManifest, iou_threshold: f32) -> D
             .get(image)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        let mut predictions = manifest
-            .predictions
-            .get(image)
-            .cloned()
-            .unwrap_or_default();
+        let mut predictions = manifest.predictions.get(image).cloned().unwrap_or_default();
         predictions.sort_by(|left, right| {
             right
                 .confidence
@@ -817,7 +818,9 @@ mod tests {
         );
         let path = temp_manifest("identity", &content);
         let manifest = load_manifest(&path).unwrap();
-        let metrics = evaluate_identity(&manifest.identity_pairs).unwrap().unwrap();
+        let metrics = evaluate_identity(&manifest.identity_pairs)
+            .unwrap()
+            .unwrap();
         assert_eq!(metrics.queries, 2);
         assert_eq!(metrics.recall_at_1, 0.5);
         assert_eq!(metrics.recall_at_5, 1.0);
@@ -846,10 +849,7 @@ mod tests {
 
     #[test]
     fn malformed_face_reference_is_rejected() {
-        let content = format!(
-            "{}gt\tmissing\t0.1\t0.1\t0.2\t0.2\n",
-            model()
-        );
+        let content = format!("{}gt\tmissing\t0.1\t0.1\t0.2\t0.2\n", model());
         let path = temp_manifest("missing-image", &content);
         let error = load_manifest(&path).unwrap_err().to_string();
         assert!(error.contains("undeclared image"));
