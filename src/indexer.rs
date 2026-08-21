@@ -857,11 +857,26 @@ fn rescan(
         }
     }
 
-    for root in roots {
-        control.wait_if_paused();
-        if root.exists() {
-            portable::replace_root_from_session(db_path, root)?;
+    if removed > 0 {
+        let _ = tx.send(WorkerMessage::Status(format!(
+            "Finalizing portable indexes after removing {removed} stale image{}…",
+            if removed == 1 { "" } else { "s" }
+        )));
+        for root in roots {
+            control.wait_if_paused();
+            if root.exists() {
+                let _ = tx.send(WorkerMessage::Status(format!(
+                    "Portable cleanup sync: {}",
+                    root.display()
+                )));
+                portable::replace_root_from_session(db_path, root)?;
+            }
         }
+    } else {
+        let _ = tx.send(WorkerMessage::Status(
+            "Portable indexes already synchronized incrementally; skipping redundant full-root rewrite"
+                .to_owned(),
+        ));
     }
 
     let _ = tx.send(WorkerMessage::Status(format!(
@@ -1008,6 +1023,7 @@ fn build_embeddings(
 
     let total = paths.len();
     let batch_size = indexing_settings.batch_size;
+    let batch_total = total.div_ceil(batch_size);
     for (batch_index, batch) in paths.chunks(batch_size).enumerate() {
         control.wait_if_paused();
         let input_paths: Vec<PathBuf> = batch
@@ -1030,6 +1046,13 @@ fn build_embeddings(
                     .to_owned(),
             ));
         }
+        let batch_number = batch_index + 1;
+        let _ = tx.send(WorkerMessage::Status(format!(
+            "CLIP batch {batch_number}/{batch_total}: embedding {} image{} on {}…",
+            batch.len(),
+            if batch.len() == 1 { "" } else { "s" },
+            indexing_settings.clip_execution_provider.label()
+        )));
         let response = embedding_service
             .embed_with_provider(
                 input_paths,
@@ -1065,6 +1088,11 @@ fn build_embeddings(
             let _ = tx.send(WorkerMessage::Status(status));
         }
 
+        let _ = tx.send(WorkerMessage::Status(format!(
+            "CLIP batch {batch_number}/{batch_total}: inference complete; committing {} embedding{}…",
+            response.embeddings.len(),
+            if response.embeddings.len() == 1 { "" } else { "s" }
+        )));
         {
             let transaction = conn.transaction()?;
             for (path, embedding) in batch.iter().zip(response.embeddings.iter()) {
@@ -1074,6 +1102,9 @@ fn build_embeddings(
         }
         portable::sync_paths_from_session(conn, batch)?;
         let done = ((batch_index + 1) * batch_size).min(total);
+        let _ = tx.send(WorkerMessage::Status(format!(
+            "CLIP batch {batch_number}/{batch_total}: committed and synced ({done}/{total})"
+        )));
         let _ = tx.send(WorkerMessage::Progress { done, total });
         let _ = tx.send(WorkerMessage::Status(if prefer_thumbnails {
             format!("Building CLIP index from cached thumbnails: {done}/{total}")
