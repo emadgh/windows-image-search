@@ -915,7 +915,7 @@ impl ImageSearchApp {
                 );
                 let logical_threads = settings::logical_parallelism();
                 ui.small(format!(
-                    "Detected {logical_threads} logical CPU thread{}. Safe defaults: Decode 2 / CLIP up to 4 / Batch 16 / Device CPU.",
+                    "Detected {logical_threads} logical CPU thread{}. Safe defaults: Decode 2 / CLIP up to 4 / Batch 16 / Device CPU / Max file 256 MiB.",
                     if logical_threads == 1 { "" } else { "s" }
                 ));
                 ui.add_enabled_ui(!self.busy, |ui| {
@@ -968,7 +968,27 @@ impl ImageSearchApp {
                         )
                         .changed();
 
-                    if decode_changed || clip_changed || provider_changed || batch_changed {
+                    let max_file_size_changed = ui
+                        .add(
+                            egui::Slider::new(
+                                &mut self.indexing_settings.max_file_size_mib,
+                                1..=settings::MAX_FILE_SIZE_MIB,
+                            )
+                            .logarithmic(true)
+                            .text("Maximum source file size (MiB)"),
+                        )
+                        .changed();
+                    ui.small(format!(
+                        "Files larger than {} MiB are skipped before decode, metadata extraction and CLIP, regardless of extension.",
+                        self.indexing_settings.max_file_size_mib
+                    ));
+
+                    if decode_changed
+                        || clip_changed
+                        || provider_changed
+                        || batch_changed
+                        || max_file_size_changed
+                    {
                         self.indexing_settings = self.indexing_settings.sanitized();
                         save_performance_settings = true;
                     }
