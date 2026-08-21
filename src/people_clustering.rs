@@ -1061,6 +1061,19 @@ mod tests {
             .collect()
     }
 
+    fn test_dir(label: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "windows-image-search-people-{label}-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
     fn test_root(base: &Path, name: &str, library_id: &str) -> PathBuf {
         let root = base.join(name);
         std::fs::create_dir_all(portable::index_dir(&root)).unwrap();
@@ -1189,9 +1202,9 @@ mod tests {
 
     #[test]
     fn persisted_incremental_update_attaches_new_face_to_existing_person() {
-        let dir = tempfile::tempdir().unwrap();
-        let session = dir.path().join("session.sqlite3");
-        let root = test_root(dir.path(), "root", "library-a");
+        let dir = test_dir("attach");
+        let session = dir.join("session.sqlite3");
+        let root = test_root(&dir, "root", "library-a");
         insert_test_face(&root, "alice-1", unit(1.0, 0.0, 0.0));
         insert_test_face(&root, "alice-2", unit(0.99, 0.02, 0.0));
         let options = PeopleClusteringOptions {
@@ -1217,13 +1230,14 @@ mod tests {
                 .and_then(|member| member.person_id.as_deref()),
             Some(original.as_str())
         );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn persisted_incremental_update_promotes_old_outlier_with_new_matching_face() {
-        let dir = tempfile::tempdir().unwrap();
-        let session = dir.path().join("session.sqlite3");
-        let root = test_root(dir.path(), "root", "library-a");
+        let dir = test_dir("promote");
+        let session = dir.join("session.sqlite3");
+        let root = test_root(&dir, "root", "library-a");
         insert_test_face(&root, "alice-1", unit(1.0, 0.0, 0.0));
         insert_test_face(&root, "alice-2", unit(0.99, 0.02, 0.0));
         insert_test_face(&root, "carol-1", unit(0.0, 0.0, 1.0));
@@ -1254,13 +1268,14 @@ mod tests {
         assert!(!carol1.is_outlier && !carol2.is_outlier);
         assert_eq!(carol1.person_id, carol2.person_id);
         assert_eq!(persisted_clusters(&session).len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn changed_threshold_forces_full_rebuild_instead_of_mixing_snapshots() {
-        let dir = tempfile::tempdir().unwrap();
-        let session = dir.path().join("session.sqlite3");
-        let root = test_root(dir.path(), "root", "library-a");
+        let dir = test_dir("threshold");
+        let session = dir.join("session.sqlite3");
+        let root = test_root(&dir, "root", "library-a");
         insert_test_face(&root, "p1", unit(1.0, 0.0, 0.0));
         insert_test_face(&root, "p2", unit(0.90, 0.435, 0.0));
         run(
@@ -1296,6 +1311,8 @@ mod tests {
         let conn = crate::db::open(&session).unwrap();
         let state = people_store::load_state(&conn).unwrap().unwrap();
         assert!((state.similarity_threshold - 0.95).abs() < 1e-6);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
