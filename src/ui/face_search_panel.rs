@@ -194,17 +194,29 @@ impl ImageSearchApp {
         }
     }
 
-    fn refresh_face_suggestions(&mut self) {
+    pub(super) fn refresh_face_suggestions(&mut self) {
         if self.face_search_ui.loading {
             return;
         }
         let roots = self.roots.clone();
+        let session_db_path = self.db_path.clone();
         let tx = self.face_search_ui.tx.clone();
         self.face_search_ui.loading = true;
-        self.status = "Loading searchable faces from portable indexes…".to_owned();
+        self.status = "Loading People / searchable face suggestions…".to_owned();
         std::thread::spawn(move || {
-            let result = face_search::list_searchable_faces(&roots, DEFAULT_SUGGESTION_LIMIT)
-                .map_err(|err| format!("{err:#}"));
+            let result = face_search::list_people_representatives(
+                &session_db_path,
+                &roots,
+                DEFAULT_SUGGESTION_LIMIT,
+            )
+            .and_then(|people| {
+                if people.is_empty() {
+                    face_search::list_searchable_faces(&roots, DEFAULT_SUGGESTION_LIMIT)
+                } else {
+                    Ok(people)
+                }
+            })
+            .map_err(|err| format!("{err:#}"));
             let _ = tx.send(FaceSearchUiMessage::Suggestions(result));
         });
     }
@@ -355,7 +367,7 @@ impl ImageSearchApp {
                     if ui
                         .add_enabled(
                             !self.face_search_ui.loading && !self.busy,
-                            egui::Button::new("⟳ Refresh faces"),
+                            egui::Button::new("⟳ Refresh people/faces"),
                         )
                         .clicked()
                     {
@@ -384,7 +396,7 @@ impl ImageSearchApp {
                     "Choose a detected face already stored in the database, or load any image and choose one of its detected faces.",
                 );
                 ui.small(
-                    "Database suggestions are face instances, not unique people yet. People clustering will group repeated appearances in the next stage.",
+                    "Database suggestions prefer one representative per automatic Person group. Before a People snapshot exists, they fall back to individual face instances.",
                 );
 
                 ui.add_space(8.0);
@@ -432,7 +444,7 @@ impl ImageSearchApp {
                     if ui
                         .add_enabled(
                             selected.is_some() && !self.busy,
-                            egui::Button::new("Search selected database face"),
+                            egui::Button::new("Search selected person/face"),
                         )
                         .clicked()
                     {
@@ -507,7 +519,7 @@ impl ImageSearchApp {
                 }
 
                 ui.separator();
-                ui.strong("Searchable faces in database");
+                ui.strong("People / searchable faces in database");
                 if self.face_search_ui.suggestions.is_empty() && !self.face_search_ui.loading {
                     ui.vertical_centered(|ui| {
                         ui.add_space(28.0);
@@ -579,7 +591,14 @@ impl ImageSearchApp {
                                             if response.double_clicked() && !self.busy {
                                                 self.start_indexed_face_search(face.clone());
                                             }
-                                            ui.small(format!("{:.0}%", face.confidence * 100.0));
+                                            if let Some(group_size) = face.group_size {
+                                                ui.small(format!(
+                                                    "Person · {group_size} face{}",
+                                                    if group_size == 1 { "" } else { "s" }
+                                                ));
+                                            } else {
+                                                ui.small(format!("{:.0}%", face.confidence * 100.0));
+                                            }
                                             ui.small(
                                                 face.image_path
                                                     .file_name()

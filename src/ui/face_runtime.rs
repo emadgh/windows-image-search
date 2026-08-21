@@ -7,6 +7,7 @@ use crate::face_embedding_pipeline::{
 };
 use crate::face_pipeline::{FacePipelineEvent, FacePipelineOptions, FacePipelineSummary};
 use crate::face_sface_production;
+use crate::people_clustering::{self, PeopleClusteringOptions, PeopleClusteringSummary};
 use eframe::egui;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
@@ -15,6 +16,7 @@ use std::sync::mpsc::{Receiver, Sender};
 enum FaceRuntimeMessage {
     DetectionEvent(FacePipelineEvent),
     EmbeddingEvent(FaceEmbeddingPipelineEvent),
+    PeopleFinished(Result<PeopleClusteringSummary, String>),
     Finished(Result<(FacePipelineSummary, Option<FaceEmbeddingPipelineSummary>), String>),
 }
 
@@ -25,6 +27,7 @@ pub(super) struct FaceRuntimeState {
     rx: Receiver<FaceRuntimeMessage>,
     running: bool,
     run_after_base_index: bool,
+    run_people_after_embedding: bool,
 }
 
 impl FaceRuntimeState {
@@ -39,6 +42,7 @@ impl FaceRuntimeState {
             rx,
             running: false,
             run_after_base_index: false,
+            run_people_after_embedding: false,
         }
     }
 
@@ -65,12 +69,39 @@ impl ImageSearchApp {
                 FaceRuntimeMessage::EmbeddingEvent(event) => {
                     self.apply_face_embedding_pipeline_event(event)
                 }
+                FaceRuntimeMessage::PeopleFinished(result) => {
+                    self.face_runtime.running = false;
+                    self.progress = None;
+                    self.busy = self.indexing || self.searching;
+                    match result {
+                        Ok(summary) => {
+                            self.status = format!(
+                                "People clustering complete: {} group{}, {} clustered face{}, {} outlier{}, {} reused Person ID{}",
+                                summary.people_created,
+                                if summary.people_created == 1 { "" } else { "s" },
+                                summary.faces_clustered,
+                                if summary.faces_clustered == 1 { "" } else { "s" },
+                                summary.outliers,
+                                if summary.outliers == 1 { "" } else { "s" },
+                                summary.reused_person_ids,
+                                if summary.reused_person_ids == 1 { "" } else { "s" },
+                            );
+                            self.refresh_face_suggestions();
+                        }
+                        Err(error) => {
+                            self.status = "People clustering failed".to_owned();
+                            self.last_error = Some(error);
+                        }
+                    }
+                }
                 FaceRuntimeMessage::Finished(result) => {
                     self.face_runtime.running = false;
                     self.progress = None;
                     self.busy = self.indexing || self.searching;
                     match result {
                         Ok((detection, embedding)) => {
+                            let built_identity_embeddings = embedding.is_some();
+                            self.face_runtime.run_people_after_embedding = built_identity_embeddings;
                             if let Some(embedding) = embedding {
                                 self.status = format!(
                                     "Face pipeline complete: {} image{} processed, {} face{} found, {} embedding{} updated, {} total failure{}",
@@ -111,6 +142,14 @@ impl ImageSearchApp {
         if self.face_runtime.run_after_base_index && !self.busy && !self.face_runtime.running {
             self.face_runtime.run_after_base_index = false;
             self.start_face_pipeline();
+        }
+
+        if self.face_runtime.run_people_after_embedding
+            && !self.busy
+            && !self.face_runtime.running
+        {
+            self.face_runtime.run_people_after_embedding = false;
+            self.start_people_rebuild();
         }
     }
 
@@ -182,6 +221,51 @@ impl ImageSearchApp {
                 Err(err) => Err(format!("{err:#}")),
             };
             let _ = tx.send(FaceRuntimeMessage::Finished(result));
+        });
+    }
+
+    fn start_people_rebuild(&mut self) {
+        if self.face_runtime.running || self.busy {
+            return;
+        }
+        if !self.face_embedding_settings.configured() {
+            self.status = "SFace model is not configured".to_owned();
+            return;
+        }
+        if !self.face_embedding_settings.model_path.is_file() {
+            self.last_error = Some(format!(
+                "SFace model path is unavailable: {}",
+                self.face_embedding_settings.model_path.display()
+            ));
+            return;
+        }
+        if self.roots.is_empty() {
+            self.status = "No indexed roots available for People clustering".to_owned();
+            return;
+        }
+
+        let session_db_path = self.db_path.clone();
+        let roots = self.roots.clone();
+        let embedding_settings = self.face_embedding_settings.clone();
+        let tx = self.face_runtime.tx.clone();
+        self.face_runtime.running = true;
+        self.busy = true;
+        self.progress = None;
+        self.last_error = None;
+        self.status = "People: clustering current SFace embeddings…".to_owned();
+
+        std::thread::spawn(move || {
+            let result = face_sface_production::embedding_revision(&embedding_settings)
+                .and_then(|revision| {
+                    people_clustering::run(
+                        &session_db_path,
+                        &roots,
+                        &revision,
+                        PeopleClusteringOptions::default(),
+                    )
+                })
+                .map_err(|err| format!("{err:#}"));
+            let _ = tx.send(FaceRuntimeMessage::PeopleFinished(result));
         });
     }
 
@@ -374,6 +458,19 @@ impl ImageSearchApp {
             if ui.add_enabled(can_run, egui::Button::new(label)).clicked() {
                 self.start_face_pipeline();
             }
+
+            let can_rebuild_people = self.face_embedding_settings.configured()
+                && self.face_embedding_settings.model_path.is_file()
+                && !self.roots.is_empty();
+            if ui
+                .add_enabled(
+                    can_rebuild_people,
+                    egui::Button::new("Rebuild People groups from current embeddings"),
+                )
+                .clicked()
+            {
+                self.start_people_rebuild();
+            }
         });
 
         self.face_runtime.settings = self.face_runtime.settings.clone().sanitized();
@@ -387,7 +484,7 @@ impl ImageSearchApp {
         }
 
         if self.face_runtime.running {
-            ui.small("YuNet/SFace face pipeline is running in the background.");
+            ui.small("Face/People maintenance is running in the background.");
         } else if !self.face_runtime.settings.configured() {
             ui.small("No YuNet model configured. Face detection remains disabled.");
         } else if self.face_runtime.settings.model_path.is_file() {
