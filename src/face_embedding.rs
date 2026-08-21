@@ -15,6 +15,11 @@ const CROP_MARGIN: f32 = 0.18;
 pub trait FaceEmbedder: Send {
     fn model_id(&self) -> &'static str;
     fn model_version(&self) -> &'static str;
+
+    fn cache_revision(&self) -> String {
+        self.model_version().to_owned()
+    }
+
     fn input_size(&self) -> u32;
     fn embedding_dimension(&self) -> usize;
 

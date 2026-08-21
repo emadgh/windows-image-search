@@ -13,6 +13,7 @@ const READ_BATCH_SIZE: usize = 512;
 pub struct FaceEmbeddingRevision {
     pub model_id: String,
     pub model_version: String,
+    pub model_cache_revision: String,
     pub schema_version: i64,
     pub alignment_revision: i64,
     pub dimension: usize,
@@ -92,7 +93,7 @@ pub fn load_query(root: &Path, face_id: &str) -> Result<FaceSimilarityQuery> {
         .query_row(
             r#"
             SELECT f.image_path,
-                   e.model_id, e.model_version, e.schema_version,
+                   e.model_id, e.model_version, e.model_cache_revision, e.schema_version,
                    e.alignment_revision, e.dimension, e.embedding
             FROM face_embeddings e
             JOIN faces f ON f.face_id = e.face_id
@@ -103,11 +104,13 @@ pub fn load_query(root: &Path, face_id: &str) -> Result<FaceSimilarityQuery> {
               AND e.normalized = 1
               AND e.detector_id = f.detector_id
               AND e.detector_version = f.detector_version
+              AND e.detector_cache_revision = f.detector_cache_revision
               AND e.detection_schema_version = f.schema_version
               AND e.source_size = f.source_size
               AND e.source_modified = f.source_modified
               AND s.detector_id = f.detector_id
               AND s.detector_version = f.detector_version
+              AND s.detector_cache_revision = f.detector_cache_revision
               AND s.schema_version = f.schema_version
               AND s.source_size = f.source_size
               AND s.source_modified = f.source_modified
@@ -121,16 +124,25 @@ pub fn load_query(root: &Path, face_id: &str) -> Result<FaceSimilarityQuery> {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(3)?,
                     row.get::<_, i64>(4)?,
                     row.get::<_, i64>(5)?,
-                    row.get::<_, Vec<u8>>(6)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, Vec<u8>>(7)?,
                 ))
             },
         )
         .optional()?;
-    let (image_path, model_id, model_version, schema_version, alignment_revision, dimension, blob) =
-        row.context("query face has no current compatible embedding")?;
+    let (
+        image_path,
+        model_id,
+        model_version,
+        model_cache_revision,
+        schema_version,
+        alignment_revision,
+        dimension,
+        blob,
+    ) = row.context("query face has no current compatible embedding")?;
     let dimension =
         usize::try_from(dimension).context("query face embedding dimension is invalid")?;
     let values =
@@ -145,6 +157,7 @@ pub fn load_query(root: &Path, face_id: &str) -> Result<FaceSimilarityQuery> {
         revision: FaceEmbeddingRevision {
             model_id,
             model_version,
+            model_cache_revision,
             schema_version,
             alignment_revision,
             dimension,
@@ -272,24 +285,27 @@ fn load_compatible_batch(
         WHERE (?1 IS NULL OR f.face_id > ?1)
           AND e.model_id = ?2
           AND e.model_version = ?3
-          AND e.schema_version = ?4
-          AND e.alignment_revision = ?5
-          AND e.dimension = ?6
+          AND e.model_cache_revision = ?4
+          AND e.schema_version = ?5
+          AND e.alignment_revision = ?6
+          AND e.dimension = ?7
           AND e.normalized = 1
           AND e.detector_id = f.detector_id
           AND e.detector_version = f.detector_version
+              AND e.detector_cache_revision = f.detector_cache_revision
           AND e.detection_schema_version = f.schema_version
           AND e.source_size = f.source_size
           AND e.source_modified = f.source_modified
           AND s.detector_id = f.detector_id
           AND s.detector_version = f.detector_version
+              AND s.detector_cache_revision = f.detector_cache_revision
           AND s.schema_version = f.schema_version
           AND s.source_size = f.source_size
           AND s.source_modified = f.source_modified
           AND i.size = f.source_size
           AND i.modified = f.source_modified
         ORDER BY f.face_id
-        LIMIT ?7
+        LIMIT ?8
         "#,
     )?;
     let rows = stmt.query_map(
@@ -297,6 +313,7 @@ fn load_compatible_batch(
             after_face_id,
             revision.model_id,
             revision.model_version,
+            revision.model_cache_revision,
             revision.schema_version,
             revision.alignment_revision,
             revision.dimension as i64,
@@ -333,6 +350,7 @@ fn validate_query(query: &FaceSimilarityQuery) -> Result<()> {
     }
     if query.revision.model_id.trim().is_empty()
         || query.revision.model_version.trim().is_empty()
+        || query.revision.model_cache_revision.trim().is_empty()
         || query.revision.schema_version != face_embedding::SCHEMA_VERSION
         || query.revision.alignment_revision <= 0
         || query.revision.dimension == 0
@@ -597,6 +615,39 @@ mod tests {
         let conn = db::open(&portable::index_db_path(&candidate_root)).unwrap();
         conn.execute(
             "UPDATE faces SET detector_version = '2' WHERE face_id = ?1",
+            params![candidate_face],
+        )
+        .unwrap();
+
+        let query = load_query(&query_root, &query_face).unwrap();
+        let report = search_available_roots(
+            &[candidate_root.clone()],
+            &query,
+            FaceSimilarityOptions::default(),
+        )
+        .unwrap();
+        assert!(report.matches.is_empty());
+
+        let _ = std::fs::remove_dir_all(query_root);
+        let _ = std::fs::remove_dir_all(candidate_root);
+    }
+
+    #[test]
+    fn model_cache_revision_mismatch_is_excluded() {
+        let query_root = setup_root("cache-query", "lib-a");
+        let candidate_root = setup_root("cache-candidate", "lib-b");
+        let query_face =
+            add_image_faces(&query_root, "query.jpg", &[vec![1.0, 0.0]], "embedder").remove(0);
+        let candidate_face = add_image_faces(
+            &candidate_root,
+            "candidate.jpg",
+            &[vec![1.0, 0.0]],
+            "embedder",
+        )
+        .remove(0);
+        let conn = db::open(&portable::index_db_path(&candidate_root)).unwrap();
+        conn.execute(
+            "UPDATE face_embeddings SET model_cache_revision = 'different-weights' WHERE face_id = ?1",
             params![candidate_face],
         )
         .unwrap();

@@ -12,6 +12,7 @@ pub struct EmbeddingCandidate {
     pub landmarks: Vec<FaceLandmark>,
     pub detector_id: String,
     pub detector_version: String,
+    pub detector_cache_revision: String,
     pub detection_schema_version: i64,
     pub source_size: u64,
     pub source_modified: i64,
@@ -22,12 +23,14 @@ pub struct StoredFaceEmbedding {
     pub face_id: String,
     pub model_id: String,
     pub model_version: String,
+    pub model_cache_revision: String,
     pub schema_version: i64,
     pub alignment_revision: i64,
     pub dimension: usize,
     pub normalized: bool,
     pub detector_id: String,
     pub detector_version: String,
+    pub detector_cache_revision: String,
     pub detection_schema_version: i64,
     pub source_size: u64,
     pub source_modified: i64,
@@ -41,6 +44,7 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
             face_id TEXT PRIMARY KEY NOT NULL,
             model_id TEXT NOT NULL,
             model_version TEXT NOT NULL,
+            model_cache_revision TEXT NOT NULL DEFAULT '',
             schema_version INTEGER NOT NULL,
             alignment_revision INTEGER NOT NULL,
             dimension INTEGER NOT NULL,
@@ -48,6 +52,7 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
             embedding BLOB NOT NULL,
             detector_id TEXT NOT NULL,
             detector_version TEXT NOT NULL,
+            detector_cache_revision TEXT NOT NULL DEFAULT '',
             detection_schema_version INTEGER NOT NULL,
             source_size INTEGER NOT NULL,
             source_modified INTEGER NOT NULL,
@@ -61,6 +66,34 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
             ON face_embeddings(detector_id, detector_version, detection_schema_version);
         "#,
     )?;
+    ensure_column(
+        conn,
+        "face_embeddings",
+        "model_cache_revision",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        conn,
+        "face_embeddings",
+        "detector_cache_revision",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    conn.execute(
+        "UPDATE face_embeddings SET model_cache_revision = model_version WHERE model_cache_revision = ''",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE face_embeddings SET detector_cache_revision = detector_version WHERE detector_cache_revision = ''",
+        [],
+    )?;
+    conn.execute_batch(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_face_embeddings_model_cache_revision
+            ON face_embeddings(model_id, model_version, model_cache_revision, schema_version, alignment_revision);
+        CREATE INDEX IF NOT EXISTS idx_face_embeddings_detection_cache_revision
+            ON face_embeddings(detector_id, detector_version, detector_cache_revision, detection_schema_version);
+        "#,
+    )?;
     Ok(())
 }
 
@@ -71,7 +104,26 @@ pub fn count_pending(
     dimension: usize,
     alignment_revision: i64,
 ) -> Result<usize> {
+    count_pending_with_revision(
+        conn,
+        model_id,
+        model_version,
+        model_version,
+        dimension,
+        alignment_revision,
+    )
+}
+
+pub fn count_pending_with_revision(
+    conn: &Connection,
+    model_id: &str,
+    model_version: &str,
+    model_cache_revision: &str,
+    dimension: usize,
+    alignment_revision: i64,
+) -> Result<usize> {
     validate_model_revision(model_id, model_version, dimension, alignment_revision)?;
+    validate_cache_revision(model_cache_revision)?;
     let count = conn.query_row(
         r#"
         SELECT COUNT(*)
@@ -80,12 +132,14 @@ pub fn count_pending(
         WHERE e.face_id IS NULL
            OR e.model_id <> ?1
            OR e.model_version <> ?2
-           OR e.schema_version <> ?3
-           OR e.alignment_revision <> ?4
-           OR e.dimension <> ?5
+           OR e.model_cache_revision <> ?3
+           OR e.schema_version <> ?4
+           OR e.alignment_revision <> ?5
+           OR e.dimension <> ?6
            OR e.normalized <> 1
            OR e.detector_id <> f.detector_id
            OR e.detector_version <> f.detector_version
+           OR e.detector_cache_revision <> f.detector_cache_revision
            OR e.detection_schema_version <> f.schema_version
            OR e.source_size <> f.source_size
            OR e.source_modified <> f.source_modified
@@ -93,6 +147,7 @@ pub fn count_pending(
         params![
             model_id,
             model_version,
+            model_cache_revision,
             face_embedding::SCHEMA_VERSION,
             alignment_revision,
             dimension as i64,
@@ -111,14 +166,38 @@ pub fn candidate_batch(
     alignment_revision: i64,
     limit: usize,
 ) -> Result<Vec<EmbeddingCandidate>> {
+    candidate_batch_with_revision(
+        conn,
+        after_face_id,
+        model_id,
+        model_version,
+        model_version,
+        dimension,
+        alignment_revision,
+        limit,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn candidate_batch_with_revision(
+    conn: &Connection,
+    after_face_id: Option<&str>,
+    model_id: &str,
+    model_version: &str,
+    model_cache_revision: &str,
+    dimension: usize,
+    alignment_revision: i64,
+    limit: usize,
+) -> Result<Vec<EmbeddingCandidate>> {
     validate_model_revision(model_id, model_version, dimension, alignment_revision)?;
+    validate_cache_revision(model_cache_revision)?;
     let limit = limit.max(1);
     let mut stmt = conn.prepare(
         r#"
         SELECT f.face_id, f.image_path,
                f.bbox_x, f.bbox_y, f.bbox_width, f.bbox_height,
                f.landmarks, f.landmark_count,
-               f.detector_id, f.detector_version, f.schema_version,
+               f.detector_id, f.detector_version, f.detector_cache_revision, f.schema_version,
                f.source_size, f.source_modified
         FROM faces f
         LEFT JOIN face_embeddings e ON e.face_id = f.face_id
@@ -127,18 +206,20 @@ pub fn candidate_batch(
                e.face_id IS NULL
             OR e.model_id <> ?2
             OR e.model_version <> ?3
-            OR e.schema_version <> ?4
-            OR e.alignment_revision <> ?5
-            OR e.dimension <> ?6
+            OR e.model_cache_revision <> ?4
+            OR e.schema_version <> ?5
+            OR e.alignment_revision <> ?6
+            OR e.dimension <> ?7
             OR e.normalized <> 1
             OR e.detector_id <> f.detector_id
             OR e.detector_version <> f.detector_version
+            OR e.detector_cache_revision <> f.detector_cache_revision
             OR e.detection_schema_version <> f.schema_version
             OR e.source_size <> f.source_size
             OR e.source_modified <> f.source_modified
           )
         ORDER BY f.face_id
-        LIMIT ?7
+        LIMIT ?8
         "#,
     )?;
     let rows = stmt.query_map(
@@ -146,6 +227,7 @@ pub fn candidate_batch(
             after_face_id,
             model_id,
             model_version,
+            model_cache_revision,
             face_embedding::SCHEMA_VERSION,
             alignment_revision,
             dimension as i64,
@@ -169,9 +251,10 @@ pub fn candidate_batch(
                     .unwrap_or_default(),
                 detector_id: row.get(8)?,
                 detector_version: row.get(9)?,
-                detection_schema_version: row.get(10)?,
-                source_size: row.get::<_, i64>(11)?.max(0) as u64,
-                source_modified: row.get(12)?,
+                detector_cache_revision: row.get(10)?,
+                detection_schema_version: row.get(11)?,
+                source_size: row.get::<_, i64>(12)?.max(0) as u64,
+                source_modified: row.get(13)?,
             })
         },
     )?;
@@ -187,7 +270,29 @@ pub fn embedding_is_current(
     dimension: usize,
     alignment_revision: i64,
 ) -> Result<bool> {
+    embedding_is_current_with_revision(
+        conn,
+        face_id,
+        model_id,
+        model_version,
+        model_version,
+        dimension,
+        alignment_revision,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn embedding_is_current_with_revision(
+    conn: &Connection,
+    face_id: &str,
+    model_id: &str,
+    model_version: &str,
+    model_cache_revision: &str,
+    dimension: usize,
+    alignment_revision: i64,
+) -> Result<bool> {
     validate_model_revision(model_id, model_version, dimension, alignment_revision)?;
+    validate_cache_revision(model_cache_revision)?;
     let current = conn
         .query_row(
             r#"
@@ -197,12 +302,14 @@ pub fn embedding_is_current(
             WHERE e.face_id = ?1
               AND e.model_id = ?2
               AND e.model_version = ?3
-              AND e.schema_version = ?4
-              AND e.alignment_revision = ?5
-              AND e.dimension = ?6
+              AND e.model_cache_revision = ?4
+              AND e.schema_version = ?5
+              AND e.alignment_revision = ?6
+              AND e.dimension = ?7
               AND e.normalized = 1
               AND e.detector_id = f.detector_id
               AND e.detector_version = f.detector_version
+              AND e.detector_cache_revision = f.detector_cache_revision
               AND e.detection_schema_version = f.schema_version
               AND e.source_size = f.source_size
               AND e.source_modified = f.source_modified
@@ -212,6 +319,7 @@ pub fn embedding_is_current(
                 face_id,
                 model_id,
                 model_version,
+                model_cache_revision,
                 face_embedding::SCHEMA_VERSION,
                 alignment_revision,
                 dimension as i64,
@@ -230,7 +338,29 @@ pub fn replace_embedding(
     alignment_revision: i64,
     values: &[f32],
 ) -> Result<()> {
+    replace_embedding_with_revision(
+        conn,
+        candidate,
+        model_id,
+        model_version,
+        model_version,
+        alignment_revision,
+        values,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn replace_embedding_with_revision(
+    conn: &mut Connection,
+    candidate: &EmbeddingCandidate,
+    model_id: &str,
+    model_version: &str,
+    model_cache_revision: &str,
+    alignment_revision: i64,
+    values: &[f32],
+) -> Result<()> {
     validate_model_revision(model_id, model_version, values.len(), alignment_revision)?;
+    validate_cache_revision(model_cache_revision)?;
     if values.iter().any(|value| !value.is_finite()) {
         bail!("cannot persist a face embedding with non-finite values");
     }
@@ -251,9 +381,10 @@ pub fn replace_embedding(
               AND image_path = ?2
               AND detector_id = ?3
               AND detector_version = ?4
-              AND schema_version = ?5
-              AND source_size = ?6
-              AND source_modified = ?7
+              AND detector_cache_revision = ?5
+              AND schema_version = ?6
+              AND source_size = ?7
+              AND source_modified = ?8
         )
         "#,
         params![
@@ -261,6 +392,7 @@ pub fn replace_embedding(
             candidate.image_path.to_string_lossy().to_string(),
             candidate.detector_id,
             candidate.detector_version,
+            candidate.detector_cache_revision,
             candidate.detection_schema_version,
             candidate.source_size as i64,
             candidate.source_modified,
@@ -275,14 +407,15 @@ pub fn replace_embedding(
     tx.execute(
         r#"
         INSERT INTO face_embeddings(
-            face_id, model_id, model_version, schema_version, alignment_revision,
+            face_id, model_id, model_version, model_cache_revision, schema_version, alignment_revision,
             dimension, normalized, embedding,
-            detector_id, detector_version, detection_schema_version,
+            detector_id, detector_version, detector_cache_revision, detection_schema_version,
             source_size, source_modified, completed_at
-        ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8, ?9, ?10, ?11, ?12, unixepoch())
+        ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?9, ?10, ?11, ?12, ?13, ?14, unixepoch())
         ON CONFLICT(face_id) DO UPDATE SET
             model_id = excluded.model_id,
             model_version = excluded.model_version,
+            model_cache_revision = excluded.model_cache_revision,
             schema_version = excluded.schema_version,
             alignment_revision = excluded.alignment_revision,
             dimension = excluded.dimension,
@@ -290,6 +423,7 @@ pub fn replace_embedding(
             embedding = excluded.embedding,
             detector_id = excluded.detector_id,
             detector_version = excluded.detector_version,
+            detector_cache_revision = excluded.detector_cache_revision,
             detection_schema_version = excluded.detection_schema_version,
             source_size = excluded.source_size,
             source_modified = excluded.source_modified,
@@ -299,12 +433,14 @@ pub fn replace_embedding(
             candidate.face_id,
             model_id,
             model_version,
+            model_cache_revision,
             face_embedding::SCHEMA_VERSION,
             alignment_revision,
             values.len() as i64,
             blob,
             candidate.detector_id,
             candidate.detector_version,
+            candidate.detector_cache_revision,
             candidate.detection_schema_version,
             candidate.source_size as i64,
             candidate.source_modified,
@@ -318,17 +454,17 @@ pub fn load_embedding(conn: &Connection, face_id: &str) -> Result<Option<StoredF
     let row = conn
         .query_row(
             r#"
-            SELECT face_id, model_id, model_version, schema_version, alignment_revision,
+            SELECT face_id, model_id, model_version, model_cache_revision, schema_version, alignment_revision,
                    dimension, normalized, embedding,
-                   detector_id, detector_version, detection_schema_version,
+                   detector_id, detector_version, detector_cache_revision, detection_schema_version,
                    source_size, source_modified
             FROM face_embeddings
             WHERE face_id = ?1
             "#,
             params![face_id],
             |row| {
-                let dimension = row.get::<_, i64>(5)?.max(0) as usize;
-                let blob: Vec<u8> = row.get(7)?;
+                let dimension = row.get::<_, i64>(6)?.max(0) as usize;
+                let blob: Vec<u8> = row.get(8)?;
                 let values = decode_embedding(&blob, dimension).ok_or_else(|| {
                     rusqlite::Error::FromSqlConversionFailure(
                         blob.len(),
@@ -340,16 +476,18 @@ pub fn load_embedding(conn: &Connection, face_id: &str) -> Result<Option<StoredF
                     face_id: row.get(0)?,
                     model_id: row.get(1)?,
                     model_version: row.get(2)?,
-                    schema_version: row.get(3)?,
-                    alignment_revision: row.get(4)?,
+                    model_cache_revision: row.get(3)?,
+                    schema_version: row.get(4)?,
+                    alignment_revision: row.get(5)?,
                     dimension,
-                    normalized: row.get::<_, i64>(6)? != 0,
+                    normalized: row.get::<_, i64>(7)? != 0,
                     values,
-                    detector_id: row.get(8)?,
-                    detector_version: row.get(9)?,
-                    detection_schema_version: row.get(10)?,
-                    source_size: row.get::<_, i64>(11)?.max(0) as u64,
-                    source_modified: row.get(12)?,
+                    detector_id: row.get(9)?,
+                    detector_version: row.get(10)?,
+                    detector_cache_revision: row.get(11)?,
+                    detection_schema_version: row.get(12)?,
+                    source_size: row.get::<_, i64>(13)?.max(0) as u64,
+                    source_modified: row.get(14)?,
                 })
             },
         )
@@ -371,6 +509,28 @@ fn validate_model_revision(
     }
     if alignment_revision <= 0 {
         bail!("face alignment revision must be positive");
+    }
+    Ok(())
+}
+
+fn validate_cache_revision(cache_revision: &str) -> Result<()> {
+    if cache_revision.trim().is_empty() {
+        bail!("face embedding cache revision cannot be empty");
+    }
+    Ok(())
+}
+
+fn ensure_column(conn: &Connection, table: &str, column: &str, declaration: &str) -> Result<()> {
+    let exists = {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let mut rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        rows.any(|row| row.is_ok_and(|name| name == column))
+    };
+    if !exists {
+        conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {declaration}"),
+            [],
+        )?;
     }
     Ok(())
 }
@@ -483,6 +643,46 @@ mod tests {
         let stored = load_embedding(&conn, &candidate.face_id).unwrap().unwrap();
         assert_eq!(stored.values, values);
         assert!(stored.normalized);
+    }
+
+    #[test]
+    fn cache_revision_backfills_without_changing_model_version() {
+        let (mut conn, candidate) = connection_with_face();
+        let values = vec![0.6, 0.8];
+        replace_embedding_with_revision(
+            &mut conn,
+            &candidate,
+            "fake-embedder",
+            "1",
+            "weights-a",
+            1,
+            &values,
+        )
+        .unwrap();
+        assert!(embedding_is_current_with_revision(
+            &conn,
+            &candidate.face_id,
+            "fake-embedder",
+            "1",
+            "weights-a",
+            2,
+            1,
+        )
+        .unwrap());
+        assert!(!embedding_is_current_with_revision(
+            &conn,
+            &candidate.face_id,
+            "fake-embedder",
+            "1",
+            "weights-b",
+            2,
+            1,
+        )
+        .unwrap());
+        assert_eq!(
+            count_pending_with_revision(&conn, "fake-embedder", "1", "weights-b", 2, 1).unwrap(),
+            1
+        );
     }
 
     #[test]

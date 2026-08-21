@@ -13,6 +13,7 @@ pub struct StoredFace {
     pub ordinal: usize,
     pub detector_id: String,
     pub detector_version: String,
+    pub detector_cache_revision: String,
     pub confidence: f32,
     pub bbox: FaceBox,
     pub landmarks: Vec<FaceLandmark>,
@@ -23,6 +24,7 @@ pub struct DetectionState {
     pub image_path: PathBuf,
     pub detector_id: String,
     pub detector_version: String,
+    pub detector_cache_revision: String,
     pub schema_version: i64,
     pub source_size: u64,
     pub source_modified: i64,
@@ -39,6 +41,7 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
             image_path TEXT PRIMARY KEY NOT NULL,
             detector_id TEXT NOT NULL,
             detector_version TEXT NOT NULL,
+            detector_cache_revision TEXT NOT NULL DEFAULT '',
             schema_version INTEGER NOT NULL,
             source_size INTEGER NOT NULL,
             source_modified INTEGER NOT NULL,
@@ -56,6 +59,7 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
             face_ordinal INTEGER NOT NULL,
             detector_id TEXT NOT NULL,
             detector_version TEXT NOT NULL,
+            detector_cache_revision TEXT NOT NULL DEFAULT '',
             schema_version INTEGER NOT NULL,
             confidence REAL NOT NULL,
             bbox_x REAL NOT NULL,
@@ -86,6 +90,34 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
         END;
         "#,
     )?;
+    ensure_column(
+        conn,
+        "face_detection_state",
+        "detector_cache_revision",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        conn,
+        "faces",
+        "detector_cache_revision",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    conn.execute(
+        "UPDATE face_detection_state SET detector_cache_revision = detector_version WHERE detector_cache_revision = ''",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE faces SET detector_cache_revision = detector_version WHERE detector_cache_revision = ''",
+        [],
+    )?;
+    conn.execute_batch(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_faces_detector_cache_revision
+            ON faces(detector_id, detector_version, detector_cache_revision, schema_version);
+        CREATE INDEX IF NOT EXISTS idx_face_detection_cache_revision
+            ON face_detection_state(detector_id, detector_version, detector_cache_revision, schema_version);
+        "#,
+    )?;
     Ok(())
 }
 
@@ -98,6 +130,27 @@ pub fn detection_is_current(
     detector_id: &str,
     detector_version: &str,
 ) -> Result<bool> {
+    detection_is_current_with_revision(
+        conn,
+        image_path,
+        source_size,
+        source_modified,
+        detector_id,
+        detector_version,
+        detector_version,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn detection_is_current_with_revision(
+    conn: &Connection,
+    image_path: &Path,
+    source_size: u64,
+    source_modified: i64,
+    detector_id: &str,
+    detector_version: &str,
+    detector_cache_revision: &str,
+) -> Result<bool> {
     let current = conn.query_row(
         r#"
         SELECT 1
@@ -105,15 +158,17 @@ pub fn detection_is_current(
         WHERE image_path = ?1
           AND detector_id = ?2
           AND detector_version = ?3
-          AND schema_version = ?4
-          AND source_size = ?5
-          AND source_modified = ?6
+          AND detector_cache_revision = ?4
+          AND schema_version = ?5
+          AND source_size = ?6
+          AND source_modified = ?7
         LIMIT 1
         "#,
         params![
             image_path.to_string_lossy().to_string(),
             detector_id,
             detector_version,
+            detector_cache_revision,
             face_detection::SCHEMA_VERSION,
             source_size as i64,
             source_modified,
@@ -132,6 +187,15 @@ pub fn paths_needing_detection(
     detector_id: &str,
     detector_version: &str,
 ) -> Result<Vec<PathBuf>> {
+    paths_needing_detection_with_revision(conn, detector_id, detector_version, detector_version)
+}
+
+pub fn paths_needing_detection_with_revision(
+    conn: &Connection,
+    detector_id: &str,
+    detector_version: &str,
+    detector_cache_revision: &str,
+) -> Result<Vec<PathBuf>> {
     let mut stmt = conn.prepare(
         r#"
         SELECT images.path
@@ -140,7 +204,8 @@ pub fn paths_needing_detection(
         WHERE state.image_path IS NULL
            OR state.detector_id <> ?1
            OR state.detector_version <> ?2
-           OR state.schema_version <> ?3
+           OR state.detector_cache_revision <> ?3
+           OR state.schema_version <> ?4
            OR state.source_size <> images.size
            OR state.source_modified <> images.modified
         ORDER BY images.path COLLATE NOCASE
@@ -150,6 +215,7 @@ pub fn paths_needing_detection(
         params![
             detector_id,
             detector_version,
+            detector_cache_revision,
             face_detection::SCHEMA_VERSION
         ],
         |row| row.get::<_, String>(0),
@@ -170,8 +236,40 @@ pub fn replace_detections(
     detector_version: &str,
     detections: &[DetectedFace],
 ) -> Result<Vec<StoredFace>> {
-    if detector_id.trim().is_empty() || detector_version.trim().is_empty() {
-        bail!("face detector id/version cannot be empty");
+    replace_detections_with_revision(
+        conn,
+        image_path,
+        source_size,
+        source_modified,
+        exif_orientation,
+        oriented_width,
+        oriented_height,
+        detector_id,
+        detector_version,
+        detector_version,
+        detections,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn replace_detections_with_revision(
+    conn: &mut Connection,
+    image_path: &Path,
+    source_size: u64,
+    source_modified: i64,
+    exif_orientation: u32,
+    oriented_width: u32,
+    oriented_height: u32,
+    detector_id: &str,
+    detector_version: &str,
+    detector_cache_revision: &str,
+    detections: &[DetectedFace],
+) -> Result<Vec<StoredFace>> {
+    if detector_id.trim().is_empty()
+        || detector_version.trim().is_empty()
+        || detector_cache_revision.trim().is_empty()
+    {
+        bail!("face detector id/version/cache revision cannot be empty");
     }
     if !(1..=8).contains(&exif_orientation) {
         bail!("invalid EXIF orientation: {exif_orientation}");
@@ -206,15 +304,16 @@ pub fn replace_detections(
     tx.execute(
         r#"
         INSERT INTO face_detection_state(
-            image_path, detector_id, detector_version, schema_version,
+            image_path, detector_id, detector_version, detector_cache_revision, schema_version,
             source_size, source_modified, exif_orientation,
             oriented_width, oriented_height, face_count
-        ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
         "#,
         params![
             image_path.to_string_lossy().to_string(),
             detector_id,
             detector_version,
+            detector_cache_revision,
             face_detection::SCHEMA_VERSION,
             source_size as i64,
             source_modified,
@@ -231,6 +330,7 @@ pub fn replace_detections(
             image_path,
             detector_id,
             detector_version,
+            detector_cache_revision,
             face_detection::SCHEMA_VERSION,
             ordinal,
         );
@@ -239,10 +339,10 @@ pub fn replace_detections(
             r#"
             INSERT INTO faces(
                 face_id, image_path, face_ordinal, detector_id, detector_version,
-                schema_version, confidence, bbox_x, bbox_y, bbox_width, bbox_height,
-                landmarks, landmark_count, source_size, source_modified
+                detector_cache_revision, schema_version, confidence, bbox_x, bbox_y, bbox_width,
+                bbox_height, landmarks, landmark_count, source_size, source_modified
             ) VALUES(
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
             )
             "#,
             params![
@@ -251,6 +351,7 @@ pub fn replace_detections(
                 ordinal as i64,
                 detector_id,
                 detector_version,
+                detector_cache_revision,
                 face_detection::SCHEMA_VERSION,
                 face.confidence,
                 face.bbox.x,
@@ -269,6 +370,7 @@ pub fn replace_detections(
             ordinal,
             detector_id: detector_id.to_owned(),
             detector_version: detector_version.to_owned(),
+            detector_cache_revision: detector_cache_revision.to_owned(),
             confidence: face.confidence,
             bbox: face.bbox,
             landmarks: face.landmarks,
@@ -284,7 +386,7 @@ pub fn load_detection_state(
 ) -> Result<Option<DetectionState>> {
     let row = conn.query_row(
         r#"
-        SELECT image_path, detector_id, detector_version, schema_version,
+        SELECT image_path, detector_id, detector_version, detector_cache_revision, schema_version,
                source_size, source_modified, exif_orientation,
                oriented_width, oriented_height, face_count
         FROM face_detection_state
@@ -296,13 +398,14 @@ pub fn load_detection_state(
                 image_path: PathBuf::from(row.get::<_, String>(0)?),
                 detector_id: row.get(1)?,
                 detector_version: row.get(2)?,
-                schema_version: row.get(3)?,
-                source_size: row.get::<_, i64>(4)?.max(0) as u64,
-                source_modified: row.get(5)?,
-                exif_orientation: row.get::<_, i64>(6)?.clamp(1, 8) as u32,
-                oriented_width: row.get::<_, i64>(7)?.max(0) as u32,
-                oriented_height: row.get::<_, i64>(8)?.max(0) as u32,
-                face_count: row.get::<_, i64>(9)?.max(0) as usize,
+                detector_cache_revision: row.get(3)?,
+                schema_version: row.get(4)?,
+                source_size: row.get::<_, i64>(5)?.max(0) as u64,
+                source_modified: row.get(6)?,
+                exif_orientation: row.get::<_, i64>(7)?.clamp(1, 8) as u32,
+                oriented_width: row.get::<_, i64>(8)?.max(0) as u32,
+                oriented_height: row.get::<_, i64>(9)?.max(0) as u32,
+                face_count: row.get::<_, i64>(10)?.max(0) as usize,
             })
         },
     );
@@ -317,7 +420,7 @@ pub fn load_faces(conn: &Connection, image_path: &Path) -> Result<Vec<StoredFace
     let mut stmt = conn.prepare(
         r#"
         SELECT face_id, image_path, face_ordinal, detector_id, detector_version,
-               confidence, bbox_x, bbox_y, bbox_width, bbox_height,
+               detector_cache_revision, confidence, bbox_x, bbox_y, bbox_width, bbox_height,
                landmarks, landmark_count
         FROM faces
         WHERE image_path = ?1
@@ -325,20 +428,21 @@ pub fn load_faces(conn: &Connection, image_path: &Path) -> Result<Vec<StoredFace
         "#,
     )?;
     let rows = stmt.query_map(params![image_path.to_string_lossy().to_string()], |row| {
-        let blob: Option<Vec<u8>> = row.get(10)?;
-        let count = row.get::<_, i64>(11)?.max(0) as usize;
+        let blob: Option<Vec<u8>> = row.get(11)?;
+        let count = row.get::<_, i64>(12)?.max(0) as usize;
         Ok(StoredFace {
             face_id: row.get(0)?,
             image_path: PathBuf::from(row.get::<_, String>(1)?),
             ordinal: row.get::<_, i64>(2)?.max(0) as usize,
             detector_id: row.get(3)?,
             detector_version: row.get(4)?,
-            confidence: row.get(5)?,
+            detector_cache_revision: row.get(5)?,
+            confidence: row.get(6)?,
             bbox: FaceBox {
-                x: row.get(6)?,
-                y: row.get(7)?,
-                width: row.get(8)?,
-                height: row.get(9)?,
+                x: row.get(7)?,
+                y: row.get(8)?,
+                width: row.get(9)?,
+                height: row.get(10)?,
             },
             landmarks: blob
                 .as_deref()
@@ -348,6 +452,21 @@ pub fn load_faces(conn: &Connection, image_path: &Path) -> Result<Vec<StoredFace
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
         .context("loading stored face detections")
+}
+
+fn ensure_column(conn: &Connection, table: &str, column: &str, declaration: &str) -> Result<()> {
+    let exists = {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let mut rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        rows.any(|row| row.is_ok_and(|name| name == column))
+    };
+    if !exists {
+        conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {declaration}"),
+            [],
+        )?;
+    }
+    Ok(())
 }
 
 fn compare_faces(left: &DetectedFace, right: &DetectedFace) -> std::cmp::Ordering {
@@ -364,6 +483,7 @@ fn stable_face_id(
     image_path: &Path,
     detector_id: &str,
     detector_version: &str,
+    detector_cache_revision: &str,
     schema_version: i64,
     ordinal: usize,
 ) -> String {
@@ -376,6 +496,7 @@ fn stable_face_id(
         path.as_bytes(),
         detector_id.as_bytes(),
         detector_version.as_bytes(),
+        detector_cache_revision.as_bytes(),
         &schema_version.to_le_bytes(),
         &(ordinal as u64).to_le_bytes(),
     ] {
@@ -492,6 +613,51 @@ mod tests {
         assert!(!paths_needing_detection(&conn, "test-detector", "1")
             .unwrap()
             .contains(&PathBuf::from("people/empty.jpg")));
+    }
+
+    #[test]
+    fn cache_revision_invalidates_without_changing_detector_version() {
+        let mut conn = test_connection();
+        insert_image(&conn, "people/revision.jpg");
+        replace_detections_with_revision(
+            &mut conn,
+            Path::new("people/revision.jpg"),
+            100,
+            200,
+            1,
+            800,
+            600,
+            "test-detector",
+            "1",
+            "model-a",
+            &[face(0.2, 0.95)],
+        )
+        .unwrap();
+        assert!(detection_is_current_with_revision(
+            &conn,
+            Path::new("people/revision.jpg"),
+            100,
+            200,
+            "test-detector",
+            "1",
+            "model-a",
+        )
+        .unwrap());
+        assert!(!detection_is_current_with_revision(
+            &conn,
+            Path::new("people/revision.jpg"),
+            100,
+            200,
+            "test-detector",
+            "1",
+            "model-b",
+        )
+        .unwrap());
+        assert!(
+            paths_needing_detection_with_revision(&conn, "test-detector", "1", "model-b",)
+                .unwrap()
+                .contains(&PathBuf::from("people/revision.jpg"))
+        );
     }
 
     #[test]
