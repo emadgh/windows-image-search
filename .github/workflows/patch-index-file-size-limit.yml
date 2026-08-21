@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - feat/index-file-size-limit
+  pull_request:
+    branches:
+      - fix/indexing-final-clip-stall
 
 permissions:
   contents: write
@@ -25,6 +28,7 @@ jobs:
       - name: Tests
         run: cargo test --all-targets
       - name: Commit patched sources
+        if: github.event_name == 'push'
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
