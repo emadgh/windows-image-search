@@ -11,7 +11,7 @@ pub const MODEL_VERSION: &str = "1";
 
 pub struct YuNetProductionDetector {
     adapter: YuNetOnnxAdapter,
-    cache_revision: &'static str,
+    cache_revision: String,
 }
 
 impl YuNetProductionDetector {
@@ -33,7 +33,6 @@ impl YuNetProductionDetector {
             settings.nms_threshold,
             settings.top_k,
         );
-        let cache_revision = Box::leak(cache_revision.into_boxed_str());
         Ok(Self {
             adapter,
             cache_revision,
@@ -47,7 +46,11 @@ impl FaceDetector for YuNetProductionDetector {
     }
 
     fn detector_version(&self) -> &'static str {
-        self.cache_revision
+        MODEL_VERSION
+    }
+
+    fn cache_revision(&self) -> String {
+        self.cache_revision.clone()
     }
 
     fn detect(&mut self, image: &DynamicImage) -> Result<Vec<DetectedFace>> {

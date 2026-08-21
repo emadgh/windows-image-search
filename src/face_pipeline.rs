@@ -84,6 +84,7 @@ where
     let options = options.sanitized();
     let detector_id = detector.detector_id();
     let detector_version = detector.detector_version();
+    let detector_cache_revision = detector.cache_revision();
     let session_conn = db::open(session_db_path).with_context(|| {
         format!(
             "opening collection scope database {}",
@@ -172,13 +173,14 @@ where
                     continue;
                 };
 
-                if face_store::detection_is_current(
+                if face_store::detection_is_current_with_revision(
                     &conn,
                     &relative,
                     size,
                     modified,
                     detector_id,
                     detector_version,
+                    &detector_cache_revision,
                 )? {
                     emit_progress(
                         &mut emit,
@@ -220,7 +222,7 @@ where
                         face_detection::decode_oriented_with_orientation(&absolute)?;
                     let (width, height) = oriented.dimensions();
                     let detections = detector.detect(&oriented)?;
-                    let stored = face_store::replace_detections(
+                    let stored = face_store::replace_detections_with_revision(
                         &mut conn,
                         &relative,
                         size,
@@ -230,6 +232,7 @@ where
                         height,
                         detector_id,
                         detector_version,
+                        &detector_cache_revision,
                         &detections,
                     )?;
                     Ok(stored.len())

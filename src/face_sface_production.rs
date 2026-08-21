@@ -19,7 +19,7 @@ pub const ALIGNMENT_REVISION: i64 = 2;
 pub struct SFaceProductionEmbedder {
     adapter: SFaceOnnxAdapter,
     provider: SFaceExecutionProvider,
-    cache_revision: &'static str,
+    cache_revision: String,
 }
 
 impl SFaceProductionEmbedder {
@@ -30,7 +30,6 @@ impl SFaceProductionEmbedder {
         let model_fingerprint = model_fingerprint_fnv1a64(&settings.model_path)?;
         let adapter = SFaceOnnxAdapter::load(&settings.model_path, settings.provider)?;
         let cache_revision = embedding_cache_revision(model_fingerprint);
-        let cache_revision = Box::leak(cache_revision.into_boxed_str());
         Ok(Self {
             adapter,
             provider: settings.provider,
@@ -49,7 +48,11 @@ impl FaceEmbedder for SFaceProductionEmbedder {
     }
 
     fn model_version(&self) -> &'static str {
-        self.cache_revision
+        MODEL_VERSION
+    }
+
+    fn cache_revision(&self) -> String {
+        self.cache_revision.clone()
     }
 
     fn input_size(&self) -> u32 {

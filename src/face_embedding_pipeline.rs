@@ -79,6 +79,7 @@ where
     let options = options.sanitized();
     let model_id = embedder.model_id();
     let model_version = embedder.model_version();
+    let model_cache_revision = embedder.cache_revision();
     let dimension = embedder.embedding_dimension();
     let input_size = embedder.input_size();
     let alignment_revision = embedder.alignment_revision();
@@ -109,10 +110,11 @@ where
         })?;
         face_store::ensure_schema(&conn)?;
         face_embedding_store::ensure_schema(&conn)?;
-        let pending = face_embedding_store::count_pending(
+        let pending = face_embedding_store::count_pending_with_revision(
             &conn,
             model_id,
             model_version,
+            &model_cache_revision,
             dimension,
             alignment_revision,
         )?;
@@ -128,11 +130,12 @@ where
         let mut root_failures = 0usize;
 
         loop {
-            let batch = face_embedding_store::candidate_batch(
+            let batch = face_embedding_store::candidate_batch_with_revision(
                 &conn,
                 cursor.as_deref(),
                 model_id,
                 model_version,
+                &model_cache_revision,
                 dimension,
                 alignment_revision,
                 options.batch_size,
@@ -176,11 +179,12 @@ where
                         embedder.align_face(&oriented, candidate.bbox, &candidate.landmarks)?;
                     let raw = embedder.embed(&aligned)?;
                     let normalized = face_embedding::normalize_embedding(raw, dimension)?;
-                    face_embedding_store::replace_embedding(
+                    face_embedding_store::replace_embedding_with_revision(
                         &mut conn,
                         &candidate,
                         model_id,
                         model_version,
+                        &model_cache_revision,
                         alignment_revision,
                         &normalized,
                     )?;

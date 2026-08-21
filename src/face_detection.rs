@@ -75,6 +75,11 @@ impl DetectedFace {
 pub trait FaceDetector: Send {
     fn detector_id(&self) -> &'static str;
     fn detector_version(&self) -> &'static str;
+
+    fn cache_revision(&self) -> String {
+        self.detector_version().to_owned()
+    }
+
     fn detect(&mut self, image: &DynamicImage) -> Result<Vec<DetectedFace>>;
 }
 
