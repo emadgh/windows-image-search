@@ -1,0 +1,43 @@
+name: Patch face-match overlay
+
+on:
+  push:
+    branches:
+      - feat/face-search-completion
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/face-search-completion
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply patch
+        shell: pwsh
+        run: python scripts/patch_face_match_overlay.py
+      - name: Format
+        shell: pwsh
+        run: cargo fmt --all
+      - name: Remove patch machinery
+        shell: pwsh
+        run: |
+          Remove-Item scripts/patch_face_match_overlay.py
+          Remove-Item .github/workflows/patch-face-match-overlay.yml
+          Remove-Item .patch-face-match-overlay-trigger -ErrorAction SilentlyContinue
+      - name: Commit
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if (git diff --cached --quiet) { exit 0 }
+          git commit -m "feat: overlay matched face boxes in results"
+          git push origin HEAD:feat/face-search-completion
