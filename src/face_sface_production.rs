@@ -10,6 +10,8 @@ use crate::face_sface_adapter::{
 };
 use anyhow::{bail, Context, Result};
 use image::{DynamicImage, GenericImageView};
+use std::fs::File;
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
 pub const MODEL_ID: &str = "opencv-sface-external";
@@ -97,13 +99,25 @@ where
 }
 
 fn model_fingerprint_fnv1a64(path: &Path) -> Result<u64> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("reading SFace model for cache revision {}", path.display()))?;
+    let file = File::open(path)
+        .with_context(|| format!("opening SFace model for cache revision {}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut buffer = [0u8; 64 * 1024];
     let mut hash = 0xcbf29ce484222325u64;
-    for byte in bytes {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
+
+    loop {
+        let count = reader
+            .read(&mut buffer)
+            .with_context(|| format!("reading SFace model for cache revision {}", path.display()))?;
+        if count == 0 {
+            break;
+        }
+        for &byte in &buffer[..count] {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
     }
+
     Ok(hash)
 }
 
