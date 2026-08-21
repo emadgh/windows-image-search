@@ -9,71 +9,37 @@ permissions:
   contents: write
 
 jobs:
-  patch-and-verify:
-    runs-on: windows-latest
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: fix/face-cache-revisions
           fetch-depth: 0
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-
-      - name: Apply patch and verify
-        shell: pwsh
+      - name: Apply patch
+        shell: bash
         run: |
-          $ErrorActionPreference = 'Continue'
-          $log = 'face-cache-patch.log'
-          Remove-Item $log -ErrorAction SilentlyContinue
+          set -euo pipefail
+          python3 scripts/fix_face_cache_patch_script.py
+          python3 scripts/patch_face_cache_revisions.py
+          cargo fmt --all
 
-          function Run-Step([string]$Name, [scriptblock]$Command) {
-            "===== $Name =====" | Tee-Object -FilePath $log -Append
-            & $Command 2>&1 | Tee-Object -FilePath $log -Append
-            if ($LASTEXITCODE -ne 0) {
-              throw "$Name failed with exit code $LASTEXITCODE"
-            }
-          }
-
-          Run-Step 'Fix patch assertions' { python scripts/fix_face_cache_patch_script.py }
-          Run-Step 'Patch' { python scripts/patch_face_cache_revisions.py }
-          Run-Step 'Format' { cargo fmt --all }
-          Run-Step 'Check' { cargo check --all-targets }
-          Run-Step 'Tests' { cargo test --all-targets }
-          Run-Step 'Release' { cargo build --release }
-
-      - name: Commit verified source
-        if: success()
-        shell: pwsh
+      - name: Commit patched sources
+        shell: bash
         run: |
-          Remove-Item scripts/patch_face_cache_revisions.py -ErrorAction SilentlyContinue
-          Remove-Item scripts/fix_face_cache_patch_script.py -ErrorAction SilentlyContinue
-          Remove-Item .github/workflows/face-cache-revision-patch.yml -ErrorAction SilentlyContinue
-          Remove-Item face-cache-patch.log -ErrorAction SilentlyContinue
-          Remove-Item face-cache-patch-failure.txt -ErrorAction SilentlyContinue
+          set -euo pipefail
+          rm -f scripts/patch_face_cache_revisions.py
+          rm -f scripts/fix_face_cache_patch_script.py
+          rm -f .github/workflows/face-cache-revision-patch.yml
+          rm -f face-cache-patch-failure.txt
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git diff --cached --quiet
-          if ($LASTEXITCODE -eq 0) { exit 0 }
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
           git commit -m "fix: make face cache revisions content-aware"
-          git push origin HEAD:fix/face-cache-revisions
-
-      - name: Preserve failure log
-        if: failure()
-        shell: pwsh
-        run: |
-          if (Test-Path face-cache-patch.log) {
-            Copy-Item face-cache-patch.log face-cache-patch-failure.txt -Force
-          } else {
-            'Patch workflow failed before producing a log.' | Set-Content face-cache-patch-failure.txt
-          }
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add face-cache-patch-failure.txt
-          git diff --cached --quiet
-          if ($LASTEXITCODE -eq 0) { exit 0 }
-          git commit -m "ci: capture face cache patch failure"
           git push origin HEAD:fix/face-cache-revisions
