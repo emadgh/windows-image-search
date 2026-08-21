@@ -1,4 +1,5 @@
 mod collections;
+mod face_runtime;
 mod texture_lru;
 mod thumbnails;
 mod views;
@@ -66,6 +67,7 @@ pub struct ImageSearchApp {
     settings_path: PathBuf,
     face_embedding_settings: FaceEmbeddingSettings,
     face_settings_path: PathBuf,
+    face_runtime: face_runtime::FaceRuntimeState,
     collections: collections::CollectionsState,
     pub(super) search_text: String,
     text_search_service: TextSearchService,
@@ -112,6 +114,7 @@ impl ImageSearchApp {
         let indexing_settings = settings::load(&settings_path);
         let face_settings_path = app_data_dir.join("face-embedding-settings.ini");
         let face_embedding_settings = face_settings::load(&face_settings_path);
+        let face_runtime = face_runtime::FaceRuntimeState::new(app_data_dir);
         let embedding_service = EmbeddingService::new(model_cache);
         let text_search_service = TextSearchService::new(db_path.clone());
         let fs_watch_service = FsWatchService::new(Vec::new());
@@ -173,6 +176,7 @@ impl ImageSearchApp {
             settings_path,
             face_embedding_settings,
             face_settings_path,
+            face_runtime,
             collections: collections::CollectionsState::default(),
             search_text: String::new(),
             text_search_service,
@@ -314,6 +318,7 @@ impl ImageSearchApp {
                     self.progress = None;
                     self.close_confirmation_open = false;
                     self.busy = self.searching;
+                    self.schedule_face_pipeline_after_base_index();
                 }
             }
         }
@@ -981,6 +986,8 @@ impl ImageSearchApp {
                     ui.small("Performance controls are locked while a worker operation is active.");
                 }
 
+                self.show_face_detector_settings(ui);
+
                 ui.add_space(12.0);
                 ui.separator();
                 ui.heading("Face identity (SFace)");
@@ -1278,6 +1285,7 @@ impl eframe::App for ImageSearchApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_startup_messages();
         self.process_worker_messages();
+        self.process_face_runtime_messages();
         self.process_fs_watch_messages();
         self.process_thumbnail_messages(ctx);
         self.observe_text_search_input();
