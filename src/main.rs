@@ -26,6 +26,7 @@ mod material_eval;
 mod material_texture;
 mod metadata;
 mod model_benchmark;
+mod people_clustering;
 mod people_store;
 mod portable;
 mod portable_verify;

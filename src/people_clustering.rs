@@ -369,12 +369,18 @@ fn reconcile_person_ids(
         let mut counts: HashMap<&str, usize> = HashMap::new();
         for &member_index in &cluster.members {
             let face = &faces[member_index];
-            if let Some(person_id) = previous.get(&(face.library_id.clone(), face.face_id.clone())) {
+            if let Some(person_id) = previous.get(&(face.library_id.clone(), face.face_id.clone()))
+            {
                 *counts.entry(person_id.as_str()).or_default() += 1;
             }
         }
         for (person_id, count) in counts {
-            overlap_candidates.push((count, cluster.members.len(), person_id.to_owned(), cluster_index));
+            overlap_candidates.push((
+                count,
+                cluster.members.len(),
+                person_id.to_owned(),
+                cluster_index,
+            ));
         }
     }
     overlap_candidates.sort_by(|left, right| {
@@ -408,11 +414,7 @@ fn reconcile_person_ids(
             .min_by_key(|index| face_key(&faces[**index]))
             .context("People cluster has no members")?;
         let seed = &faces[seed_index];
-        let person_id = people_store::stable_person_id(
-            embedding,
-            &seed.library_id,
-            &seed.face_id,
-        )?;
+        let person_id = people_store::stable_person_id(embedding, &seed.library_id, &seed.face_id)?;
         output[cluster_index] = Some((person_id, false));
     }
 
