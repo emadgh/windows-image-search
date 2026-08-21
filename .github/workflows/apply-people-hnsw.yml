@@ -1,0 +1,32 @@
+name: Apply bounded People clustering upgrade
+
+on:
+  push:
+    branches:
+      - feat/people-clustering-foundation
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/people-clustering-foundation
+          fetch-depth: 0
+      - name: Apply source upgrade
+        run: python scripts/upgrade_people_hnsw.py
+      - name: Remove temporary patch machinery
+        run: |
+          rm scripts/upgrade_people_hnsw.py
+          rm .github/workflows/apply-people-hnsw.yml
+      - name: Commit upgrade
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/people_clustering.rs src/people_store.rs scripts/upgrade_people_hnsw.py .github/workflows/apply-people-hnsw.yml
+          git commit -m "perf: bound People clustering with HNSW candidates"
+          git push origin HEAD:feat/people-clustering-foundation
