@@ -27,9 +27,17 @@ People clustering is a derived, central catalog built from authoritative face em
 
 The large-corpus path avoids scanning every existing cluster centroid for every face and avoids the previous all-pairs cluster merge pass. HNSW narrows both assignment and merge candidates while exact centroid cosine and pruning keep the decision semantics conservative. The HNSW structure is rebuilt in memory from the current SFace embeddings because automatic People state is derived data; persistence remains the People snapshot, not the transient neighbor graph.
 
-## Next integration steps
+## Runtime integration
 
-1. Run clustering automatically after a successful SFace embedding backfill.
-2. Expose cluster representatives as unique Person suggestions in Face Search.
-3. Add a background full-rebuild action and a separate clustering threshold control.
+- A successful SFace embedding backfill schedules People clustering automatically as a separate background maintenance step. A clustering failure does not invalidate the completed detection/embedding work.
+- Settings exposes `Rebuild People groups from current embeddings` so the automatic snapshot can be rebuilt without re-running YuNet or SFace inference.
+- Face Search first reads automatic People clusters and shows one representative crop per Person. Each Person card exposes its cluster face count.
+- If no People snapshot exists yet, Face Search falls back to the previous searchable face-instance gallery, so Face Search remains usable before clustering is available.
+- Completing a People rebuild refreshes the Face Search suggestion source.
+
+## Remaining #59 work
+
+1. Expose a separate People clustering threshold control instead of relying only on the current default.
+2. Add an explicit incremental fast path that can attach newly indexed embeddings without requiring a full snapshot rebuild every time; full rebuild remains the maintenance fallback.
+3. Record practical clustering quality/performance evidence on a real multi-person library before closing #59.
 4. Build manual People management/overrides in #60 without mutating automatic clustering state.
