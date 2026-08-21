@@ -152,7 +152,8 @@ pub fn replace_automatic_snapshot(
         )?;
     }
 
-    tx.commit().context("committing People clustering snapshot")?;
+    tx.commit()
+        .context("committing People clustering snapshot")?;
     Ok(())
 }
 
@@ -325,7 +326,11 @@ fn validate_snapshot(
             bail!("People assignment similarity must be finite and within [-1, 1]");
         }
         *counts.entry(person_id).or_default() += 1;
-        representatives.insert((person_id, member.library_id.as_str(), member.face_id.as_str()));
+        representatives.insert((
+            person_id,
+            member.library_id.as_str(),
+            member.face_id.as_str(),
+        ));
     }
 
     for cluster in clusters {
