@@ -106,9 +106,9 @@ fn model_fingerprint_fnv1a64(path: &Path) -> Result<u64> {
     let mut hash = 0xcbf29ce484222325u64;
 
     loop {
-        let count = reader
-            .read(&mut buffer)
-            .with_context(|| format!("reading SFace model for cache revision {}", path.display()))?;
+        let count = reader.read(&mut buffer).with_context(|| {
+            format!("reading SFace model for cache revision {}", path.display())
+        })?;
         if count == 0 {
             break;
         }
