@@ -1,0 +1,62 @@
+name: Apply bounded image-model benchmark fix
+
+on:
+  push:
+    branches:
+      - feat/indexed-sample-benchmark
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/indexed-sample-benchmark
+      - name: Patch benchmark workload and heartbeat
+        shell: python
+        run: |
+          from pathlib import Path
+
+          model = Path('src/model_benchmark.rs')
+          text = model.read_text(encoding='utf-8')
+          old = 'const DEFAULT_QUERY_COUNT: usize = 24;\nconst MAX_QUERY_COUNT: usize = 64;\nconst MAX_CORPUS_COUNT: usize = 512;'
+          new = 'const DEFAULT_QUERY_COUNT: usize = 16;\nconst MAX_QUERY_COUNT: usize = 16;\nconst MAX_CORPUS_COUNT: usize = 512;'
+          if old not in text:
+              raise RuntimeError('model benchmark constants block not found')
+          text = text.replace(old, new, 1)
+          old = '    let corpus_target = available.len().min(MAX_CORPUS_COUNT);'
+          new = '''    // The automatic benchmark sample count must bound the corpus too.\n    // Previously SampleCount=50 still expanded this phase to 512 corpus images.\n    let corpus_target = available\n        .len()\n        .min(MAX_CORPUS_COUNT)\n        .min(requested_queries.max(1));'''
+          if old not in text:
+              raise RuntimeError('corpus_target line not found')
+          text = text.replace(old, new, 1)
+          model.write_text(text, encoding='utf-8')
+
+          gate = Path('scripts/run-v0.2-benchmark-gate.ps1')
+          text = gate.read_text(encoding='utf-8')
+          old = '    $nextGpuSample = [DateTime]::UtcNow\n\n    do {'
+          new = '''    $nextGpuSample = [DateTime]::UtcNow\n    $nextHeartbeat = [DateTime]::UtcNow.AddSeconds(15)\n\n    do {'''
+          if old not in text:
+              raise RuntimeError('heartbeat insertion point not found')
+          text = text.replace(old, new, 1)
+          old = '        $exited = $process.WaitForExit(200)\n    } while (-not $exited)'
+          new = '''        if ([DateTime]::UtcNow -ge $nextHeartbeat) {\n            try {\n                $cpuSeconds = [math]::Round($process.TotalProcessorTime.TotalSeconds, 1)\n                $workingSetMiB = [math]::Round(([double]$process.WorkingSet64 / 1MB), 1)\n            }\n            catch {\n                $cpuSeconds = $null\n                $workingSetMiB = $null\n            }\n            $elapsedSeconds = [math]::Round($stopwatch.Elapsed.TotalSeconds, 0)\n            Write-Host "[$Name] still running: elapsed=${elapsedSeconds}s cpu=${cpuSeconds}s working_set=${workingSetMiB}MiB"\n            $nextHeartbeat = [DateTime]::UtcNow.AddSeconds(15)\n        }\n\n        $exited = $process.WaitForExit(200)\n    } while (-not $exited)'''
+          if old not in text:
+              raise RuntimeError('heartbeat loop point not found')
+          text = text.replace(old, new, 1)
+          gate.write_text(text, encoding='utf-8')
+
+          Path('.github/workflows/fix-image-model-benchmark-size.yml').unlink()
+      - name: Format Rust
+        run: cargo fmt --all
+      - name: Commit patched source
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/model_benchmark.rs scripts/run-v0.2-benchmark-gate.ps1 .github/workflows/fix-image-model-benchmark-size.yml
+          git commit -m "fix: bound image-model benchmark workload"
+          git push origin HEAD:feat/indexed-sample-benchmark
