@@ -1,0 +1,42 @@
+name: Wire People storage module
+
+on:
+  push:
+    branches:
+      - feat/people-clustering-foundation
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/people-clustering-foundation
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Wire module
+        shell: pwsh
+        run: |
+          $path = 'src/main.rs'
+          $text = Get-Content $path -Raw
+          if ($text -notmatch 'mod people_store;') {
+            $text = $text.Replace("mod portable_verify;`n", "mod portable_verify;`nmod people_store;`n")
+            Set-Content -Path $path -Value $text -NoNewline
+          }
+          cargo fmt --all
+      - name: Remove temporary workflow and commit
+        shell: pwsh
+        run: |
+          Remove-Item .github/workflows/patch-people-module.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/main.rs src/people_store.rs .github/workflows/patch-people-module.yml
+          if (git diff --cached --quiet) { exit 0 }
+          git commit -m "feat: wire People cluster storage"
+          git push origin HEAD:feat/people-clustering-foundation
