@@ -241,6 +241,7 @@ function Invoke-DiagnosticBenchmark {
     $gpuProcessSampleFound = $false
     $gpuCounterError = $null
     $nextGpuSample = [DateTime]::UtcNow
+    $nextHeartbeat = [DateTime]::UtcNow.AddSeconds(15)
 
     do {
         try {
@@ -269,6 +270,20 @@ function Invoke-DiagnosticBenchmark {
                 }
             }
             $nextGpuSample = [DateTime]::UtcNow.AddSeconds(1)
+        }
+
+        if ([DateTime]::UtcNow -ge $nextHeartbeat) {
+            try {
+                $cpuSeconds = [math]::Round($process.TotalProcessorTime.TotalSeconds, 1)
+                $workingSetMiB = [math]::Round(([double]$process.WorkingSet64 / 1MB), 1)
+            }
+            catch {
+                $cpuSeconds = $null
+                $workingSetMiB = $null
+            }
+            $elapsedSeconds = [math]::Round($stopwatch.Elapsed.TotalSeconds, 0)
+            Write-Host "[$Name] still running: elapsed=${elapsedSeconds}s cpu=${cpuSeconds}s working_set=${workingSetMiB}MiB"
+            $nextHeartbeat = [DateTime]::UtcNow.AddSeconds(15)
         }
 
         $exited = $process.WaitForExit(200)
