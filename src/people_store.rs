@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
 
-pub const ALGORITHM_REVISION: i64 = 2;
+pub const ALGORITHM_REVISION: i64 = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PeopleEmbeddingRevision {
@@ -18,6 +18,7 @@ pub struct PeopleClusterState {
     pub embedding: PeopleEmbeddingRevision,
     pub algorithm_revision: i64,
     pub similarity_threshold: f32,
+    pub min_cluster_size: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,6 +50,7 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
             alignment_revision INTEGER NOT NULL,
             algorithm_revision INTEGER NOT NULL,
             similarity_threshold REAL NOT NULL,
+            min_cluster_size INTEGER NOT NULL DEFAULT 2,
             updated_at INTEGER NOT NULL DEFAULT (unixepoch())
         );
 
@@ -78,6 +80,12 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
             ON people_cluster_members(is_outlier, person_id);
         "#,
     )?;
+    // Migration for People snapshots created by algorithm revisions before min_cluster_size
+    // became part of the compatibility contract. Duplicate-column errors are benign.
+    let _ = conn.execute(
+        "ALTER TABLE people_cluster_state ADD COLUMN min_cluster_size INTEGER NOT NULL DEFAULT 2",
+        [],
+    );
     Ok(())
 }
 
@@ -101,9 +109,9 @@ pub fn replace_automatic_snapshot(
             singleton_id,
             model_id, model_version, model_cache_revision,
             dimension, alignment_revision,
-            algorithm_revision, similarity_threshold,
+            algorithm_revision, similarity_threshold, min_cluster_size,
             updated_at
-        ) VALUES(1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, unixepoch())
+        ) VALUES(1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, unixepoch())
         "#,
         params![
             state.embedding.model_id,
@@ -113,6 +121,7 @@ pub fn replace_automatic_snapshot(
             state.embedding.alignment_revision,
             state.algorithm_revision,
             state.similarity_threshold,
+            state.min_cluster_size as i64,
         ],
     )?;
 
@@ -163,7 +172,7 @@ pub fn load_state(conn: &Connection) -> Result<Option<PeopleClusterState>> {
         r#"
         SELECT model_id, model_version, model_cache_revision,
                dimension, alignment_revision,
-               algorithm_revision, similarity_threshold
+               algorithm_revision, similarity_threshold, min_cluster_size
         FROM people_cluster_state
         WHERE singleton_id = 1
         "#,
@@ -182,6 +191,7 @@ pub fn load_state(conn: &Connection) -> Result<Option<PeopleClusterState>> {
         },
         algorithm_revision: row.get(5)?,
         similarity_threshold: row.get(6)?,
+        min_cluster_size: row.get::<_, i64>(7)?.max(2) as usize,
     }))
 }
 
@@ -279,6 +289,9 @@ fn validate_snapshot(
         || !(-1.0..=1.0).contains(&state.similarity_threshold)
     {
         bail!("People clustering similarity threshold must be finite and within [-1, 1]");
+    }
+    if state.min_cluster_size < 2 {
+        bail!("People clustering minimum cluster size must be at least 2");
     }
 
     let mut cluster_ids = HashSet::new();
@@ -382,6 +395,7 @@ mod tests {
             },
             algorithm_revision: ALGORITHM_REVISION,
             similarity_threshold: 0.62,
+            min_cluster_size: 2,
         }
     }
 

@@ -8,6 +8,7 @@ use crate::face_embedding_pipeline::{
 use crate::face_pipeline::{FacePipelineEvent, FacePipelineOptions, FacePipelineSummary};
 use crate::face_sface_production;
 use crate::people_clustering::{self, PeopleClusteringOptions, PeopleClusteringSummary};
+use crate::people_settings::{self, PeopleSettings};
 use eframe::egui;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
@@ -23,6 +24,8 @@ enum FaceRuntimeMessage {
 pub(super) struct FaceRuntimeState {
     settings: FaceDetectorSettings,
     settings_path: PathBuf,
+    people_settings: PeopleSettings,
+    people_settings_path: PathBuf,
     tx: Sender<FaceRuntimeMessage>,
     rx: Receiver<FaceRuntimeMessage>,
     running: bool,
@@ -34,10 +37,14 @@ impl FaceRuntimeState {
     pub(super) fn new(app_data_dir: &Path) -> Self {
         let settings_path = app_data_dir.join("face-detector-settings.ini");
         let settings = yunet_settings::load(&settings_path);
+        let people_settings_path = app_data_dir.join("people-settings.ini");
+        let people_settings = people_settings::load(&people_settings_path);
         let (tx, rx) = std::sync::mpsc::channel();
         Self {
             settings,
             settings_path,
+            people_settings,
+            people_settings_path,
             tx,
             rx,
             running: false,
@@ -148,7 +155,7 @@ impl ImageSearchApp {
         if self.face_runtime.run_people_after_embedding && !self.busy && !self.face_runtime.running
         {
             self.face_runtime.run_people_after_embedding = false;
-            self.start_people_rebuild();
+            self.start_people_incremental_update();
         }
     }
 
@@ -223,7 +230,15 @@ impl ImageSearchApp {
         });
     }
 
+    fn start_people_incremental_update(&mut self) {
+        self.start_people_maintenance(true);
+    }
+
     fn start_people_rebuild(&mut self) {
+        self.start_people_maintenance(false);
+    }
+
+    fn start_people_maintenance(&mut self, incremental: bool) {
         if self.face_runtime.running || self.busy {
             return;
         }
@@ -246,22 +261,35 @@ impl ImageSearchApp {
         let session_db_path = self.db_path.clone();
         let roots = self.roots.clone();
         let embedding_settings = self.face_embedding_settings.clone();
+        let people_settings = self.face_runtime.people_settings.sanitized();
         let tx = self.face_runtime.tx.clone();
         self.face_runtime.running = true;
         self.busy = true;
         self.progress = None;
         self.last_error = None;
-        self.status = "People: clustering current SFace embeddings…".to_owned();
+        self.status = if incremental {
+            "People: incrementally updating current SFace embeddings…".to_owned()
+        } else {
+            "People: rebuilding all groups from current SFace embeddings…".to_owned()
+        };
 
         std::thread::spawn(move || {
             let result = face_sface_production::embedding_revision(&embedding_settings)
                 .and_then(|revision| {
-                    people_clustering::run(
-                        &session_db_path,
-                        &roots,
-                        &revision,
-                        PeopleClusteringOptions::default(),
-                    )
+                    let options = PeopleClusteringOptions {
+                        similarity_threshold: people_settings.similarity_threshold,
+                        min_cluster_size: people_settings.min_cluster_size,
+                    };
+                    if incremental {
+                        people_clustering::run_incremental(
+                            &session_db_path,
+                            &roots,
+                            &revision,
+                            options,
+                        )
+                    } else {
+                        people_clustering::run(&session_db_path, &roots, &revision, options)
+                    }
                 })
                 .map_err(|err| format!("{err:#}"));
             let _ = tx.send(FaceRuntimeMessage::PeopleFinished(result));
@@ -372,6 +400,7 @@ impl ImageSearchApp {
         );
 
         let mut changed = false;
+        let mut people_changed = false;
         ui.add_enabled_ui(!self.busy && !self.face_runtime.running, |ui| {
             ui.horizontal(|ui| {
                 let mut model_path = self
@@ -446,6 +475,35 @@ impl ImageSearchApp {
                     .changed();
             });
 
+            ui.add_space(8.0);
+            ui.separator();
+            ui.strong("People clustering");
+            ui.small(
+                "These thresholds are separate from the one-shot Face Search similarity threshold.",
+            );
+            ui.horizontal(|ui| {
+                ui.label("Identity threshold");
+                people_changed |= ui
+                    .add(
+                        egui::Slider::new(
+                            &mut self.face_runtime.people_settings.similarity_threshold,
+                            0.0..=1.0,
+                        )
+                        .fixed_decimals(2),
+                    )
+                    .changed();
+                ui.label("Minimum faces per Person");
+                people_changed |= ui
+                    .add(
+                        egui::DragValue::new(
+                            &mut self.face_runtime.people_settings.min_cluster_size,
+                        )
+                        .range(2..=1_000_000)
+                        .speed(1.0),
+                    )
+                    .changed();
+            });
+
             let can_run = self.face_runtime.configured_and_available() && !self.roots.is_empty();
             let label = if self.face_embedding_settings.configured()
                 && self.face_embedding_settings.model_path.is_file()
@@ -473,6 +531,15 @@ impl ImageSearchApp {
         });
 
         self.face_runtime.settings = self.face_runtime.settings.clone().sanitized();
+        self.face_runtime.people_settings = self.face_runtime.people_settings.sanitized();
+        if people_changed {
+            if let Err(err) = people_settings::save(
+                &self.face_runtime.people_settings_path,
+                &self.face_runtime.people_settings,
+            ) {
+                self.last_error = Some(format!("Cannot save People settings: {err:#}"));
+            }
+        }
         if changed {
             if let Err(err) = yunet_settings::save(
                 &self.face_runtime.settings_path,
