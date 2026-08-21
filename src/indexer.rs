@@ -266,6 +266,7 @@ fn incremental_update(
     let unique_paths: HashSet<PathBuf> = changed_paths.iter().cloned().collect();
     let mut candidates = HashMap::<PathBuf, PathBuf>::new();
     let mut removed_targets = Vec::<PathBuf>::new();
+    let mut oversized_skipped = 0usize;
 
     for changed in unique_paths {
         control.wait_if_paused();
@@ -275,7 +276,16 @@ fn incremental_update(
         if changed.exists() {
             if changed.is_file() {
                 if is_supported_image(&changed) {
-                    candidates.insert(changed, root.clone());
+                    let oversized = std::fs::metadata(&changed)
+                        .map(|meta| !indexing_settings.allows_file_size(meta.len()))
+                        .unwrap_or(false);
+                    if oversized {
+                        oversized_skipped += 1;
+                        // Excluded files must also leave a previously-built index.
+                        removed_targets.push(changed);
+                    } else {
+                        candidates.insert(changed, root.clone());
+                    }
                 }
             } else if changed.is_dir() {
                 for entry in WalkDir::new(&changed)
@@ -288,7 +298,16 @@ fn incremental_update(
                         Ok(entry)
                             if entry.file_type().is_file() && is_supported_image(entry.path()) =>
                         {
-                            candidates.insert(entry.into_path(), root.clone());
+                            let path = entry.into_path();
+                            let oversized = std::fs::metadata(&path)
+                                .map(|meta| !indexing_settings.allows_file_size(meta.len()))
+                                .unwrap_or(false);
+                            if oversized {
+                                oversized_skipped += 1;
+                                removed_targets.push(path);
+                            } else {
+                                candidates.insert(path, root.clone());
+                            }
                         }
                         Ok(_) => {}
                         Err(err) => {
@@ -326,6 +345,13 @@ fn incremental_update(
         portable::remove_absolute_paths(roots, &removed_paths)?;
         let _ = tx.send(WorkerMessage::RemovedPaths(removed_paths.clone()));
     }
+    if oversized_skipped > 0 {
+        let _ = tx.send(WorkerMessage::Status(format!(
+            "Skipped {oversized_skipped} oversized source file{} above the {} MiB indexing limit",
+            if oversized_skipped == 1 { "" } else { "s" },
+            indexing_settings.max_file_size_mib
+        )));
+    }
     let _ = tx.send(WorkerMessage::RootCounts(db::load_root_counts(db_path)?));
 
     let mut pending = Vec::<PendingImage>::new();
@@ -358,7 +384,7 @@ fn incremental_update(
 
     if pending.is_empty() {
         let _ = tx.send(WorkerMessage::Status(format!(
-            "Live index synchronized: 0 changed, {} removed",
+            "Live index synchronized: 0 changed, {} removed, {oversized_skipped} oversized skipped",
             removed_paths.len()
         )));
         return Ok(());
@@ -503,7 +529,7 @@ fn incremental_update(
     portable::sync_paths_from_session(&mut conn, &committed_paths)?;
 
     let _ = tx.send(WorkerMessage::Status(format!(
-        "Live index synchronized: {} changed, {} removed",
+        "Live index synchronized: {} changed, {} removed, {oversized_skipped} oversized skipped",
         committed_paths.len(),
         removed_paths.len()
     )));
@@ -562,6 +588,7 @@ fn rescan(
         existing_file_states.len()
     )));
     let mut traversal_errors = 0usize;
+    let mut oversized_skipped = 0usize;
     let mut prunable_roots = Vec::<PathBuf>::new();
     for root in roots {
         control.wait_if_paused();
@@ -584,7 +611,15 @@ fn rescan(
             match entry {
                 Ok(entry) => {
                     if entry.file_type().is_file() && is_supported_image(entry.path()) {
-                        candidates.push((root.clone(), entry.into_path()));
+                        let path = entry.into_path();
+                        let oversized = std::fs::metadata(&path)
+                            .map(|meta| !indexing_settings.allows_file_size(meta.len()))
+                            .unwrap_or(false);
+                        if oversized {
+                            oversized_skipped += 1;
+                        } else {
+                            candidates.push((root.clone(), path));
+                        }
                     }
                 }
                 Err(err) => {
@@ -617,7 +652,8 @@ fn rescan(
         let _ = db::delete_stale_discovered_for_root(&conn, root, scan_generation)?;
     }
     let _ = tx.send(WorkerMessage::Status(format!(
-        "Discovered {discovered_marked}/{total} image paths; checking index state…"
+        "Discovered {discovered_marked}/{total} eligible image paths; skipped {oversized_skipped} above {} MiB; checking index state…",
+        indexing_settings.max_file_size_mib
     )));
     let _ = tx.send(WorkerMessage::RootCounts(db::load_root_counts(db_path)?));
     let mut pending = Vec::<PendingImage>::new();
@@ -880,7 +916,7 @@ fn rescan(
     }
 
     let _ = tx.send(WorkerMessage::Status(format!(
-        "Index ready: {total} image{} (recursive scan, {traversal_errors} traversal error{})",
+        "Index ready: {total} eligible image{} ({oversized_skipped} oversized skipped, recursive scan, {traversal_errors} traversal error{})",
         if total == 1 { "" } else { "s" },
         if traversal_errors == 1 { "" } else { "s" }
     )));
