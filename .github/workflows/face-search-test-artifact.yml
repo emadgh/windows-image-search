@@ -1,0 +1,36 @@
+name: PR141 face search test artifact
+
+on:
+  push:
+    branches:
+      - build/face-search-pr141-test
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release
+        run: cargo build --release
+      - name: Prepare test package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force package | Out-Null
+          Copy-Item target/release/windows-image-search.exe package/
+          Copy-Item docs/face-search-validation.md package/
+          @'
+          PR #141 Face Search test build.
+          External YuNet and SFace ONNX model files are not bundled.
+          Configure both model paths under Settings before testing Face Search.
+          '@ | Set-Content package/README-TEST.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-image-search-pr141-face-search-test
+          path: package
+          if-no-files-found: error
+          retention-days: 14
