@@ -1,5 +1,5 @@
 use crate::face_detection::{FaceBox, FaceLandmark};
-use crate::face_similarity::{self, FaceSimilarityOptions};
+use crate::face_similarity::{self, FaceSimilarityOptions, FaceSimilarityQuery};
 use crate::portable;
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OpenFlags};
@@ -72,6 +72,7 @@ pub fn list_persisted_faces(root: &Path, image_path: &Path) -> Result<Vec<Indexe
         WHERE f.image_path = ?1
           AND s.detector_id = f.detector_id
           AND s.detector_version = f.detector_version
+          AND s.detector_cache_revision = f.detector_cache_revision
           AND s.schema_version = f.schema_version
           AND s.source_size = f.source_size
           AND s.source_modified = f.source_modified
@@ -112,11 +113,19 @@ pub fn search_indexed_face(
     if face_id.trim().is_empty() {
         bail!("face id cannot be empty");
     }
-    let options = options.sanitized();
     let query = face_similarity::load_query(query_root, face_id)?;
+    search_embedding_query(roots, &query, options)
+}
+
+pub fn search_embedding_query(
+    roots: &[PathBuf],
+    query: &FaceSimilarityQuery,
+    options: IndexedFaceSearchOptions,
+) -> Result<IndexedFaceSearchReport> {
+    let options = options.sanitized();
     let report = face_similarity::search_available_roots(
         roots,
-        &query,
+        query,
         FaceSimilarityOptions {
             limit: options.limit,
             collapse_same_image: true,
