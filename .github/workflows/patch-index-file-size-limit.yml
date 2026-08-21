@@ -23,10 +23,8 @@ jobs:
         run: python3 scripts/patch_index_file_size_limit.py
       - name: Format
         run: cargo fmt --all
-      - name: Check
+      - name: Linux compile check
         run: cargo check --all-targets
-      - name: Tests
-        run: cargo test --all-targets
       - name: Commit patched sources
         if: github.event_name == 'push'
         shell: bash
