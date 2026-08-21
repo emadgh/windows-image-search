@@ -95,7 +95,9 @@ pub fn list_people_representatives(
         let Ok(library_id) = portable_library_id(&root_conn) else {
             continue;
         };
-        roots_by_library.entry(library_id).or_insert_with(|| root.clone());
+        roots_by_library
+            .entry(library_id)
+            .or_insert_with(|| root.clone());
     }
 
     let mut suggestions = Vec::new();
@@ -109,11 +111,9 @@ pub fn list_people_representatives(
         let Ok(root_conn) = open_read_only(root) else {
             continue;
         };
-        let Some(mut suggestion) = load_searchable_face_by_id(
-            &root_conn,
-            root,
-            &cluster.representative_face_id,
-        )? else {
+        let Some(mut suggestion) =
+            load_searchable_face_by_id(&root_conn, root, &cluster.representative_face_id)?
+        else {
             continue;
         };
         suggestion.group_size = Some(cluster.member_count);

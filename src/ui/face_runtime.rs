@@ -101,7 +101,8 @@ impl ImageSearchApp {
                     match result {
                         Ok((detection, embedding)) => {
                             let built_identity_embeddings = embedding.is_some();
-                            self.face_runtime.run_people_after_embedding = built_identity_embeddings;
+                            self.face_runtime.run_people_after_embedding =
+                                built_identity_embeddings;
                             if let Some(embedding) = embedding {
                                 self.status = format!(
                                     "Face pipeline complete: {} image{} processed, {} face{} found, {} embedding{} updated, {} total failure{}",
@@ -144,9 +145,7 @@ impl ImageSearchApp {
             self.start_face_pipeline();
         }
 
-        if self.face_runtime.run_people_after_embedding
-            && !self.busy
-            && !self.face_runtime.running
+        if self.face_runtime.run_people_after_embedding && !self.busy && !self.face_runtime.running
         {
             self.face_runtime.run_people_after_embedding = false;
             self.start_people_rebuild();
