@@ -8,8 +8,8 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-const DEFAULT_QUERY_COUNT: usize = 24;
-const MAX_QUERY_COUNT: usize = 64;
+const DEFAULT_QUERY_COUNT: usize = 16;
+const MAX_QUERY_COUNT: usize = 16;
 const MAX_CORPUS_COUNT: usize = 512;
 const BATCH_SIZE: usize = 16;
 
@@ -149,7 +149,12 @@ pub fn benchmark(db_path: &Path, model_cache: &Path, requested_queries: usize) -
         bail!("image-model benchmark needs at least one indexed image file that still exists");
     }
 
-    let corpus_target = available.len().min(MAX_CORPUS_COUNT);
+    // The automatic benchmark sample count must bound the corpus too.
+    // Previously SampleCount=50 still expanded this phase to 512 corpus images.
+    let corpus_target = available
+        .len()
+        .min(MAX_CORPUS_COUNT)
+        .min(requested_queries.max(1));
     let corpus: Vec<PathBuf> = sample_evenly(&available, corpus_target)
         .into_iter()
         .filter(|path| image::open(path).is_ok())
