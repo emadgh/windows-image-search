@@ -1,9 +1,7 @@
 use super::ImageSearchApp;
 use crate::face_detection::{
-    self,
-    yunet_production::YuNetProductionDetector,
-    yunet_settings::FaceDetectorSettings,
-    FaceBox, FaceDetector,
+    self, yunet_production::YuNetProductionDetector, yunet_settings::FaceDetectorSettings, FaceBox,
+    FaceDetector,
 };
 use crate::face_embedding::{self, FaceEmbedder};
 use crate::face_search::{
