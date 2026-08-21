@@ -1,0 +1,37 @@
+name: Apply incremental People clustering
+
+on:
+  push:
+    branches:
+      - feat/people-clustering-foundation
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/people-clustering-foundation
+          fetch-depth: 0
+      - name: Apply incremental implementation
+        run: python scripts/people_incremental_upgrade.py
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Format
+        run: cargo fmt --all
+      - name: Remove temporary patch machinery
+        run: |
+          rm scripts/people_incremental_upgrade.py
+          rm .github/workflows/apply-people-incremental.yml
+      - name: Commit implementation
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/main.rs src/people_store.rs src/people_clustering.rs src/ui/face_runtime.rs scripts/people_incremental_upgrade.py .github/workflows/apply-people-incremental.yml
+          git commit -m "feat: add incremental People clustering updates"
+          git push origin HEAD:feat/people-clustering-foundation
