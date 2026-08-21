@@ -208,7 +208,10 @@ pub fn search_indexed_face(
         bail!("face id cannot be empty");
     }
     let query = face_similarity::load_query(query_root, face_id)?;
-    search_embedding_query(roots, &query, options)
+    let query_image = portable::absolute_source_path(query_root, &query.relative_image_path)?;
+    let mut report = search_embedding_query(roots, &query, options)?;
+    exclude_query_parent_image(&mut report.matches, &query_image);
+    Ok(report)
 }
 
 pub fn search_embedding_query(
@@ -245,6 +248,10 @@ pub fn search_embedding_query(
         rows_considered: report.rows_considered,
         matches,
     })
+}
+
+fn exclude_query_parent_image(matches: &mut Vec<IndexedFaceSearchHit>, query_image: &Path) {
+    matches.retain(|item| item.image_path != query_image);
 }
 
 fn open_read_only(root: &Path) -> Result<Connection> {
@@ -303,5 +310,44 @@ mod tests {
         let decoded = decode_landmarks(&[0; 8], 1).unwrap();
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0], FaceLandmark { x: 0.0, y: 0.0 });
+    }
+
+    #[test]
+    fn indexed_query_parent_image_is_removed_even_if_another_face_matched() {
+        let query_path = PathBuf::from("C:/library/query.jpg");
+        let mut matches = vec![
+            IndexedFaceSearchHit {
+                root: PathBuf::from("C:/library"),
+                library_id: "library".to_owned(),
+                face_id: "other-face-in-query-image".to_owned(),
+                image_path: query_path.clone(),
+                bbox: FaceBox {
+                    x: 0.1,
+                    y: 0.1,
+                    width: 0.2,
+                    height: 0.2,
+                },
+                landmarks: Vec::new(),
+                similarity: 0.99,
+            },
+            IndexedFaceSearchHit {
+                root: PathBuf::from("C:/library"),
+                library_id: "library".to_owned(),
+                face_id: "real-result".to_owned(),
+                image_path: PathBuf::from("C:/library/result.jpg"),
+                bbox: FaceBox {
+                    x: 0.2,
+                    y: 0.2,
+                    width: 0.2,
+                    height: 0.2,
+                },
+                landmarks: Vec::new(),
+                similarity: 0.91,
+            },
+        ];
+
+        exclude_query_parent_image(&mut matches, &query_path);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].face_id, "real-result");
     }
 }
