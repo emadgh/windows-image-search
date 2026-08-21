@@ -25,7 +25,9 @@ To request a different bounded sample size:
 .\scripts\run-indexed-sample-benchmark.ps1 -Executable .\windows-image-search.exe -SampleCount 100
 ```
 
-The image-model benchmark is capped at 64 query sources and the material-texture benchmark is capped at 128 by their existing safety limits. Other automatic benchmarks use the requested count subject to their own corpus availability.
+For the image-model comparison, the requested sample count now bounds the corpus as well; a 50-sample run no longer silently expands to a 512-image corpus. Up to 16 deterministic source images from that bounded corpus are transformed into three query variants for each of the five candidate models. The material-texture benchmark remains capped at 128 samples. Other automatic benchmarks use the requested count subject to their own corpus availability.
+
+Long-running child benchmarks emit a 15-second heartbeat with elapsed time, accumulated CPU time, and working-set memory so a stalled model download/session initialization is visible instead of appearing frozen.
 
 The run writes the normal timestamped result directory and ZIP bundle under `benchmark-results`, including per-benchmark output, system information, process RAM/private-memory sampling, and GPU process-memory sampling when Windows exposes the counters.
 
