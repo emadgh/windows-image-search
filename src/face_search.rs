@@ -14,6 +14,16 @@ pub struct IndexedFaceChoice {
     pub landmarks: Vec<FaceLandmark>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct IndexedFaceSuggestion {
+    pub root: PathBuf,
+    pub face_id: String,
+    pub image_path: PathBuf,
+    pub ordinal: usize,
+    pub confidence: f32,
+    pub bbox: FaceBox,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct IndexedFaceSearchOptions {
     pub min_similarity: f32,
@@ -55,6 +65,90 @@ pub struct IndexedFaceSearchReport {
     pub roots_unavailable: usize,
     pub rows_considered: usize,
     pub matches: Vec<IndexedFaceSearchHit>,
+}
+
+pub fn list_searchable_faces(
+    roots: &[PathBuf],
+    limit: usize,
+) -> Result<Vec<IndexedFaceSuggestion>> {
+    let limit = limit.clamp(1, 2_000);
+    if roots.is_empty() {
+        return Ok(Vec::new());
+    }
+    let per_root_limit = limit.div_ceil(roots.len()).max(1);
+    let mut suggestions = Vec::new();
+
+    for root in roots {
+        let Ok(conn) = open_read_only(root) else {
+            continue;
+        };
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT f.face_id, f.image_path, f.face_ordinal, f.confidence,
+                   f.bbox_x, f.bbox_y, f.bbox_width, f.bbox_height
+            FROM faces f
+            JOIN face_detection_state s ON s.image_path = f.image_path
+            JOIN images i ON i.path = f.image_path
+            JOIN face_embeddings e ON e.face_id = f.face_id
+            WHERE s.detector_id = f.detector_id
+              AND s.detector_version = f.detector_version
+              AND s.detector_cache_revision = f.detector_cache_revision
+              AND s.schema_version = f.schema_version
+              AND s.source_size = f.source_size
+              AND s.source_modified = f.source_modified
+              AND i.size = f.source_size
+              AND i.modified = f.source_modified
+              AND e.normalized = 1
+              AND e.detector_id = f.detector_id
+              AND e.detector_version = f.detector_version
+              AND e.detector_cache_revision = f.detector_cache_revision
+              AND e.detection_schema_version = f.schema_version
+              AND e.source_size = f.source_size
+              AND e.source_modified = f.source_modified
+            ORDER BY f.confidence DESC, f.image_path COLLATE NOCASE, f.face_ordinal
+            LIMIT ?1
+            "#,
+        )?;
+        let rows = stmt.query_map(params![per_root_limit as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?.max(0) as usize,
+                row.get::<_, f32>(3)?,
+                FaceBox {
+                    x: row.get(4)?,
+                    y: row.get(5)?,
+                    width: row.get(6)?,
+                    height: row.get(7)?,
+                },
+            ))
+        })?;
+        for row in rows {
+            let (face_id, relative, ordinal, confidence, bbox) = row?;
+            let relative = PathBuf::from(relative);
+            let Ok(image_path) = portable::absolute_source_path(root, &relative) else {
+                continue;
+            };
+            suggestions.push(IndexedFaceSuggestion {
+                root: root.clone(),
+                face_id,
+                image_path,
+                ordinal,
+                confidence,
+                bbox,
+            });
+        }
+    }
+
+    suggestions.sort_by(|left, right| {
+        right
+            .confidence
+            .total_cmp(&left.confidence)
+            .then_with(|| left.image_path.cmp(&right.image_path))
+            .then_with(|| left.ordinal.cmp(&right.ordinal))
+    });
+    suggestions.truncate(limit);
+    Ok(suggestions)
 }
 
 pub fn list_persisted_faces(root: &Path, image_path: &Path) -> Result<Vec<IndexedFaceChoice>> {
