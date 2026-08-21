@@ -1,5 +1,6 @@
 mod collections;
 mod face_runtime;
+mod face_search_panel;
 mod texture_lru;
 mod thumbnails;
 mod views;
@@ -68,6 +69,7 @@ pub struct ImageSearchApp {
     face_embedding_settings: FaceEmbeddingSettings,
     face_settings_path: PathBuf,
     face_runtime: face_runtime::FaceRuntimeState,
+    face_search_ui: face_search_panel::FaceSearchUiState,
     collections: collections::CollectionsState,
     pub(super) search_text: String,
     text_search_service: TextSearchService,
@@ -115,6 +117,7 @@ impl ImageSearchApp {
         let face_settings_path = app_data_dir.join("face-embedding-settings.ini");
         let face_embedding_settings = face_settings::load(&face_settings_path);
         let face_runtime = face_runtime::FaceRuntimeState::new(app_data_dir);
+        let face_search_ui = face_search_panel::FaceSearchUiState::default();
         let embedding_service = EmbeddingService::new(model_cache);
         let text_search_service = TextSearchService::new(db_path.clone());
         let fs_watch_service = FsWatchService::new(Vec::new());
@@ -177,6 +180,7 @@ impl ImageSearchApp {
             face_embedding_settings,
             face_settings_path,
             face_runtime,
+            face_search_ui,
             collections: collections::CollectionsState::default(),
             search_text: String::new(),
             text_search_service,
@@ -645,6 +649,7 @@ impl ImageSearchApp {
             return;
         }
         let allow_descriptor_backfill = !self.indexing;
+        self.clear_face_search_result_state();
         self.searching = true;
         self.busy = true;
         self.last_error = None;
@@ -1127,6 +1132,13 @@ impl ImageSearchApp {
                             self.similarity_results = None;
                             self.query_image = None;
                             self.selected_paths.clear();
+                            self.clear_face_search_result_state();
+                        }
+                        if ui
+                            .add_enabled(!self.busy, egui::Button::new("👤 Face Search"))
+                            .clicked()
+                        {
+                            self.open_face_search();
                         }
                     });
                     if self.indexing && !self.index_paused {
@@ -1286,6 +1298,7 @@ impl eframe::App for ImageSearchApp {
         self.process_startup_messages();
         self.process_worker_messages();
         self.process_face_runtime_messages();
+        self.process_face_search_messages();
         self.process_fs_watch_messages();
         self.process_thumbnail_messages(ctx);
         self.observe_text_search_input();
@@ -1334,6 +1347,7 @@ impl eframe::App for ImageSearchApp {
 
         self.show_search_sidebar(ctx);
         self.show_settings_window(ctx);
+        self.show_face_search_window(ctx);
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -1384,7 +1398,9 @@ impl eframe::App for ImageSearchApp {
                     visible.len(),
                     if visible.len() == 1 { "" } else { "s" }
                 ));
-                if self.similarity_results.is_some() {
+                if self.face_search_active() {
+                    ui.small("Face identity similarity order");
+                } else if self.similarity_results.is_some() {
                     ui.small("Hybrid similarity order using current weights");
                 }
 

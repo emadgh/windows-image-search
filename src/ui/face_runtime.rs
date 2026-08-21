@@ -15,12 +15,7 @@ use std::sync::mpsc::{Receiver, Sender};
 enum FaceRuntimeMessage {
     DetectionEvent(FacePipelineEvent),
     EmbeddingEvent(FaceEmbeddingPipelineEvent),
-    Finished(
-        Result<
-            (FacePipelineSummary, Option<FaceEmbeddingPipelineSummary>),
-            String,
-        >,
-    ),
+    Finished(Result<(FacePipelineSummary, Option<FaceEmbeddingPipelineSummary>), String>),
 }
 
 pub(super) struct FaceRuntimeState {
@@ -139,7 +134,8 @@ impl ImageSearchApp {
         let roots = self.roots.clone();
         let detector_settings = self.face_runtime.settings.clone().sanitized();
         let embedding_settings = self.face_embedding_settings.clone();
-        let run_embeddings = embedding_settings.configured() && embedding_settings.model_path.is_file();
+        let run_embeddings =
+            embedding_settings.configured() && embedding_settings.model_path.is_file();
         let tx = self.face_runtime.tx.clone();
         self.face_runtime.running = true;
         self.busy = true;

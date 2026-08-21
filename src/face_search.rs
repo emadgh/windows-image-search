@@ -255,8 +255,12 @@ fn open_read_only(root: &Path) -> Result<Connection> {
     if !db_path.is_file() {
         bail!("portable index does not exist: {}", db_path.display());
     }
-    Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .with_context(|| format!("opening portable face index read-only {}", db_path.display()))
+    Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).with_context(|| {
+        format!(
+            "opening portable face index read-only {}",
+            db_path.display()
+        )
+    })
 }
 
 fn decode_landmarks(bytes: &[u8], count: usize) -> Option<Vec<FaceLandmark>> {
