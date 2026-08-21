@@ -1,0 +1,34 @@
+name: Patch indexing final stall
+
+on:
+  push:
+    branches:
+      - fix/indexing-final-clip-stall
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply patch
+        run: python3 scripts/patch_indexing_final_stall.py
+      - name: Format
+        run: cargo fmt --all
+      - name: Commit patched sources
+        shell: bash
+        run: |
+          if git diff --quiet -- src/embedding.rs src/indexer.rs; then
+            echo "No source changes"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/embedding.rs src/indexer.rs
+          git commit -m "fix: bound final CLIP batch and avoid redundant root rewrite"
+          git push origin HEAD:fix/indexing-final-clip-stall
