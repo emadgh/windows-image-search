@@ -52,8 +52,11 @@ The large-corpus full-rebuild path avoids scanning every existing cluster centro
 - If no People snapshot exists yet, Face Search falls back to the previous searchable face-instance gallery, so Face Search remains usable before clustering is available.
 - Completing People maintenance refreshes the Face Search suggestion source.
 
+## Regression coverage
+
+The People tests include in-memory clustering/reconciliation cases plus persisted SQLite/portable-index scenarios. Persisted coverage verifies that a newly indexed face joins an existing Person without changing its stable Person ID, a previous outlier can form a new Person when a matching face arrives later, and changing the clustering threshold forces a compatible full rebuild rather than mixing old and new snapshot semantics. Test temporary directories use only the Rust standard library, so this feature adds no test/runtime dependency solely for temporary files.
+
 ## Remaining #59 work
 
-1. Add stronger regression coverage for the complete persisted incremental path (no-op, attach to existing Person, create a new Person from outliers/new faces, and revision-change fallback).
-2. Record practical clustering quality/performance evidence on a real multi-person library before closing #59.
-3. Build manual People management/overrides in #60 without mutating automatic clustering state.
+1. Record practical clustering quality/performance evidence on a real multi-person library before closing #59.
+2. Build manual People management/overrides in #60 without mutating automatic clustering state.
