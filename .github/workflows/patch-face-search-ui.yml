@@ -36,13 +36,14 @@ jobs:
         run: |
           Remove-Item scripts/patch_face_search_ui.py
           Remove-Item .github/workflows/patch-face-search-ui.yml
+          Remove-Item .patch-face-search-trigger -ErrorAction SilentlyContinue
 
       - name: Commit patched sources
         shell: pwsh
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/main.rs src/ui/mod.rs src/ui/face_search_panel.rs src/face_search.rs scripts/patch_face_search_ui.py .github/workflows/patch-face-search-ui.yml
+          git add -A
           if (git diff --cached --quiet) { exit 0 }
           git commit -m "feat: wire searchable face gallery into GUI"
           git push origin HEAD:feat/face-search-completion
