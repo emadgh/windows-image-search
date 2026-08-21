@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
 
-pub const ALGORITHM_REVISION: i64 = 1;
+pub const ALGORITHM_REVISION: i64 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PeopleEmbeddingRevision {
@@ -253,7 +253,9 @@ pub fn stable_person_id(
         hash ^= 0xff;
         hash = hash.wrapping_mul(0x100000001b3);
     }
-    for byte in embedding.dimension.to_le_bytes() {
+    let dimension = u64::try_from(embedding.dimension)
+        .context("People embedding dimension does not fit stable id encoding")?;
+    for byte in dimension.to_le_bytes() {
         hash ^= byte as u64;
         hash = hash.wrapping_mul(0x100000001b3);
     }
