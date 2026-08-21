@@ -76,6 +76,19 @@ pub fn save(path: &Path, settings: &PeopleSettings) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn temp_settings_path() -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!(
+                "windows-image-search-people-settings-{}-{unique}",
+                std::process::id()
+            ))
+            .join("people-settings.ini")
+    }
+
     #[test]
     fn invalid_values_are_sanitized() {
         assert_eq!(
@@ -101,13 +114,15 @@ mod tests {
 
     #[test]
     fn settings_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("people-settings.ini");
+        let path = temp_settings_path();
         let expected = PeopleSettings {
             similarity_threshold: 0.71,
             min_cluster_size: 3,
         };
         save(&path, &expected).unwrap();
         assert_eq!(load(&path), expected);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
     }
 }
