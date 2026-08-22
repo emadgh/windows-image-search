@@ -1,0 +1,71 @@
+name: Validate People management core
+
+on:
+  push:
+    branches:
+      - feat/people-management-overrides
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/people-management-overrides
+          fetch-depth: 0
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+      - id: fmt
+        name: Format check
+        continue-on-error: true
+        run: cargo fmt --all -- --check
+      - id: check
+        name: Cargo check
+        continue-on-error: true
+        run: cargo check --all-targets
+      - id: tests
+        name: Tests
+        continue-on-error: true
+        run: cargo test --all-targets
+      - id: release
+        name: Release build
+        continue-on-error: true
+        run: cargo build --release
+      - name: Record failed validation
+        if: steps.fmt.outcome != 'success' || steps.check.outcome != 'success' || steps.tests.outcome != 'success' || steps.release.outcome != 'success'
+        shell: bash
+        run: |
+          cat > .people-management-ci-failure.txt <<EOF
+          fmt=${{ steps.fmt.outcome }}
+          check=${{ steps.check.outcome }}
+          tests=${{ steps.tests.outcome }}
+          release=${{ steps.release.outcome }}
+          EOF
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .people-management-ci-failure.txt
+          git commit -m "ci: record People management validation failure"
+          git push origin HEAD:feat/people-management-overrides
+      - name: Clean successful validator
+        if: steps.fmt.outcome == 'success' && steps.check.outcome == 'success' && steps.tests.outcome == 'success' && steps.release.outcome == 'success'
+        shell: bash
+        run: |
+          rm .github/workflows/validate-people-management-core.yml
+          rm -f .people-management-ci-failure.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A .github/workflows/validate-people-management-core.yml .people-management-ci-failure.txt
+          git commit -m "chore: remove successful People management validator"
+          git push origin HEAD:feat/people-management-overrides
+      - name: Fail job when validation failed
+        if: steps.fmt.outcome != 'success' || steps.check.outcome != 'success' || steps.tests.outcome != 'success' || steps.release.outcome != 'success'
+        shell: bash
+        run: exit 1
