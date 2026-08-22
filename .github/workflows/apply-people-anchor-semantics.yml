@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   apply:
+    # Temporary source patch job; removed by the job after a successful apply.
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
