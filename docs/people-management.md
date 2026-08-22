@@ -28,3 +28,17 @@ Existing override databases are migrated with `propagates_cluster = 0`, so older
 Manual face dispositions always win over automatic membership. Cluster propagation is considered only from assignments explicitly marked as anchors. If one automatic cluster contains anchors for more than one manual identity, unoverridden faces are left with automatic membership rather than being forced into either manual Person.
 
 This separation is required so future clustering/model changes can rebuild automatic state without silently losing names, merges, splits, ignored faces or representative choices.
+
+## Desktop People Manager
+
+The desktop UI exposes a dedicated `People` window from the main toolbar.
+
+- The left pane lists effective automatic/manual People with representative face crops and membership counts.
+- Checkboxes allow selecting two or more groups for an explicit merge.
+- The editor pane supports naming an automatic group (materializing durable anchors) or renaming an existing manual identity.
+- `Show member images` switches the main result surface to the unique parent images represented by the selected Person membership.
+- The selected Person exposes its member face crops. A face can be made representative, split into a new Person, moved to another manual Person, detached, ignored, or restored to automatic clustering.
+- Reverting a manual Person requires an explicit confirmation; the derived automatic cluster data remains untouched.
+- Every correction refreshes both the effective People catalog and Face Search suggestions so the two surfaces stay consistent.
+
+The management window intentionally operates on the effective catalog instead of editing HNSW/automatic clustering state directly.
