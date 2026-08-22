@@ -481,21 +481,11 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.pragma_update(None, "foreign_keys", "ON").unwrap();
         let person = create_person(&conn, "Alice", "library-a", "face-1").unwrap();
-        assert!(set_representative(
-            &conn,
-            &person.manual_person_id,
-            "library-a",
-            "face-1"
-        )
-        .is_err());
+        assert!(
+            set_representative(&conn, &person.manual_person_id, "library-a", "face-1").is_err()
+        );
         assign_face(&conn, "library-a", "face-1", &person.manual_person_id).unwrap();
-        set_representative(
-            &conn,
-            &person.manual_person_id,
-            "library-a",
-            "face-1",
-        )
-        .unwrap();
+        set_representative(&conn, &person.manual_person_id, "library-a", "face-1").unwrap();
         let loaded = load_person(&conn, &person.manual_person_id)
             .unwrap()
             .unwrap();
