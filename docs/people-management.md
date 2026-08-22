@@ -41,4 +41,4 @@ The desktop UI exposes a dedicated `People` window from the main toolbar.
 - Reverting a manual Person requires an explicit confirmation; the derived automatic cluster data remains untouched.
 - Every correction refreshes both the effective People catalog and Face Search suggestions so the two surfaces stay consistent.
 
-The management window intentionally operates on the effective catalog instead of editing HNSW/automatic clustering state directly.
+The management window intentionally operates on the effective catalog instead of editing HNSW/automatic clustering state directly. Windows validation covers formatting, all-target compilation, the full test suite, and the release build for the combined Face Search + People stack.
