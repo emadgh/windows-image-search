@@ -84,8 +84,8 @@ pub(super) fn show(app: &mut ImageSearchApp, ctx: &egui::Context) {
     egui::Window::new("Preferences")
         .open(&mut open)
         .resizable(true)
-        .default_size([900.0, 620.0])
-        .min_width(700.0)
+        .default_size([920.0, 640.0])
+        .min_width(780.0)
         .min_height(500.0)
         .max_height((ctx.available_rect().height() - 48.0).max(320.0))
         .show(ctx, |ui| {
