@@ -122,6 +122,29 @@ pub fn list_people_representatives(
     Ok(suggestions)
 }
 
+pub fn resolve_searchable_face(
+    roots: &[PathBuf],
+    library_id: &str,
+    face_id: &str,
+) -> Result<Option<IndexedFaceSuggestion>> {
+    if library_id.trim().is_empty() || face_id.trim().is_empty() {
+        return Ok(None);
+    }
+    for root in roots {
+        let Ok(conn) = open_read_only(root) else {
+            continue;
+        };
+        let Ok(candidate_library_id) = portable_library_id(&conn) else {
+            continue;
+        };
+        if candidate_library_id != library_id {
+            continue;
+        }
+        return load_searchable_face_by_id(&conn, root, face_id);
+    }
+    Ok(None)
+}
+
 pub fn list_searchable_faces(
     roots: &[PathBuf],
     limit: usize,

@@ -97,15 +97,13 @@ impl ImageSearchApp {
                         .first()
                         .map(|person| person.person_id.clone());
                 }
-                self.people_manager_ui
-                    .merge_selection
-                    .retain(|id| {
-                        self.people_manager_ui
-                            .catalog
-                            .people
-                            .iter()
-                            .any(|person| &person.person_id == id)
-                    });
+                self.people_manager_ui.merge_selection.retain(|id| {
+                    self.people_manager_ui
+                        .catalog
+                        .people
+                        .iter()
+                        .any(|person| &person.person_id == id)
+                });
                 self.sync_people_editor_fields();
             }
             Err(err) => {
@@ -133,11 +131,7 @@ impl ImageSearchApp {
         self.people_manager_ui.move_target = None;
     }
 
-    fn people_preview(
-        &mut self,
-        library_id: &str,
-        face_id: &str,
-    ) -> Option<IndexedFaceSuggestion> {
+    fn people_preview(&mut self, library_id: &str, face_id: &str) -> Option<IndexedFaceSuggestion> {
         let key = (library_id.to_owned(), face_id.to_owned());
         if let Some(value) = self.people_manager_ui.preview_cache.get(&key) {
             return value.clone();
@@ -224,7 +218,8 @@ impl ImageSearchApp {
                     face_id,
                 } => {
                     let conn = crate::db::open(&self.db_path)?;
-                    let _ = people_management::restore_automatic_face(&conn, &library_id, &face_id)?;
+                    let _ =
+                        people_management::restore_automatic_face(&conn, &library_id, &face_id)?;
                     self.status = "Face restored to automatic clustering".to_owned();
                 }
                 PeopleAction::SetRepresentative {
@@ -233,11 +228,8 @@ impl ImageSearchApp {
                     face_id,
                 } => {
                     let conn = crate::db::open(&self.db_path)?;
-                    let manual_id = people_management::materialize_effective_person(
-                        &conn,
-                        &person_id,
-                        None,
-                    )?;
+                    let manual_id =
+                        people_management::materialize_effective_person(&conn, &person_id, None)?;
                     people_management::set_person_representative(
                         &conn,
                         &manual_id,
