@@ -1,0 +1,37 @@
+name: Finalize Preferences layout
+
+on:
+  push:
+    branches:
+      - ui/grouped-preferences-window
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ui/grouped-preferences-window
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply final layout adjustments
+        run: python scripts/finalize_preferences_layout.py
+      - name: Format
+        run: cargo fmt --all
+      - name: Remove temporary layout machinery
+        run: |
+          rm scripts/finalize_preferences_layout.py
+          rm .github/workflows/finalize-preferences-layout.yml
+      - name: Commit final layout
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/ui/settings_window.rs src/ui/collections.rs scripts/finalize_preferences_layout.py .github/workflows/finalize-preferences-layout.yml
+          git commit -m "style: finalize responsive Preferences layout"
+          git push origin HEAD:ui/grouped-preferences-window
