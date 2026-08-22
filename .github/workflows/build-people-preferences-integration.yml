@@ -1,0 +1,133 @@
+name: Build People + Preferences integration
+
+on:
+  push:
+    branches:
+      - test/people-preferences-integration
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: test/people-preferences-integration
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Fetch grouped Preferences source
+        run: git fetch origin ui/grouped-preferences-window
+      - name: Apply Preferences files and preserve People Manager wiring
+        shell: bash
+        run: |
+          git show origin/ui/grouped-preferences-window:src/ui/settings_window.rs > src/ui/settings_window.rs
+          git show origin/ui/grouped-preferences-window:src/ui/collections.rs > src/ui/collections.rs
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('src/ui/mod.rs')
+          text = path.read_text(encoding='utf-8')
+          if 'mod settings_window;' not in text:
+              anchor = 'mod face_search_panel;\n'
+              if anchor not in text:
+                  raise SystemExit('cannot find face_search_panel module anchor')
+              text = text.replace(anchor, anchor + 'mod settings_window;\n', 1)
+
+          pattern = re.compile(
+              r'    fn show_settings_window\(&mut self, ctx: &egui::Context\) \{.*?\n    \}\n\n    fn show_search_sidebar',
+              re.S,
+          )
+          replacement = (
+              '    fn show_settings_window(&mut self, ctx: &egui::Context) {\n'
+              '        settings_window::show(self, ctx);\n'
+              '    }\n\n'
+              '    fn show_search_sidebar'
+          )
+          text, count = pattern.subn(replacement, text, count=1)
+          if count != 1:
+              raise SystemExit(f'expected one Settings function replacement, got {count}')
+          path.write_text(text, encoding='utf-8')
+          PY
+          cargo fmt --all
+      - name: Commit integration source
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/ui/settings_window.rs src/ui/collections.rs src/ui/mod.rs
+          git commit -m "test: combine People Manager with grouped Preferences"
+          git push origin HEAD:test/people-preferences-integration
+
+  validate_package:
+    needs: integrate
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: test/people-preferences-integration
+          fetch-depth: 1
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Cargo check
+        run: cargo check --all-targets
+      - name: Tests
+        run: cargo test --all-targets
+      - name: Release build
+        run: cargo build --release
+      - name: Prepare combined Windows test bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path test-bundle | Out-Null
+          Copy-Item target/release/windows-image-search.exe test-bundle/windows-image-search.exe
+          @'
+          Windows Image Search - combined Face/People/Preferences validation build
+
+          Includes:
+          - Face Search + Face from file
+          - HNSW/incremental People clustering
+          - People Manager manual corrections
+          - grouped Preferences window
+
+          Suggested validation:
+          1. Open Preferences and inspect all six categories.
+          2. Configure YuNet + SFace if not already configured.
+          3. Use Rescan changed (not Force rescan all unless intentionally rebuilding descriptors).
+          4. Open Face Search and verify unique Person suggestions.
+          5. Open People and test rename, representative, split, merge, ignore/detach, restore and Show member images.
+          6. Restart the app and confirm manual People corrections persist.
+          '@ | Set-Content -Encoding UTF8 test-bundle/TEST-CHECKLIST.txt
+      - name: Upload combined Windows test bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-image-search-people-preferences-test
+          path: test-bundle
+          if-no-files-found: error
+          retention-days: 14
+
+  cleanup:
+    needs: validate_package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: test/people-preferences-integration
+          fetch-depth: 0
+      - name: Remove temporary integration workflow
+        run: |
+          rm .github/workflows/build-people-preferences-integration.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/workflows/build-people-preferences-integration.yml
+          git commit -m "chore: remove temporary integration build workflow"
+          git push origin HEAD:test/people-preferences-integration
