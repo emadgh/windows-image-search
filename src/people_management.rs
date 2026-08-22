@@ -131,11 +131,7 @@ pub fn ignore_face(conn: &Connection, library_id: &str, face_id: &str) -> Result
     people_overrides::ignore_face(conn, library_id, face_id)
 }
 
-pub fn restore_automatic_face(
-    conn: &Connection,
-    library_id: &str,
-    face_id: &str,
-) -> Result<bool> {
+pub fn restore_automatic_face(conn: &Connection, library_id: &str, face_id: &str) -> Result<bool> {
     people_overrides::clear_face_override(conn, library_id, face_id)
 }
 
@@ -145,8 +141,18 @@ pub fn set_person_representative(
     library_id: &str,
     face_id: &str,
 ) -> Result<()> {
-    // Representative selection is an explicit correction for this face, not a cluster anchor.
-    people_overrides::assign_face(conn, library_id, face_id, manual_person_id)?;
+    // Do not downgrade an existing cluster anchor merely because it became the representative.
+    let already_assigned_to_person = people_overrides::load_face_overrides(conn)?
+        .into_iter()
+        .any(|item| {
+            item.library_id == library_id
+                && item.face_id == face_id
+                && item.disposition == people_overrides::FaceOverrideDisposition::Assigned
+                && item.manual_person_id.as_deref() == Some(manual_person_id)
+        });
+    if !already_assigned_to_person {
+        people_overrides::assign_face(conn, library_id, face_id, manual_person_id)?;
+    }
     people_overrides::set_representative(conn, manual_person_id, library_id, face_id)
 }
 
@@ -283,10 +289,7 @@ mod tests {
         conn.pragma_update(None, "foreign_keys", "ON").unwrap();
         write_auto(
             &mut conn,
-            vec![
-                cluster("auto-a", "a-1", 2),
-                cluster("auto-b", "b-1", 2),
-            ],
+            vec![cluster("auto-a", "a-1", 2), cluster("auto-b", "b-1", 2)],
             vec![
                 member("a-1", Some("auto-a")),
                 member("a-2", Some("auto-a")),
@@ -308,6 +311,9 @@ mod tests {
             .unwrap();
         assert_eq!(person.display_name.as_deref(), Some("Merged person"));
         assert_eq!(person.member_count, 4);
-        assert_eq!(person.source, people_effective::EffectivePersonSource::Manual);
+        assert_eq!(
+            person.source,
+            people_effective::EffectivePersonSource::Manual
+        );
     }
 }

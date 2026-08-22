@@ -97,13 +97,16 @@ impl ImageSearchApp {
                         .first()
                         .map(|person| person.person_id.clone());
                 }
-                self.people_manager_ui.merge_selection.retain(|id| {
-                    self.people_manager_ui
-                        .catalog
-                        .people
-                        .iter()
-                        .any(|person| &person.person_id == id)
-                });
+                let valid_person_ids = self
+                    .people_manager_ui
+                    .catalog
+                    .people
+                    .iter()
+                    .map(|person| person.person_id.clone())
+                    .collect::<HashSet<_>>();
+                self.people_manager_ui
+                    .merge_selection
+                    .retain(|id| valid_person_ids.contains(id));
                 self.sync_people_editor_fields();
             }
             Err(err) => {
@@ -410,6 +413,56 @@ impl ImageSearchApp {
                                         ui.add_space(3.0);
                                     }
                                 });
+
+                            let exceptions = self
+                                .people_manager_ui
+                                .catalog
+                                .members
+                                .iter()
+                                .filter(|member| {
+                                    member.person_id.is_none() && (member.detached || member.ignored)
+                                })
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            if !exceptions.is_empty() {
+                                ui.add_space(8.0);
+                                ui.separator();
+                                ui.strong(format!("Manual exceptions ({})", exceptions.len()));
+                                ui.small("Detached/ignored faces stay here so every correction can be restored.");
+                                egui::ScrollArea::vertical()
+                                    .id_salt("people-manager-exceptions")
+                                    .max_height(180.0)
+                                    .show(ui, |ui| {
+                                        for member in exceptions {
+                                            ui.horizontal(|ui| {
+                                                if let Some(preview) = self.people_preview(
+                                                    &member.library_id,
+                                                    &member.face_id,
+                                                ) {
+                                                    if let Some(texture) = self.thumbnail(&preview.image_path) {
+                                                        let _ = face_crop_widget(
+                                                            ui,
+                                                            &texture,
+                                                            preview.bbox,
+                                                            egui::vec2(42.0, 42.0),
+                                                            false,
+                                                        );
+                                                    }
+                                                }
+                                                ui.vertical(|ui| {
+                                                    ui.small(if member.ignored { "Ignored face" } else { "Detached face" });
+                                                    ui.small(&member.face_id);
+                                                });
+                                                if ui.small_button("Restore").clicked() {
+                                                    action = Some(PeopleAction::Restore {
+                                                        library_id: member.library_id.clone(),
+                                                        face_id: member.face_id.clone(),
+                                                    });
+                                                }
+                                            });
+                                        }
+                                    });
+                            }
                         },
                     );
                     ui.separator();
@@ -433,19 +486,39 @@ impl ImageSearchApp {
                             return;
                         };
 
+                        let members = self
+                            .people_manager_ui
+                            .catalog
+                            .members
+                            .iter()
+                            .filter(|member| {
+                                member.person_id.as_deref() == Some(&person.person_id)
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        let mut parent_images = HashSet::new();
+                        for member in &members {
+                            if let Some(preview) =
+                                self.people_preview(&member.library_id, &member.face_id)
+                            {
+                                parent_images.insert(preview.image_path);
+                            }
+                        }
                         let title = person
                             .display_name
                             .clone()
                             .unwrap_or_else(|| "Unnamed person".to_owned());
                         ui.heading(title);
                         ui.small(format!(
-                            "{} · {} face{}",
+                            "{} · {} face{} · {} image{}",
                             match person.source {
                                 EffectivePersonSource::Automatic => "Automatic group",
                                 EffectivePersonSource::Manual => "Manual identity",
                             },
                             person.member_count,
-                            if person.member_count == 1 { "" } else { "s" }
+                            if person.member_count == 1 { "" } else { "s" },
+                            parent_images.len(),
+                            if parent_images.len() == 1 { "" } else { "s" }
                         ));
 
                         ui.add_space(8.0);
@@ -518,16 +591,6 @@ impl ImageSearchApp {
                         ui.add_space(10.0);
                         ui.separator();
                         ui.strong("Faces in this Person");
-                        let members = self
-                            .people_manager_ui
-                            .catalog
-                            .members
-                            .iter()
-                            .filter(|member| {
-                                member.person_id.as_deref() == Some(&person.person_id)
-                            })
-                            .cloned()
-                            .collect::<Vec<_>>();
                         let selected_face = self.people_manager_ui.selected_face.clone();
                         egui::ScrollArea::vertical()
                             .id_salt("people-manager-members")

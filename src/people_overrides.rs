@@ -628,4 +628,42 @@ mod tests {
             .is_some());
         assert_eq!(load_face_overrides(&conn).unwrap().len(), 1);
     }
+
+    #[test]
+    fn old_override_schema_migrates_without_promoting_assignments_to_anchors() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE people_manual_persons (
+                manual_person_id TEXT PRIMARY KEY NOT NULL,
+                display_name TEXT NOT NULL DEFAULT '',
+                representative_library_id TEXT,
+                representative_face_id TEXT,
+                created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            CREATE TABLE people_manual_face_overrides (
+                library_id TEXT NOT NULL,
+                face_id TEXT NOT NULL,
+                disposition TEXT NOT NULL,
+                manual_person_id TEXT,
+                updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                PRIMARY KEY(library_id, face_id)
+            );
+            INSERT INTO people_manual_persons(manual_person_id, display_name)
+                VALUES('manual-old', 'Alice');
+            INSERT INTO people_manual_face_overrides(
+                library_id, face_id, disposition, manual_person_id
+            ) VALUES('library-a', 'face-1', 'assigned', 'manual-old');
+            "#,
+        )
+        .unwrap();
+
+        ensure_schema(&conn).unwrap();
+        let overrides = load_face_overrides(&conn).unwrap();
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides[0].manual_person_id.as_deref(), Some("manual-old"));
+        assert!(!overrides[0].propagates_cluster);
+    }
 }
