@@ -106,9 +106,7 @@ pub(super) fn show(app: &mut ImageSearchApp, ctx: &egui::Context) {
                                 SettingsCategory::LibraryIndexing => {
                                     settings_library_indexing(app, ui, &mut effects)
                                 }
-                                SettingsCategory::Collections => {
-                                    settings_collections(app, ui)
-                                }
+                                SettingsCategory::Collections => settings_collections(app, ui),
                                 SettingsCategory::SearchClip => {
                                     settings_search_clip(app, ui, &mut effects)
                                 }
@@ -134,7 +132,10 @@ pub(super) fn show(app: &mut ImageSearchApp, ctx: &egui::Context) {
                         ui.heading("Preferences");
                         ui.add_space(5.0);
                         for item in SettingsCategory::ALL {
-                            if ui.selectable_label(category == item, item.label()).clicked() {
+                            if ui
+                                .selectable_label(category == item, item.label())
+                                .clicked()
+                            {
                                 category = item;
                             }
                         }
@@ -221,10 +222,11 @@ fn settings_library_indexing(app: &mut ImageSearchApp, ui: &mut egui::Ui, effect
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.label(root.display().to_string());
-                        let (discovered, indexed) = app.root_counts.get(&root).copied().unwrap_or((
-                            0,
-                            app.images.iter().filter(|image| image.root == root).count(),
-                        ));
+                        let (discovered, indexed) =
+                            app.root_counts.get(&root).copied().unwrap_or((
+                                0,
+                                app.images.iter().filter(|image| image.root == root).count(),
+                            ));
                         ui.small(format!("{indexed}/{discovered} indexed"));
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -459,7 +461,10 @@ fn settings_storage(app: &mut ImageSearchApp, ui: &mut egui::Ui, effects: &mut E
 
     ui.add_space(12.0);
     ui.strong("Thumbnail cache");
-    ui.label(format!("Location: {}", app.thumb_pool.cache_dir().display()));
+    ui.label(format!(
+        "Location: {}",
+        app.thumb_pool.cache_dir().display()
+    ));
     ui.label("Cached previews are generated at up to 512 px on background worker threads.");
     ui.small(format!(
         "GPU/UI thumbnail textures: {} / {} active (LRU bounded; disk cache survives eviction).",
