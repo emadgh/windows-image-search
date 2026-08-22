@@ -1,0 +1,37 @@
+name: Wire People overrides
+
+on:
+  push:
+    branches:
+      - feat/people-management-overrides
+
+permissions:
+  contents: write
+
+jobs:
+  wire:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/people-management-overrides
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Wire module
+        run: python scripts/wire_people_overrides.py
+      - name: Format
+        run: cargo fmt --all
+      - name: Remove temporary wiring machinery
+        run: |
+          rm scripts/wire_people_overrides.py
+          rm .github/workflows/wire-people-overrides.yml
+      - name: Commit wiring
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/main.rs src/people_overrides.rs scripts/wire_people_overrides.py .github/workflows/wire-people-overrides.yml
+          git commit -m "feat: wire manual People overrides into the application"
+          git push origin HEAD:feat/people-management-overrides
