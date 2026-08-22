@@ -1,0 +1,50 @@
+name: Package People + Preferences Windows test
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+      - name: Release build
+        run: cargo build --release
+      - name: Prepare test bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path test-bundle | Out-Null
+          Copy-Item target/release/windows-image-search.exe test-bundle/windows-image-search.exe
+          @'
+          Windows Image Search - Face / People / Preferences validation build
+
+          Includes:
+          - Face Search with indexed-face chooser and Face from file
+          - HNSW + incremental People clustering
+          - People Manager: rename, merge, split, move, representative, detach, ignore, restore
+          - grouped Preferences window
+          - oversized-file skip and indexing-stall fixes inherited from the stacked development line where applicable
+
+          Test checklist:
+          1. Open Preferences and verify grouped navigation: Library / Indexing, Collections, Search / CLIP, Faces / People, Performance, Storage.
+          2. Configure external YuNet and SFace ONNX paths if needed.
+          3. Run Rescan changed. Do not use Force rescan all unless intentionally rebuilding all descriptors.
+          4. Open Face Search; verify Person suggestions are representative crops rather than repeated instances after People clustering exists.
+          5. Test Face from file with an image containing multiple people and choose one detected face.
+          6. Open People; test rename, representative, split, merge, move, detach/ignore, Manual exceptions Restore, and Show member images.
+          7. Restart the app and confirm manual People corrections persist.
+          8. Confirm normal text/color/collection/image search still behaves as before.
+          '@ | Set-Content -Encoding UTF8 test-bundle/TEST-CHECKLIST.txt
+      - name: Upload Windows test bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-image-search-face-people-preferences-test
+          path: test-bundle
+          if-no-files-found: error
+          retention-days: 14
