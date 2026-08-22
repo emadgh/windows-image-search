@@ -27,6 +27,7 @@ mod material_texture;
 mod metadata;
 mod model_benchmark;
 mod people_clustering;
+mod people_effective;
 mod people_overrides;
 mod people_settings;
 mod people_store;

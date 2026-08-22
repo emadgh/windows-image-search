@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EffectivePersonSource {
     Automatic,
     Manual,
@@ -63,7 +63,10 @@ pub fn load(conn: &Connection) -> Result<EffectivePeopleCatalog> {
     let mut automatic_outliers = Vec::new();
     for member in auto_members {
         if let Some(person_id) = member.person_id.clone() {
-            auto_group_members.entry(person_id).or_default().push(member);
+            auto_group_members
+                .entry(person_id)
+                .or_default()
+                .push(member);
         } else {
             automatic_outliers.push(member);
         }
@@ -154,9 +157,9 @@ pub fn load(conn: &Connection) -> Result<EffectivePeopleCatalog> {
         members.dedup();
         match source {
             EffectivePersonSource::Manual => {
-                let manual = manual_by_id
-                    .get(&person_id)
-                    .with_context(|| format!("effective People references unknown manual id {person_id}"))?;
+                let manual = manual_by_id.get(&person_id).with_context(|| {
+                    format!("effective People references unknown manual id {person_id}")
+                })?;
                 let configured_rep = manual
                     .representative_library_id
                     .clone()
@@ -168,7 +171,9 @@ pub fn load(conn: &Connection) -> Result<EffectivePeopleCatalog> {
                     &effective_members,
                     &person_id,
                 );
-                let representative = configured_rep.or(fallback_rep).or_else(|| members.first().cloned());
+                let representative = configured_rep
+                    .or(fallback_rep)
+                    .or_else(|| members.first().cloned());
                 people.push(EffectivePerson {
                     person_id,
                     display_name: (!manual.display_name.trim().is_empty())
@@ -180,9 +185,9 @@ pub fn load(conn: &Connection) -> Result<EffectivePeopleCatalog> {
                 });
             }
             EffectivePersonSource::Automatic => {
-                let auto = auto_cluster_by_id
-                    .get(&person_id)
-                    .with_context(|| format!("effective People references unknown automatic id {person_id}"))?;
+                let auto = auto_cluster_by_id.get(&person_id).with_context(|| {
+                    format!("effective People references unknown automatic id {person_id}")
+                })?;
                 let configured_rep = (
                     auto.representative_library_id.clone(),
                     auto.representative_face_id.clone(),
@@ -214,7 +219,8 @@ pub fn load(conn: &Connection) -> Result<EffectivePeopleCatalog> {
         }
         people.push(EffectivePerson {
             person_id: manual.manual_person_id.clone(),
-            display_name: (!manual.display_name.trim().is_empty()).then(|| manual.display_name.clone()),
+            display_name: (!manual.display_name.trim().is_empty())
+                .then(|| manual.display_name.clone()),
             source: EffectivePersonSource::Manual,
             representative_library_id: None,
             representative_face_id: None,
@@ -228,7 +234,11 @@ pub fn load(conn: &Connection) -> Result<EffectivePeopleCatalog> {
         right
             .member_count
             .cmp(&left.member_count)
-            .then_with(|| left_named.to_ascii_lowercase().cmp(&right_named.to_ascii_lowercase()))
+            .then_with(|| {
+                left_named
+                    .to_ascii_lowercase()
+                    .cmp(&right_named.to_ascii_lowercase())
+            })
             .then_with(|| left.person_id.cmp(&right.person_id))
     });
     effective_members.sort_by(|left, right| {
@@ -321,25 +331,25 @@ fn choose_manual_fallback_representative(
         .iter()
         .map(|item| (item.0.as_str(), item.1.as_str()))
         .collect();
-    for cluster in automatic_clusters.values() {
-        let candidate = (
-            cluster.representative_library_id.as_str(),
-            cluster.representative_face_id.as_str(),
-        );
-        if !member_set.contains(&candidate) {
-            continue;
-        }
-        let belongs = effective_members.iter().any(|member| {
-            member.library_id == cluster.representative_library_id
-                && member.face_id == cluster.representative_face_id
-                && member.person_id.as_deref() == Some(manual_person_id)
-                && member.source == Some(EffectivePersonSource::Manual)
-        });
-        if belongs {
-            return Some((candidate.0.to_owned(), candidate.1.to_owned()));
-        }
-    }
-    None
+    automatic_clusters
+        .values()
+        .filter_map(|cluster| {
+            let candidate = (
+                cluster.representative_library_id.as_str(),
+                cluster.representative_face_id.as_str(),
+            );
+            if !member_set.contains(&candidate) {
+                return None;
+            }
+            let belongs = effective_members.iter().any(|member| {
+                member.library_id == cluster.representative_library_id
+                    && member.face_id == cluster.representative_face_id
+                    && member.person_id.as_deref() == Some(manual_person_id)
+                    && member.source == Some(EffectivePersonSource::Manual)
+            });
+            belongs.then(|| (candidate.0.to_owned(), candidate.1.to_owned()))
+        })
+        .min()
 }
 
 #[cfg(test)]
@@ -420,8 +430,8 @@ mod tests {
                 auto_member("face-3", Some("person-auto")),
             ],
         );
-        let manual = people_overrides::create_person(&conn, "Alice", "library-a", "face-1")
-            .unwrap();
+        let manual =
+            people_overrides::create_person(&conn, "Alice", "library-a", "face-1").unwrap();
         people_overrides::assign_face(&conn, "library-a", "face-1", &manual.manual_person_id)
             .unwrap();
 
@@ -434,7 +444,9 @@ mod tests {
             catalog
                 .members
                 .iter()
-                .filter(|member| member.person_id.as_deref() == Some(manual.manual_person_id.as_str()))
+                .filter(
+                    |member| member.person_id.as_deref() == Some(manual.manual_person_id.as_str())
+                )
                 .count(),
             3
         );
@@ -453,8 +465,7 @@ mod tests {
                 auto_member("face-3", Some("person-auto")),
             ],
         );
-        let alice = people_overrides::create_person(&conn, "Alice", "library-a", "face-1")
-            .unwrap();
+        let alice = people_overrides::create_person(&conn, "Alice", "library-a", "face-1").unwrap();
         let bob = people_overrides::create_person(&conn, "Bob", "library-a", "face-2").unwrap();
         people_overrides::assign_face(&conn, "library-a", "face-1", &alice.manual_person_id)
             .unwrap();
@@ -489,18 +500,22 @@ mod tests {
         let catalog = load(&conn).unwrap();
         assert_eq!(catalog.people.len(), 1);
         assert_eq!(catalog.people[0].member_count, 1);
-        assert!(catalog
-            .members
-            .iter()
-            .find(|member| member.face_id == "face-2")
-            .unwrap()
-            .ignored);
-        assert!(catalog
-            .members
-            .iter()
-            .find(|member| member.face_id == "face-3")
-            .unwrap()
-            .detached);
+        assert!(
+            catalog
+                .members
+                .iter()
+                .find(|member| member.face_id == "face-2")
+                .unwrap()
+                .ignored
+        );
+        assert!(
+            catalog
+                .members
+                .iter()
+                .find(|member| member.face_id == "face-3")
+                .unwrap()
+                .detached
+        );
     }
 
     #[test]
@@ -508,8 +523,8 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.pragma_update(None, "foreign_keys", "ON").unwrap();
         write_auto(&mut conn, vec![], vec![auto_member("face-1", None)]);
-        let manual = people_overrides::create_person(&conn, "Alice", "library-a", "face-1")
-            .unwrap();
+        let manual =
+            people_overrides::create_person(&conn, "Alice", "library-a", "face-1").unwrap();
         people_overrides::assign_face(&conn, "library-a", "face-1", &manual.manual_person_id)
             .unwrap();
         let catalog = load(&conn).unwrap();
