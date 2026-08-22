@@ -43,6 +43,7 @@ pub struct FaceOverride {
     pub face_id: String,
     pub disposition: FaceOverrideDisposition,
     pub manual_person_id: Option<String>,
+    pub propagates_cluster: bool,
 }
 
 pub fn ensure_schema(conn: &Connection) -> Result<()> {
@@ -67,6 +68,7 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
             face_id TEXT NOT NULL,
             disposition TEXT NOT NULL CHECK(disposition IN ('assigned', 'detached', 'ignored')),
             manual_person_id TEXT,
+            propagates_cluster INTEGER NOT NULL DEFAULT 0 CHECK(propagates_cluster IN (0, 1)),
             updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
             PRIMARY KEY(library_id, face_id),
             FOREIGN KEY(manual_person_id)
@@ -85,6 +87,25 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
             ON people_manual_face_overrides(disposition, library_id, face_id);
         "#,
     )?;
+
+    let has_propagates_cluster = {
+        let mut stmt = conn.prepare("PRAGMA table_info(people_manual_face_overrides)")?;
+        let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let mut found = false;
+        for column in columns {
+            if column? == "propagates_cluster" {
+                found = true;
+                break;
+            }
+        }
+        found
+    };
+    if !has_propagates_cluster {
+        conn.execute(
+            "ALTER TABLE people_manual_face_overrides ADD COLUMN propagates_cluster INTEGER NOT NULL DEFAULT 0 CHECK(propagates_cluster IN (0, 1))",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -130,6 +151,25 @@ pub fn assign_face(
     face_id: &str,
     manual_person_id: &str,
 ) -> Result<()> {
+    assign_face_with_propagation(conn, library_id, face_id, manual_person_id, false)
+}
+
+pub fn anchor_face(
+    conn: &Connection,
+    library_id: &str,
+    face_id: &str,
+    manual_person_id: &str,
+) -> Result<()> {
+    assign_face_with_propagation(conn, library_id, face_id, manual_person_id, true)
+}
+
+fn assign_face_with_propagation(
+    conn: &Connection,
+    library_id: &str,
+    face_id: &str,
+    manual_person_id: &str,
+    propagates_cluster: bool,
+) -> Result<()> {
     ensure_schema(conn)?;
     validate_face_key(library_id, face_id)?;
     validate_person_id(manual_person_id)?;
@@ -142,6 +182,7 @@ pub fn assign_face(
         face_id,
         FaceOverrideDisposition::Assigned,
         Some(manual_person_id),
+        propagates_cluster,
     )
 }
 
@@ -154,6 +195,7 @@ pub fn detach_face(conn: &Connection, library_id: &str, face_id: &str) -> Result
         face_id,
         FaceOverrideDisposition::Detached,
         None,
+        false,
     )
 }
 
@@ -166,6 +208,7 @@ pub fn ignore_face(conn: &Connection, library_id: &str, face_id: &str) -> Result
         face_id,
         FaceOverrideDisposition::Ignored,
         None,
+        false,
     )
 }
 
@@ -350,7 +393,7 @@ pub fn load_face_overrides(conn: &Connection) -> Result<Vec<FaceOverride>> {
     ensure_schema(conn)?;
     let mut stmt = conn.prepare(
         r#"
-        SELECT library_id, face_id, disposition, manual_person_id
+        SELECT library_id, face_id, disposition, manual_person_id, propagates_cluster
         FROM people_manual_face_overrides
         ORDER BY library_id, face_id
         "#,
@@ -362,16 +405,18 @@ pub fn load_face_overrides(conn: &Connection) -> Result<Vec<FaceOverride>> {
             row.get::<_, String>(1)?,
             disposition_text,
             row.get::<_, Option<String>>(3)?,
+            row.get::<_, i64>(4)? != 0,
         ))
     })?;
     let mut output = Vec::new();
     for row in rows {
-        let (library_id, face_id, disposition, manual_person_id) = row?;
+        let (library_id, face_id, disposition, manual_person_id, propagates_cluster) = row?;
         output.push(FaceOverride {
             library_id,
             face_id,
             disposition: FaceOverrideDisposition::parse(&disposition)?,
             manual_person_id,
+            propagates_cluster,
         });
     }
     Ok(output)
@@ -383,18 +428,26 @@ fn upsert_face_override(
     face_id: &str,
     disposition: FaceOverrideDisposition,
     manual_person_id: Option<&str>,
+    propagates_cluster: bool,
 ) -> Result<()> {
     conn.execute(
         r#"
         INSERT INTO people_manual_face_overrides(
-            library_id, face_id, disposition, manual_person_id, updated_at
-        ) VALUES(?1, ?2, ?3, ?4, unixepoch())
+            library_id, face_id, disposition, manual_person_id, propagates_cluster, updated_at
+        ) VALUES(?1, ?2, ?3, ?4, ?5, unixepoch())
         ON CONFLICT(library_id, face_id) DO UPDATE SET
             disposition = excluded.disposition,
             manual_person_id = excluded.manual_person_id,
+            propagates_cluster = excluded.propagates_cluster,
             updated_at = unixepoch()
         "#,
-        params![library_id, face_id, disposition.as_str(), manual_person_id],
+        params![
+            library_id,
+            face_id,
+            disposition.as_str(),
+            manual_person_id,
+            if propagates_cluster { 1i64 } else { 0i64 }
+        ],
     )?;
     Ok(())
 }

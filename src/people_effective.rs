@@ -83,7 +83,8 @@ pub fn load(conn: &Connection) -> Result<EffectivePeopleCatalog> {
             .filter_map(|member| {
                 let key = (member.library_id.clone(), member.face_id.clone());
                 override_by_face.get(&key).and_then(|item| {
-                    (item.disposition == people_overrides::FaceOverrideDisposition::Assigned)
+                    (item.disposition == people_overrides::FaceOverrideDisposition::Assigned
+                        && item.propagates_cluster)
                         .then(|| item.manual_person_id.clone())
                         .flatten()
                 })
@@ -432,7 +433,7 @@ mod tests {
         );
         let manual =
             people_overrides::create_person(&conn, "Alice", "library-a", "face-1").unwrap();
-        people_overrides::assign_face(&conn, "library-a", "face-1", &manual.manual_person_id)
+        people_overrides::anchor_face(&conn, "library-a", "face-1", &manual.manual_person_id)
             .unwrap();
 
         let catalog = load(&conn).unwrap();
@@ -531,5 +532,37 @@ mod tests {
         assert_eq!(catalog.people.len(), 1);
         assert_eq!(catalog.people[0].source, EffectivePersonSource::Manual);
         assert_eq!(catalog.people[0].member_count, 1);
+    }
+
+    #[test]
+    fn explicit_assignment_does_not_claim_unoverridden_cluster_members() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        write_auto(
+            &mut conn,
+            vec![auto_cluster("person-auto", "face-1", 3)],
+            vec![
+                auto_member("face-1", Some("person-auto")),
+                auto_member("face-2", Some("person-auto")),
+                auto_member("face-3", Some("person-auto")),
+            ],
+        );
+        let manual = people_overrides::create_person(&conn, "Bob", "library-a", "face-3").unwrap();
+        people_overrides::assign_face(&conn, "library-a", "face-3", &manual.manual_person_id)
+            .unwrap();
+
+        let catalog = load(&conn).unwrap();
+        let manual_members = catalog
+            .members
+            .iter()
+            .filter(|member| member.person_id.as_deref() == Some(&manual.manual_person_id))
+            .count();
+        let auto_members = catalog
+            .members
+            .iter()
+            .filter(|member| member.person_id.as_deref() == Some("person-auto"))
+            .count();
+        assert_eq!(manual_members, 1);
+        assert_eq!(auto_members, 2);
     }
 }
