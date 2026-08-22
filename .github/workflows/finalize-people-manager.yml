@@ -1,0 +1,37 @@
+name: Finalize People Manager
+
+on:
+  push:
+    branches:
+      - feat/people-management-overrides
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/people-management-overrides
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply final fixes
+        run: python scripts/finalize_people_manager.py
+      - name: Format
+        run: cargo fmt --all
+      - name: Remove temporary machinery
+        run: |
+          rm scripts/finalize_people_manager.py
+          rm .github/workflows/finalize-people-manager.yml
+      - name: Commit final fixes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/people_management.rs src/people_overrides.rs src/ui/people_manager.rs scripts/finalize_people_manager.py .github/workflows/finalize-people-manager.yml
+          git commit -m "fix: finalize reversible People correction semantics"
+          git push origin HEAD:feat/people-management-overrides
