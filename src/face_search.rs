@@ -1,8 +1,9 @@
 use crate::face_detection::{FaceBox, FaceLandmark};
-use crate::face_similarity::{self, FaceSimilarityOptions};
-use crate::portable;
+use crate::face_similarity::{self, FaceSimilarityOptions, FaceSimilarityQuery};
+use crate::{db, people_store, portable};
 use anyhow::{bail, Context, Result};
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -12,6 +13,17 @@ pub struct IndexedFaceChoice {
     pub confidence: f32,
     pub bbox: FaceBox,
     pub landmarks: Vec<FaceLandmark>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct IndexedFaceSuggestion {
+    pub root: PathBuf,
+    pub face_id: String,
+    pub image_path: PathBuf,
+    pub ordinal: usize,
+    pub confidence: f32,
+    pub bbox: FaceBox,
+    pub group_size: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -57,6 +69,167 @@ pub struct IndexedFaceSearchReport {
     pub matches: Vec<IndexedFaceSearchHit>,
 }
 
+pub fn list_people_representatives(
+    session_db_path: &Path,
+    roots: &[PathBuf],
+    limit: usize,
+) -> Result<Vec<IndexedFaceSuggestion>> {
+    let limit = limit.clamp(1, 2_000);
+    if roots.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let conn = db::open(session_db_path)
+        .with_context(|| format!("opening People catalog {}", session_db_path.display()))?;
+    people_store::ensure_schema(&conn)?;
+    let clusters = people_store::load_clusters(&conn)?;
+    if clusters.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut roots_by_library: HashMap<String, PathBuf> = HashMap::new();
+    for root in roots {
+        let Ok(root_conn) = open_read_only(root) else {
+            continue;
+        };
+        let Ok(library_id) = portable_library_id(&root_conn) else {
+            continue;
+        };
+        roots_by_library
+            .entry(library_id)
+            .or_insert_with(|| root.clone());
+    }
+
+    let mut suggestions = Vec::new();
+    for cluster in clusters {
+        if suggestions.len() >= limit {
+            break;
+        }
+        let Some(root) = roots_by_library.get(&cluster.representative_library_id) else {
+            continue;
+        };
+        let Ok(root_conn) = open_read_only(root) else {
+            continue;
+        };
+        let Some(mut suggestion) =
+            load_searchable_face_by_id(&root_conn, root, &cluster.representative_face_id)?
+        else {
+            continue;
+        };
+        suggestion.group_size = Some(cluster.member_count);
+        suggestions.push(suggestion);
+    }
+    Ok(suggestions)
+}
+
+pub fn resolve_searchable_face(
+    roots: &[PathBuf],
+    library_id: &str,
+    face_id: &str,
+) -> Result<Option<IndexedFaceSuggestion>> {
+    if library_id.trim().is_empty() || face_id.trim().is_empty() {
+        return Ok(None);
+    }
+    for root in roots {
+        let Ok(conn) = open_read_only(root) else {
+            continue;
+        };
+        let Ok(candidate_library_id) = portable_library_id(&conn) else {
+            continue;
+        };
+        if candidate_library_id != library_id {
+            continue;
+        }
+        return load_searchable_face_by_id(&conn, root, face_id);
+    }
+    Ok(None)
+}
+
+pub fn list_searchable_faces(
+    roots: &[PathBuf],
+    limit: usize,
+) -> Result<Vec<IndexedFaceSuggestion>> {
+    let limit = limit.clamp(1, 2_000);
+    if roots.is_empty() {
+        return Ok(Vec::new());
+    }
+    let per_root_limit = limit.div_ceil(roots.len()).max(1);
+    let mut suggestions = Vec::new();
+
+    for root in roots {
+        let Ok(conn) = open_read_only(root) else {
+            continue;
+        };
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT f.face_id, f.image_path, f.face_ordinal, f.confidence,
+                   f.bbox_x, f.bbox_y, f.bbox_width, f.bbox_height
+            FROM faces f
+            JOIN face_detection_state s ON s.image_path = f.image_path
+            JOIN images i ON i.path = f.image_path
+            JOIN face_embeddings e ON e.face_id = f.face_id
+            WHERE s.detector_id = f.detector_id
+              AND s.detector_version = f.detector_version
+              AND s.detector_cache_revision = f.detector_cache_revision
+              AND s.schema_version = f.schema_version
+              AND s.source_size = f.source_size
+              AND s.source_modified = f.source_modified
+              AND i.size = f.source_size
+              AND i.modified = f.source_modified
+              AND e.normalized = 1
+              AND e.detector_id = f.detector_id
+              AND e.detector_version = f.detector_version
+              AND e.detector_cache_revision = f.detector_cache_revision
+              AND e.detection_schema_version = f.schema_version
+              AND e.source_size = f.source_size
+              AND e.source_modified = f.source_modified
+            ORDER BY f.confidence DESC, f.image_path COLLATE NOCASE, f.face_ordinal
+            LIMIT ?1
+            "#,
+        )?;
+        let rows = stmt.query_map(params![per_root_limit as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?.max(0) as usize,
+                row.get::<_, f32>(3)?,
+                FaceBox {
+                    x: row.get(4)?,
+                    y: row.get(5)?,
+                    width: row.get(6)?,
+                    height: row.get(7)?,
+                },
+            ))
+        })?;
+        for row in rows {
+            let (face_id, relative, ordinal, confidence, bbox) = row?;
+            let relative = PathBuf::from(relative);
+            let Ok(image_path) = portable::absolute_source_path(root, &relative) else {
+                continue;
+            };
+            suggestions.push(IndexedFaceSuggestion {
+                root: root.clone(),
+                face_id,
+                image_path,
+                ordinal,
+                confidence,
+                bbox,
+                group_size: None,
+            });
+        }
+    }
+
+    suggestions.sort_by(|left, right| {
+        right
+            .confidence
+            .total_cmp(&left.confidence)
+            .then_with(|| left.image_path.cmp(&right.image_path))
+            .then_with(|| left.ordinal.cmp(&right.ordinal))
+    });
+    suggestions.truncate(limit);
+    Ok(suggestions)
+}
+
 pub fn list_persisted_faces(root: &Path, image_path: &Path) -> Result<Vec<IndexedFaceChoice>> {
     let relative = portable::relative_source_path(root, image_path)?;
     let conn = open_read_only(root)?;
@@ -72,6 +245,7 @@ pub fn list_persisted_faces(root: &Path, image_path: &Path) -> Result<Vec<Indexe
         WHERE f.image_path = ?1
           AND s.detector_id = f.detector_id
           AND s.detector_version = f.detector_version
+          AND s.detector_cache_revision = f.detector_cache_revision
           AND s.schema_version = f.schema_version
           AND s.source_size = f.source_size
           AND s.source_modified = f.source_modified
@@ -112,11 +286,22 @@ pub fn search_indexed_face(
     if face_id.trim().is_empty() {
         bail!("face id cannot be empty");
     }
-    let options = options.sanitized();
     let query = face_similarity::load_query(query_root, face_id)?;
+    let query_image = portable::absolute_source_path(query_root, &query.relative_image_path)?;
+    let mut report = search_embedding_query(roots, &query, options)?;
+    exclude_query_parent_image(&mut report.matches, &query_image);
+    Ok(report)
+}
+
+pub fn search_embedding_query(
+    roots: &[PathBuf],
+    query: &FaceSimilarityQuery,
+    options: IndexedFaceSearchOptions,
+) -> Result<IndexedFaceSearchReport> {
+    let options = options.sanitized();
     let report = face_similarity::search_available_roots(
         roots,
-        &query,
+        query,
         FaceSimilarityOptions {
             limit: options.limit,
             collapse_same_image: true,
@@ -144,6 +329,89 @@ pub fn search_indexed_face(
     })
 }
 
+fn exclude_query_parent_image(matches: &mut Vec<IndexedFaceSearchHit>, query_image: &Path) {
+    matches.retain(|item| item.image_path != query_image);
+}
+
+fn portable_library_id(conn: &Connection) -> Result<String> {
+    let library_id = conn
+        .query_row(
+            "SELECT value FROM portable_meta WHERE key = 'library_id'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .context("portable index has no library_id")?;
+    if library_id.trim().is_empty() {
+        bail!("portable index library_id is empty");
+    }
+    Ok(library_id)
+}
+
+fn load_searchable_face_by_id(
+    conn: &Connection,
+    root: &Path,
+    face_id: &str,
+) -> Result<Option<IndexedFaceSuggestion>> {
+    let row = conn
+        .query_row(
+            r#"
+            SELECT f.face_id, f.image_path, f.face_ordinal, f.confidence,
+                   f.bbox_x, f.bbox_y, f.bbox_width, f.bbox_height
+            FROM faces f
+            JOIN face_detection_state s ON s.image_path = f.image_path
+            JOIN images i ON i.path = f.image_path
+            JOIN face_embeddings e ON e.face_id = f.face_id
+            WHERE f.face_id = ?1
+              AND s.detector_id = f.detector_id
+              AND s.detector_version = f.detector_version
+              AND s.detector_cache_revision = f.detector_cache_revision
+              AND s.schema_version = f.schema_version
+              AND s.source_size = f.source_size
+              AND s.source_modified = f.source_modified
+              AND i.size = f.source_size
+              AND i.modified = f.source_modified
+              AND e.normalized = 1
+              AND e.detector_id = f.detector_id
+              AND e.detector_version = f.detector_version
+              AND e.detector_cache_revision = f.detector_cache_revision
+              AND e.detection_schema_version = f.schema_version
+              AND e.source_size = f.source_size
+              AND e.source_modified = f.source_modified
+            LIMIT 1
+            "#,
+            params![face_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?.max(0) as usize,
+                    row.get::<_, f32>(3)?,
+                    FaceBox {
+                        x: row.get(4)?,
+                        y: row.get(5)?,
+                        width: row.get(6)?,
+                        height: row.get(7)?,
+                    },
+                ))
+            },
+        )
+        .optional()?;
+    let Some((face_id, relative, ordinal, confidence, bbox)) = row else {
+        return Ok(None);
+    };
+    let image_path = portable::absolute_source_path(root, Path::new(&relative))?;
+    Ok(Some(IndexedFaceSuggestion {
+        root: root.to_path_buf(),
+        face_id,
+        image_path,
+        ordinal,
+        confidence,
+        bbox,
+        group_size: None,
+    }))
+}
+
 fn open_read_only(root: &Path) -> Result<Connection> {
     if !root.is_dir() {
         bail!("portable root is unavailable: {}", root.display());
@@ -152,8 +420,12 @@ fn open_read_only(root: &Path) -> Result<Connection> {
     if !db_path.is_file() {
         bail!("portable index does not exist: {}", db_path.display());
     }
-    Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .with_context(|| format!("opening portable face index read-only {}", db_path.display()))
+    Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).with_context(|| {
+        format!(
+            "opening portable face index read-only {}",
+            db_path.display()
+        )
+    })
 }
 
 fn decode_landmarks(bytes: &[u8], count: usize) -> Option<Vec<FaceLandmark>> {
@@ -196,5 +468,44 @@ mod tests {
         let decoded = decode_landmarks(&[0; 8], 1).unwrap();
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0], FaceLandmark { x: 0.0, y: 0.0 });
+    }
+
+    #[test]
+    fn indexed_query_parent_image_is_removed_even_if_another_face_matched() {
+        let query_path = PathBuf::from("C:/library/query.jpg");
+        let mut matches = vec![
+            IndexedFaceSearchHit {
+                root: PathBuf::from("C:/library"),
+                library_id: "library".to_owned(),
+                face_id: "other-face-in-query-image".to_owned(),
+                image_path: query_path.clone(),
+                bbox: FaceBox {
+                    x: 0.1,
+                    y: 0.1,
+                    width: 0.2,
+                    height: 0.2,
+                },
+                landmarks: Vec::new(),
+                similarity: 0.99,
+            },
+            IndexedFaceSearchHit {
+                root: PathBuf::from("C:/library"),
+                library_id: "library".to_owned(),
+                face_id: "real-result".to_owned(),
+                image_path: PathBuf::from("C:/library/result.jpg"),
+                bbox: FaceBox {
+                    x: 0.2,
+                    y: 0.2,
+                    width: 0.2,
+                    height: 0.2,
+                },
+                landmarks: Vec::new(),
+                similarity: 0.91,
+            },
+        ];
+
+        exclude_query_parent_image(&mut matches, &query_path);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].face_id, "real-result");
     }
 }
