@@ -1,0 +1,37 @@
+name: Polish grouped Preferences
+
+on:
+  push:
+    branches:
+      - ui/grouped-preferences-window
+
+permissions:
+  contents: write
+
+jobs:
+  polish:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ui/grouped-preferences-window
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply polish
+        run: python scripts/polish_grouped_preferences.py
+      - name: Format
+        run: cargo fmt --all
+      - name: Remove temporary polish machinery
+        run: |
+          rm scripts/polish_grouped_preferences.py
+          rm .github/workflows/polish-grouped-preferences.yml
+      - name: Commit polish
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/ui/collections.rs scripts/polish_grouped_preferences.py .github/workflows/polish-grouped-preferences.yml
+          git commit -m "style: simplify grouped Preferences sections"
+          git push origin HEAD:ui/grouped-preferences-window
