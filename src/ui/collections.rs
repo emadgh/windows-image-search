@@ -207,9 +207,6 @@ impl ImageSearchApp {
     }
 
     pub(super) fn show_collections_settings(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(12.0);
-        ui.separator();
-        ui.heading("Collections");
         ui.label(
             "Collections are virtual groups. Assign indexed folders recursively, add individual indexed files, or drag items here. Source files are never moved or deleted.",
         );
