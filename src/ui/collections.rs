@@ -207,9 +207,6 @@ impl ImageSearchApp {
     }
 
     pub(super) fn show_collections_settings(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(12.0);
-        ui.separator();
-        ui.heading("Collections");
         ui.label(
             "Collections are virtual groups. Assign indexed folders recursively, add individual indexed files, or drag items here. Source files are never moved or deleted.",
         );
@@ -227,7 +224,7 @@ impl ImageSearchApp {
 
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
-                ui.set_min_width(250.0);
+                ui.set_min_width(200.0);
                 ui.strong("Collections");
                 ui.horizontal(|ui| {
                     ui.add(
@@ -281,7 +278,7 @@ impl ImageSearchApp {
             ui.separator();
 
             ui.vertical(|ui| {
-                ui.set_min_width(470.0);
+                ui.set_min_width(350.0);
                 let Some(id) = selected_id else {
                     ui.label("Select or create a collection to manage assignments.");
                     return;
@@ -303,7 +300,7 @@ impl ImageSearchApp {
                     ui.add_enabled(
                         !self.busy,
                         egui::TextEdit::singleline(&mut self.collections.rename_name)
-                            .desired_width(240.0),
+                            .desired_width(180.0),
                     );
                     if ui
                         .add_enabled(
