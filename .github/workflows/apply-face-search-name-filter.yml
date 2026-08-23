@@ -1,0 +1,38 @@
+name: Apply Face Search name filter
+
+on:
+  push:
+    branches:
+      - feat/people-search-filters
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/people-search-filters
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply Face Search name filtering
+        run: python scripts/apply_face_search_name_filter.py
+      - name: Format
+        run: cargo fmt --all
+      - name: Remove temporary wiring files
+        run: |
+          rm scripts/apply_face_search_name_filter.py
+          rm .github/workflows/apply-face-search-name-filter.yml
+          rm -f .face-search-name-filter-trigger
+      - name: Commit source
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "feat: filter Face Search by named People"
+          git push origin HEAD:feat/people-search-filters
