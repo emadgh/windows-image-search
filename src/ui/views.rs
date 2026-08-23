@@ -1,4 +1,5 @@
 use super::{ImageSearchApp, ThumbnailFit};
+use crate::face_detection::FaceBox;
 use chrono::{Local, TimeZone};
 use eframe::egui;
 use std::path::{Path, PathBuf};
@@ -64,14 +65,24 @@ impl ImageSearchApp {
                                 |ui| {
                                     let response =
                                         if let Some(texture) = self.thumbnail(&record.path) {
-                                            thumbnail_widget(
+                                            let response = thumbnail_widget(
                                                 ui,
                                                 &texture,
                                                 egui::vec2(self.thumb_size, self.thumb_size),
                                                 fit,
                                                 selected,
                                                 egui::Sense::click_and_drag(),
-                                            )
+                                            );
+                                            if let Some(bbox) = self.face_match_box(&record.path) {
+                                                draw_face_match_box(
+                                                    ui,
+                                                    &texture,
+                                                    response.rect,
+                                                    fit,
+                                                    bbox,
+                                                );
+                                            }
+                                            response
                                         } else {
                                             let response = ui.add_sized(
                                                 [self.thumb_size, self.thumb_size],
@@ -136,14 +147,18 @@ impl ImageSearchApp {
 
                     ui.horizontal(|ui| {
                         let response = if let Some(texture) = self.thumbnail(&record.path) {
-                            thumbnail_widget(
+                            let response = thumbnail_widget(
                                 ui,
                                 &texture,
                                 egui::vec2(widths.thumb, 54.0),
                                 fit,
                                 selected,
                                 egui::Sense::click_and_drag(),
-                            )
+                            );
+                            if let Some(bbox) = self.face_match_box(&record.path) {
+                                draw_face_match_box(ui, &texture, response.rect, fit, bbox);
+                            }
+                            response
                         } else {
                             ui.add_sized(
                                 [widths.thumb, 54.0],
@@ -385,6 +400,70 @@ fn thumbnail_widget(
         );
     }
     response
+}
+
+fn draw_face_match_box(
+    ui: &egui::Ui,
+    texture: &egui::TextureHandle,
+    target: egui::Rect,
+    fit: ThumbnailFit,
+    bbox: FaceBox,
+) {
+    let source = texture.size_vec2();
+    if source.x <= 0.0 || source.y <= 0.0 {
+        return;
+    }
+    let bbox = bbox.clamped();
+    let (paint_rect, uv) = match fit {
+        ThumbnailFit::Contain => {
+            let scale = (target.width() / source.x).min(target.height() / source.y);
+            let size = source * scale;
+            (
+                egui::Rect::from_center_size(target.center(), size),
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            )
+        }
+        ThumbnailFit::Cover => {
+            let source_aspect = source.x / source.y;
+            let target_aspect = target.width() / target.height().max(1.0);
+            let uv = if source_aspect > target_aspect {
+                let visible = target_aspect / source_aspect;
+                let margin = (1.0 - visible) * 0.5;
+                egui::Rect::from_min_max(egui::pos2(margin, 0.0), egui::pos2(1.0 - margin, 1.0))
+            } else {
+                let visible = source_aspect / target_aspect;
+                let margin = (1.0 - visible) * 0.5;
+                egui::Rect::from_min_max(egui::pos2(0.0, margin), egui::pos2(1.0, 1.0 - margin))
+            };
+            (target, uv)
+        }
+    };
+
+    let uv_width = uv.width().max(f32::EPSILON);
+    let uv_height = uv.height().max(f32::EPSILON);
+    let x0 = ((bbox.x - uv.min.x) / uv_width).clamp(0.0, 1.0);
+    let y0 = ((bbox.y - uv.min.y) / uv_height).clamp(0.0, 1.0);
+    let x1 = ((bbox.x + bbox.width - uv.min.x) / uv_width).clamp(0.0, 1.0);
+    let y1 = ((bbox.y + bbox.height - uv.min.y) / uv_height).clamp(0.0, 1.0);
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let rect = egui::Rect::from_min_max(
+        egui::pos2(
+            paint_rect.left() + x0 * paint_rect.width(),
+            paint_rect.top() + y0 * paint_rect.height(),
+        ),
+        egui::pos2(
+            paint_rect.left() + x1 * paint_rect.width(),
+            paint_rect.top() + y1 * paint_rect.height(),
+        ),
+    );
+    ui.painter().rect_stroke(
+        rect,
+        2.0,
+        egui::Stroke::new(2.0, egui::Color32::LIGHT_GREEN),
+        egui::StrokeKind::Inside,
+    );
 }
 
 fn swatch(ui: &mut egui::Ui, rgb: [u8; 3]) {
