@@ -1,110 +1,95 @@
-name: Apply oversized-file Settings integration
+name: Windows build
 
 on:
+  push:
+    branches:
+      - main
+      - feat/v0.1.0-mvp
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  apply:
-    if: github.actor != 'github-actions[bot]'
+  build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: fix/oversized-source-file-limit
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: Adapt size-limit control to current Preferences UI
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+      - name: PowerShell benchmark script syntax
         shell: pwsh
         run: |
-          @'
-          from pathlib import Path
-
-          path = Path('src/ui/settings_window.rs')
-          text = path.read_text(encoding='utf-8')
-
-          old = '"Detected {logical_threads} logical CPU thread{}. Safe defaults: Decode 2 / CLIP up to 4 / Batch 16 / Device CPU.",'
-          new = '"Detected {logical_threads} logical CPU thread{}. Safe defaults: Decode 2 / CLIP up to 4 / Batch 16 / Device CPU / Max file 256 MiB.",'
-          assert old in text
-          text = text.replace(old, new, 1)
-
-          old = '''        let batch_changed = ui
-            .add(
-                egui::Slider::new(
-                    &mut app.indexing_settings.batch_size,
-                    1..=settings::MAX_BATCH_SIZE,
-                )
-                .text("Index / embedding batch size"),
-            )
-            .changed();
-
-        if decode_changed || clip_changed || batch_changed {
-'''
-          new = '''        let batch_changed = ui
-            .add(
-                egui::Slider::new(
-                    &mut app.indexing_settings.batch_size,
-                    1..=settings::MAX_BATCH_SIZE,
-                )
-                .text("Index / embedding batch size"),
-            )
-            .changed();
-        let max_file_size_changed = ui
-            .add(
-                egui::Slider::new(
-                    &mut app.indexing_settings.max_file_size_mib,
-                    1..=settings::MAX_FILE_SIZE_MIB,
-                )
-                .logarithmic(true)
-                .text("Maximum source file size (MiB)"),
-            )
-            .changed();
-        ui.small(format!(
-            "Files larger than {} MiB are skipped before decode, metadata extraction and CLIP, regardless of extension.",
-            app.indexing_settings.max_file_size_mib
-        ));
-
-        if decode_changed || clip_changed || batch_changed || max_file_size_changed {
-'''
-          assert old in text
-          text = text.replace(old, new, 1)
-
-          old = '''                    "Performance settings saved: decode {}, CLIP {} threads on {}, batch {}",
-                    app.indexing_settings.decode_workers,
-                    app.indexing_settings.clip_threads,
-                    app.indexing_settings.clip_execution_provider.label(),
-                    app.indexing_settings.batch_size
-'''
-          new = '''                    "Performance settings saved: decode {}, CLIP {} threads on {}, batch {}, max source {} MiB",
-                    app.indexing_settings.decode_workers,
-                    app.indexing_settings.clip_threads,
-                    app.indexing_settings.clip_execution_provider.label(),
-                    app.indexing_settings.batch_size,
-                    app.indexing_settings.max_file_size_mib
-'''
-          assert old in text
-          text = text.replace(old, new, 1)
-
-          path.write_text(text, encoding='utf-8')
-          '@ | python -
-      - name: Format and validate
+          $files = @(
+            'scripts/new-material-eval-manifest-from-folders.ps1',
+            'scripts/run-v0.2-benchmark-gate-from-folders.ps1',
+            'scripts/run-v0.2-benchmark-gate.ps1',
+            'scripts/run-indexed-sample-benchmark.ps1'
+          )
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path -LiteralPath $file).Path,
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error "${file}: $($_.Message)" }
+              exit 1
+            }
+          }
+      - name: Windows PowerShell 5.1 benchmark compatibility
+        shell: powershell
+        run: |
+          $files = @(
+            'scripts/run-v0.2-benchmark-gate.ps1',
+            'scripts/run-indexed-sample-benchmark.ps1'
+          )
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path -LiteralPath $file).Path,
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error "${file}: $($_.Message)" }
+              exit 1
+            }
+          }
+          if (Select-String -Path 'scripts/run-v0.2-benchmark-gate.ps1' -Pattern '\.ArgumentList' -Quiet) {
+            throw 'Benchmark runner uses ProcessStartInfo.ArgumentList, which is unavailable on Windows PowerShell 5.1.'
+          }
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Cargo check
+        run: cargo check --all-targets
+      - name: Tests
+        run: cargo test --all-targets
+      - name: Release build
+        run: cargo build --release
+      - name: Prepare Windows test bundle
         shell: pwsh
         run: |
-          cargo fmt --all
-          cargo check --all-targets
-          cargo test --all-targets
-      - name: Restore normal CI and commit integration
-        shell: pwsh
-        run: |
-          git fetch origin main
-          git checkout origin/main -- .github/workflows/windows-build.yml
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/ui/settings_window.rs .github/workflows/windows-build.yml
-          git commit -m "fix: expose source file limit in Preferences"
-          git push origin HEAD:fix/oversized-source-file-limit
+          New-Item -ItemType Directory -Force -Path artifact | Out-Null
+          Copy-Item target/release/windows-image-search.exe artifact/
+          Copy-Item scripts/run-indexed-sample-benchmark.ps1 artifact/
+          Copy-Item scripts/run-v0.2-benchmark-gate.ps1 artifact/
+          Copy-Item README.md artifact/
+          Copy-Item LICENSE artifact/
+          git rev-parse HEAD | Set-Content artifact/COMMIT.txt -Encoding ascii
+      - name: Upload Windows test bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-image-search-pr133-test
+          path: artifact
+          if-no-files-found: error
+          retention-days: 14
