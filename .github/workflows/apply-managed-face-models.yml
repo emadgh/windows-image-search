@@ -31,17 +31,11 @@ jobs:
         run: |
           cargo check --all-targets
           cargo test --all-targets
-      - name: Remove temporary integration machinery
-        shell: pwsh
-        run: |
-          Remove-Item scripts/apply_managed_face_models.py -Force
-          Remove-Item .github/workflows/apply-managed-face-models.yml -Force
-          Remove-Item .managed-face-model-trigger -Force -ErrorAction SilentlyContinue
       - name: Commit managed model source
         shell: pwsh
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
+          git add Cargo.toml Cargo.lock src/main.rs src/face_model_manager.rs src/ui/mod.rs src/ui/face_runtime.rs src/ui/settings_window.rs
           git commit -m "feat: auto-download verified YuNet and SFace models"
           git push origin HEAD:feat/auto-download-face-models
