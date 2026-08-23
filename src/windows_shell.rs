@@ -21,7 +21,7 @@ pub fn show_context_menu(path: PathBuf) {
 fn windows_context_menu(path: &std::path::Path) -> windows::core::Result<()> {
     use std::ffi::c_void;
     use std::os::windows::ffi::OsStrExt;
-    use std::ptr::null;
+    use std::ptr::null_mut;
     use windows::core::{Error, PCSTR, PCWSTR};
     use windows::Win32::Foundation::POINT;
     use windows::Win32::System::Com::{
@@ -65,16 +65,17 @@ fn windows_context_menu(path: &std::path::Path) -> windows::core::Result<()> {
         let _pidl = PidlGuard(absolute_pidl);
 
         // Explorer obtains an item's IContextMenu from the item's parent IShellFolder.
-        // SHBindToParent also gives us the child PIDL in the parent folder's namespace,
-        // which is exactly what GetUIObjectOf expects.
-        let mut child_pidl: *const ITEMIDLIST = null();
+        // SHBindToParent returns the child PIDL in the parent's namespace; that child PIDL
+        // is what IShellFolder::GetUIObjectOf expects.
+        let mut child_pidl: *mut ITEMIDLIST = null_mut();
         let parent: IShellFolder = SHBindToParent(absolute_pidl, Some(&mut child_pidl))?;
         if child_pidl.is_null() {
             return Err(Error::from_win32());
         }
 
         let owner = GetForegroundWindow();
-        let context: IContextMenu = parent.GetUIObjectOf(owner, &[child_pidl], None)?;
+        let child = child_pidl as *const ITEMIDLIST;
+        let context: IContextMenu = parent.GetUIObjectOf(owner, &[child], None)?;
         let menu = CreatePopupMenu()?;
 
         let menu_result = (|| -> windows::core::Result<()> {
