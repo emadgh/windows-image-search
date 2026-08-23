@@ -108,10 +108,7 @@ pub fn benchmark(path: &Path) -> Result<String> {
     writeln!(report, "model_source_mode=external")?;
     writeln!(report, "provider={}", manifest.model.provider.as_str())?;
     writeln!(report, "model_bytes={model_bytes}")?;
-    writeln!(
-        report,
-        "model_fingerprint_fnv1a64={model_fingerprint:016x}"
-    )?;
+    writeln!(report, "model_fingerprint_fnv1a64={model_fingerprint:016x}")?;
     writeln!(report, "images={}", manifest.images.len())?;
     writeln!(
         report,
