@@ -14,11 +14,21 @@ Named People are optional filters composed with the existing collection, text, e
 
 ## Performance contract
 
-`visible_indices()` must remain a lightweight in-memory pass. It must not open SQLite databases, enumerate face crops, or calculate face embeddings per frame.
+`visible_indices()` remains a lightweight in-memory pass. It does not open SQLite databases, enumerate face crops, or calculate face embeddings per frame.
 
 When People selection changes, the selection is resolved into per-Person `HashSet<PathBuf>` collections and one final matching-image set. Rendering then performs only a path membership check.
 
-Portable root databases are opened at most once per root during a resolve operation. Current searchable face records are resolved with a prepared statement reused for all selected face IDs in that root.
+Portable root databases are opened at most once per root during a resolve operation. Current searchable face records are resolved with a prepared statement reused for selected face IDs in that root.
+
+## Main text search
+
+The existing main text field also matches effective/manual Person names. Each whitespace-delimited token is resolved independently on the background text-search worker: filename/path/description/keyword matches and matching Person-name image paths are unioned for that token, then token result sets are intersected. This preserves multi-token AND behavior while allowing mixed queries such as `Alice beach`, where one token can come from People data and another from normal image metadata.
+
+People-name lookup never runs in the egui frame loop.
+
+## Face Search
+
+Face Search includes `Filter named people…`. Effective/manual names are cached when the searchable-face suggestions refresh, so filtering the gallery does not recompute embeddings or perform per-frame database queries.
 
 ## Image details
 
@@ -32,6 +42,4 @@ The detail payload contains:
 
 The detail lookup validates current face-detection state against the current indexed image row. Effective People names and manual corrections come from the central session catalog.
 
-## UI direction
-
-The Search sidebar will expose a compact People section with named identities, multi-select, and an explicit ANY/ALL control. Result/details face UI remains optional; normal Grid/Details rendering should not eagerly allocate or render every detected face crop.
+Refs #61 #60 #145.
