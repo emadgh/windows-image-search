@@ -8,6 +8,7 @@ use crate::face_sface_adapter::{
     align_sface_112, LandmarkPoint, SFaceExecutionProvider, SFaceOnnxAdapter,
     SFACE_EMBEDDING_DIMENSION, SFACE_INPUT_SIZE,
 };
+use crate::people_store::PeopleEmbeddingRevision;
 use anyhow::{bail, Context, Result};
 use image::{DynamicImage, GenericImageView};
 use std::fs::File;
@@ -83,6 +84,20 @@ impl FaceEmbedder for SFaceProductionEmbedder {
         let (embedding, _) = self.adapter.embed_aligned(aligned_face)?;
         Ok(embedding)
     }
+}
+
+pub fn embedding_revision(settings: &FaceEmbeddingSettings) -> Result<PeopleEmbeddingRevision> {
+    if !settings.configured() {
+        bail!("SFace model path is not configured");
+    }
+    let model_fingerprint = model_fingerprint_fnv1a64(&settings.model_path)?;
+    Ok(PeopleEmbeddingRevision {
+        model_id: MODEL_ID.to_owned(),
+        model_version: MODEL_VERSION.to_owned(),
+        model_cache_revision: embedding_cache_revision(model_fingerprint),
+        dimension: SFACE_EMBEDDING_DIMENSION,
+        alignment_revision: ALIGNMENT_REVISION,
+    })
 }
 
 pub fn run_available_roots<F>(
@@ -220,5 +235,7 @@ mod tests {
             .err()
             .expect("missing external model must fail");
         assert!(err.to_string().contains("not configured"));
+        let revision_err = embedding_revision(&settings).unwrap_err();
+        assert!(revision_err.to_string().contains("not configured"));
     }
 }
