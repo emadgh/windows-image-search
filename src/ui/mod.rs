@@ -120,8 +120,19 @@ impl ImageSearchApp {
         let settings_path = app_data_dir.join("performance-settings.ini");
         let indexing_settings = settings::load(&settings_path);
         let face_settings_path = app_data_dir.join("face-embedding-settings.ini");
-        let face_embedding_settings = face_settings::load(&face_settings_path);
+        let mut face_embedding_settings = face_settings::load(&face_settings_path);
         let face_runtime = face_runtime::FaceRuntimeState::new(app_data_dir);
+        if !face_embedding_settings.configured() {
+            let cache = crate::face_model_manager::cache_dir(app_data_dir);
+            if matches!(
+                crate::face_model_manager::inspect(&cache, crate::face_model_manager::SFACE),
+                crate::face_model_manager::ManagedModelState::Ready
+            ) {
+                face_embedding_settings.model_path =
+                    crate::face_model_manager::model_path(&cache, crate::face_model_manager::SFACE);
+                let _ = face_settings::save(&face_settings_path, &face_embedding_settings);
+            }
+        }
         let face_search_ui = face_search_panel::FaceSearchUiState::default();
         let people_filter_ui = people_filter::PeopleFilterUiState::default();
         let people_manager_ui = people_manager::PeopleManagerUiState::default();
@@ -1031,7 +1042,7 @@ impl eframe::App for ImageSearchApp {
         }
         self.show_close_confirmation(ctx);
 
-        if self.busy {
+        if self.busy || self.face_model_download_running() {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
 
@@ -1071,7 +1082,7 @@ impl eframe::App for ImageSearchApp {
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if self.busy {
+                if self.busy || self.face_model_download_running() {
                     ui.spinner();
                 }
                 ui.small(views::truncate_middle(&self.status, 96))

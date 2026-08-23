@@ -23,6 +23,8 @@ ort = { version = "=2.0.0-rc.13", default-features = false, features = ["directm
 rayon = "1.10"
 rfd = "0.15"
 rusqlite = { version = "0.37", features = ["bundled"] }
+sha2 = "0.10"
+ureq = "2.12"
 walkdir = "2.5"
 
 [target.'cfg(windows)'.dependencies]
