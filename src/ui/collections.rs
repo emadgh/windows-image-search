@@ -1,6 +1,7 @@
 use super::ImageSearchApp;
 use crate::db::{self, Collection, CollectionMembership, ImageSummary};
 use crate::face_scope;
+use crate::portable;
 use eframe::egui;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -25,6 +26,7 @@ pub(super) struct CollectionsState {
 
 impl CollectionsState {
     pub(super) fn load(db_path: &Path, images: &[ImageSummary]) -> anyhow::Result<Self> {
+        migrate_legacy_roots_into_collections(db_path)?;
         let mut state = Self::default();
         state.reload(db_path, images)?;
         Ok(state)
@@ -207,14 +209,63 @@ impl ImageSearchApp {
     }
 
     pub(super) fn show_collections_settings(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(12.0);
-        ui.separator();
-        ui.heading("Collections");
         ui.label(
-            "Collections are virtual groups. Assign indexed folders recursively, add individual indexed files, or drag items here. Source files are never moved or deleted.",
+            "Collections are now the library/indexing entry point. Adding a folder attaches its portable .imagesearch index automatically; removing a collection never deletes source files or the on-disk portable index.",
         );
-        if self.busy {
-            ui.small("Collection editing is locked while indexing/search work is active.");
+
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(
+                    !self.busy && !self.roots.is_empty(),
+                    egui::Button::new("⟳ Rescan changed"),
+                )
+                .clicked()
+            {
+                self.start_rescan();
+            }
+            if ui
+                .add_enabled(
+                    !self.busy && !self.roots.is_empty(),
+                    egui::Button::new("⟳ Force rescan all"),
+                )
+                .on_hover_text("Rebuild all descriptors for folders referenced by Collections.")
+                .clicked()
+            {
+                self.start_force_rescan();
+            }
+            if self.indexing && self.index_control.is_some() {
+                let label = if self.index_paused {
+                    "▶ Resume"
+                } else {
+                    "⏸ Pause"
+                };
+                if ui
+                    .add_enabled(!self.searching, egui::Button::new(label))
+                    .clicked()
+                {
+                    self.toggle_index_pause();
+                }
+            }
+        });
+        if self.indexing || self.searching || self.progress.is_some() {
+            ui.add_space(5.0);
+            ui.group(|ui| {
+                if let Some((done, total)) = self.progress.filter(|(_, total)| *total > 0) {
+                    ui.add(
+                        egui::ProgressBar::new(done as f32 / total as f32)
+                            .desired_width(ui.available_width().min(520.0))
+                            .text(format!("{done}/{total}")),
+                    );
+                }
+                if let Some(file_name) = &self.current_file {
+                    ui.small(format!("Current: {file_name}"));
+                }
+                ui.small(super::views::truncate_middle(&self.status, 92))
+                    .on_hover_text(&self.status);
+            });
+        }
+        if self.busy && !self.indexing {
+            ui.small("Collection editing is locked while search/background work is active.");
         }
 
         let items = self.collections.items.clone();
@@ -225,223 +276,227 @@ impl ImageSearchApp {
         let mut action: Option<CollectionAction> = None;
         let mut select_collection: Option<(i64, String)> = None;
 
-        ui.horizontal_top(|ui| {
-            ui.vertical(|ui| {
-                ui.set_min_width(250.0);
-                ui.strong("Collections");
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.collections.new_name)
-                            .hint_text("New collection")
-                            .desired_width(155.0),
-                    );
-                    if ui
-                        .add_enabled(
-                            !self.busy && !self.collections.new_name.trim().is_empty(),
-                            egui::Button::new("Add"),
-                        )
-                        .clicked()
-                    {
-                        action = Some(CollectionAction::Create(
-                            self.collections.new_name.trim().to_owned(),
-                        ));
-                    }
-                });
-                ui.add_space(4.0);
-
-                egui::ScrollArea::vertical()
-                    .max_height(300.0)
-                    .show(ui, |ui| {
-                        if items.is_empty() {
-                            ui.label("No collections yet.");
-                        }
-                        for item in &items {
-                            let count = self.collections.count(item.id);
-                            let response = ui.selectable_label(
-                                selected_id == Some(item.id),
-                                format!(
-                                    "{}  ·  {count}/{} indexed",
-                                    item.name,
-                                    self.collections.total_count(item.id)
-                                ),
-                            );
-                            if response.clicked() {
-                                select_collection = Some((item.id, item.name.clone()));
-                            }
-                            if !self.busy {
-                                paint_drop_feedback(ui, &response);
-                                if let Some(paths) = released_drop_paths(ui, &response) {
-                                    action = Some(CollectionAction::Drop(item.id, paths));
-                                }
-                            }
-                        }
-                    });
-            });
-
-            ui.separator();
-
-            ui.vertical(|ui| {
-                ui.set_min_width(470.0);
-                let Some(id) = selected_id else {
-                    ui.label("Select or create a collection to manage assignments.");
-                    return;
-                };
-                let selected_name = items
-                    .iter()
-                    .find(|item| item.id == id)
-                    .map(|item| item.name.clone())
-                    .unwrap_or_else(|| "Collection".to_owned());
-                ui.strong(selected_name);
-                ui.small(format!(
-                    "{} indexed / {} discovered image{}",
-                    self.collections.count(id),
-                    self.collections.total_count(id),
-                    if self.collections.total_count(id) == 1 { "" } else { "s" }
+        ui.add_space(10.0);
+        ui.strong("Collections");
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.collections.new_name)
+                    .hint_text("New collection")
+                    .desired_width((ui.available_width() - 72.0).clamp(140.0, 320.0)),
+            );
+            if ui
+                .add_enabled(
+                    !self.busy && !self.collections.new_name.trim().is_empty(),
+                    egui::Button::new("Add"),
+                )
+                .clicked()
+            {
+                action = Some(CollectionAction::Create(
+                    self.collections.new_name.trim().to_owned(),
                 ));
+            }
+        });
 
-                ui.horizontal(|ui| {
-                    ui.add_enabled(
-                        !self.busy,
-                        egui::TextEdit::singleline(&mut self.collections.rename_name)
-                            .desired_width(240.0),
-                    );
-                    if ui
-                        .add_enabled(
-                            !self.busy && !self.collections.rename_name.trim().is_empty(),
-                            egui::Button::new("Rename"),
-                        )
-                        .clicked()
-                    {
-                        action = Some(CollectionAction::Rename(
-                            id,
-                            self.collections.rename_name.trim().to_owned(),
-                        ));
-                    }
-                    if ui
-                        .add_enabled(!self.busy, egui::Button::new("Delete collection"))
-                        .clicked()
-                    {
-                        action = Some(CollectionAction::Delete(id));
-                    }
-                });
-                ui.small("Deleting a collection only removes its membership records; image files stay untouched.");
-
-                let mut detect_faces = self
-                    .collections
-                    .face_detection
-                    .get(&id)
-                    .copied()
-                    .unwrap_or(false);
-                if ui
-                    .add_enabled(
-                        !self.busy,
-                        egui::Checkbox::new(
-                            &mut detect_faces,
-                            "Detect faces in this collection",
+        egui::ScrollArea::vertical()
+            .id_salt("collections-manage-list")
+            .max_height(150.0)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if items.is_empty() {
+                    ui.label("No collections yet. Create one, then add a folder.");
+                }
+                for item in &items {
+                    let count = self.collections.count(item.id);
+                    let response = ui.selectable_label(
+                        selected_id == Some(item.id),
+                        format!(
+                            "{}  ·  {count}/{} indexed",
+                            item.name,
+                            self.collections.total_count(item.id)
                         ),
-                    )
-                    .on_hover_text(
-                        "Only effective members of face-enabled collections are sent to the face detector.",
-                    )
-                    .changed()
-                {
-                    action = Some(CollectionAction::SetFaceDetection(id, detect_faces));
-                }
-                ui.small(
-                    "Off by default. Texture-only collections are skipped completely by face detection. Existing face data is kept when this is turned off.",
-                );
-
-                ui.add_space(8.0);
-                let drop_response = ui.add_sized(
-                    [ui.available_width(), 48.0],
-                    egui::Label::new(
-                        "Drop indexed files/folders here from Explorer or drag Grid/Details items here",
-                    )
-                    .sense(egui::Sense::hover()),
-                );
-                if !self.busy {
-                    paint_drop_feedback(ui, &drop_response);
-                    if let Some(paths) = released_drop_paths(ui, &drop_response) {
-                        action = Some(CollectionAction::Drop(id, paths));
+                    );
+                    if response.clicked() {
+                        select_collection = Some((item.id, item.name.clone()));
                     }
-                }
-
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.strong("Assigned folders");
-                    if ui
-                        .add_enabled(!self.busy, egui::Button::new("＋ Add folder").small())
-                        .clicked()
-                    {
-                        action = Some(CollectionAction::AddFolderDialog(id));
+                    if !self.busy {
+                        paint_drop_feedback(ui, &response);
+                        if let Some(paths) = released_drop_paths(ui, &response) {
+                            action = Some(CollectionAction::Drop(item.id, paths));
+                        }
                     }
-                });
-                if selected_membership.folders.is_empty() {
-                    ui.small("No folder assignments.");
-                } else {
-                    egui::ScrollArea::vertical()
-                        .max_height(130.0)
-                        .show(ui, |ui| {
-                            for folder in &selected_membership.folders {
-                                ui.horizontal(|ui| {
-                                    let available = self.folder_assignment_available(folder);
-                                    let label = if available {
-                                        folder.display().to_string()
-                                    } else {
-                                        format!("⚠ {} (unavailable / not indexed)", folder.display())
-                                    };
-                                    ui.label(label).on_hover_text(folder.display().to_string());
-                                    if ui
-                                        .add_enabled(!self.busy, egui::Button::new("Remove").small())
-                                        .clicked()
-                                    {
-                                        action = Some(CollectionAction::RemoveFolder(
-                                            id,
-                                            folder.clone(),
-                                        ));
-                                    }
-                                });
-                            }
-                        });
-                }
-
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.strong("Manually added files");
-                    if ui
-                        .add_enabled(!self.busy, egui::Button::new("＋ Add files").small())
-                        .clicked()
-                    {
-                        action = Some(CollectionAction::AddFilesDialog(id));
-                    }
-                });
-                if selected_membership.files.is_empty() {
-                    ui.small("No manually added files.");
-                } else {
-                    egui::ScrollArea::vertical()
-                        .max_height(150.0)
-                        .show(ui, |ui| {
-                            for file in &selected_membership.files {
-                                ui.horizontal(|ui| {
-                                    let available = self.image_positions.contains_key(file);
-                                    let label = if available {
-                                        file.display().to_string()
-                                    } else {
-                                        format!("⚠ {} (not currently indexed)", file.display())
-                                    };
-                                    ui.label(label).on_hover_text(file.display().to_string());
-                                    if ui
-                                        .add_enabled(!self.busy, egui::Button::new("Remove").small())
-                                        .clicked()
-                                    {
-                                        action = Some(CollectionAction::RemoveFile(id, file.clone()));
-                                    }
-                                });
-                            }
-                        });
                 }
             });
+
+        ui.separator();
+        let Some(id) = selected_id else {
+            ui.label("Select or create a Collection to manage its indexed folders and files.");
+            if let Some((id, name)) = select_collection {
+                self.collections.selected_manage = Some(id);
+                self.collections.rename_name = name;
+            }
+            if let Some(action) = action {
+                self.apply_collection_action(action);
+            }
+            return;
+        };
+
+        let selected_name = items
+            .iter()
+            .find(|item| item.id == id)
+            .map(|item| item.name.clone())
+            .unwrap_or_else(|| "Collection".to_owned());
+        ui.heading(selected_name);
+        ui.small(format!(
+            "{} indexed / {} discovered image{}",
+            self.collections.count(id),
+            self.collections.total_count(id),
+            if self.collections.total_count(id) == 1 {
+                ""
+            } else {
+                "s"
+            }
+        ));
+
+        ui.horizontal_wrapped(|ui| {
+            ui.add_enabled(
+                !self.busy,
+                egui::TextEdit::singleline(&mut self.collections.rename_name)
+                    .desired_width((ui.available_width() * 0.55).clamp(160.0, 340.0)),
+            );
+            if ui
+                .add_enabled(
+                    !self.busy && !self.collections.rename_name.trim().is_empty(),
+                    egui::Button::new("Rename"),
+                )
+                .clicked()
+            {
+                action = Some(CollectionAction::Rename(
+                    id,
+                    self.collections.rename_name.trim().to_owned(),
+                ));
+            }
+            if ui
+                .add_enabled(!self.busy, egui::Button::new("Delete collection"))
+                .clicked()
+            {
+                action = Some(CollectionAction::Delete(id));
+            }
         });
+        ui.small("Deleting a Collection removes only its membership and unused session root registrations. Source images and .imagesearch folders stay untouched.");
+
+        let mut detect_faces = self
+            .collections
+            .face_detection
+            .get(&id)
+            .copied()
+            .unwrap_or(false);
+        if ui
+            .add_enabled(
+                !self.busy,
+                egui::Checkbox::new(&mut detect_faces, "Detect faces in this collection"),
+            )
+            .on_hover_text(
+                "Only effective members of face-enabled Collections are sent to the face detector.",
+            )
+            .changed()
+        {
+            action = Some(CollectionAction::SetFaceDetection(id, detect_faces));
+        }
+
+        ui.add_space(8.0);
+        let drop_response = ui.add_sized(
+            [ui.available_width(), 46.0],
+            egui::Label::new(
+                "Drop folders here to attach/index them, or drag already-indexed Grid/Details images here",
+            )
+            .sense(egui::Sense::hover()),
+        );
+        if !self.busy {
+            paint_drop_feedback(ui, &drop_response);
+            if let Some(paths) = released_drop_paths(ui, &drop_response) {
+                action = Some(CollectionAction::Drop(id, paths));
+            }
+        }
+
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.strong("Indexed folders");
+            if ui
+                .add_enabled(!self.busy, egui::Button::new("＋ Add folder").small())
+                .clicked()
+            {
+                action = Some(CollectionAction::AddFolderDialog(id));
+            }
+        });
+        if selected_membership.folders.is_empty() {
+            ui.small(
+                "No folders yet. Add a folder to make it part of this Collection and index it.",
+            );
+        } else {
+            egui::ScrollArea::vertical()
+                .max_height(150.0)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for folder in &selected_membership.folders {
+                        ui.horizontal(|ui| {
+                            let available = self.folder_assignment_available(folder);
+                            let label = if available {
+                                folder.display().to_string()
+                            } else {
+                                format!("⚠ {} (unavailable)", folder.display())
+                            };
+                            ui.label(super::views::truncate_middle(&label, 76))
+                                .on_hover_text(folder.display().to_string());
+                            if ui
+                                .add_enabled(!self.busy, egui::Button::new("Remove").small())
+                                .clicked()
+                            {
+                                action = Some(CollectionAction::RemoveFolder(id, folder.clone()));
+                            }
+                        });
+                    }
+                });
+        }
+
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.strong("Manually added indexed files");
+            if ui
+                .add_enabled(!self.busy, egui::Button::new("＋ Add files").small())
+                .clicked()
+            {
+                action = Some(CollectionAction::AddFilesDialog(id));
+            }
+        });
+        if selected_membership.files.is_empty() {
+            ui.small(
+                "No individual file assignments. New/unindexed content should be added by folder.",
+            );
+        } else {
+            egui::ScrollArea::vertical()
+                .max_height(150.0)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for file in &selected_membership.files {
+                        ui.horizontal(|ui| {
+                            let available = self.image_positions.contains_key(file);
+                            let label = if available {
+                                file.display().to_string()
+                            } else {
+                                format!("⚠ {} (not currently indexed)", file.display())
+                            };
+                            ui.label(super::views::truncate_middle(&label, 76))
+                                .on_hover_text(file.display().to_string());
+                            if ui
+                                .add_enabled(!self.busy, egui::Button::new("Remove").small())
+                                .clicked()
+                            {
+                                action = Some(CollectionAction::RemoveFile(id, file.clone()));
+                            }
+                        });
+                    }
+                });
+        }
 
         if let Some((id, name)) = select_collection {
             self.collections.selected_manage = Some(id);
@@ -453,6 +508,8 @@ impl ImageSearchApp {
     }
 
     fn apply_collection_action(&mut self, action: CollectionAction) {
+        let mut rescan_after = false;
+        let mut sync_roots_after = false;
         let result = (|| -> anyhow::Result<String> {
             let message = match action {
                 CollectionAction::Create(name) => {
@@ -476,13 +533,17 @@ impl ImageSearchApp {
                 }
                 CollectionAction::Delete(id) => {
                     db::delete_collection(&self.db_path, id)?;
-                    format!("Deleted collection; source images were not changed")
+                    sync_roots_after = true;
+                    "Deleted collection; source files and portable indexes were not changed"
+                        .to_owned()
                 }
                 CollectionAction::AddFolderDialog(id) => {
                     let Some(folder) = rfd::FileDialog::new().pick_folder() else {
                         return Ok(String::new());
                     };
-                    let (added, skipped) = self.assign_paths_to_collection(id, vec![folder])?;
+                    let (added, skipped, attached) =
+                        self.assign_paths_to_collection(id, vec![folder])?;
+                    rescan_after |= attached;
                     format_collection_assignment_status(added, skipped)
                 }
                 CollectionAction::AddFilesDialog(id) => {
@@ -492,23 +553,31 @@ impl ImageSearchApp {
                     else {
                         return Ok(String::new());
                     };
-                    let (added, skipped) = self.assign_paths_to_collection(id, files)?;
+                    let (added, skipped, attached) = self.assign_paths_to_collection(id, files)?;
+                    rescan_after |= attached;
                     format_collection_assignment_status(added, skipped)
                 }
                 CollectionAction::RemoveFolder(id, folder) => {
                     db::remove_collection_folder(&self.db_path, id, &folder)?;
-                    "Removed folder assignment".to_owned()
+                    sync_roots_after = true;
+                    "Removed folder from Collection".to_owned()
                 }
                 CollectionAction::RemoveFile(id, file) => {
                     db::remove_collection_file(&self.db_path, id, &file)?;
+                    sync_roots_after = true;
                     "Removed manual file membership".to_owned()
                 }
                 CollectionAction::Drop(id, paths) => {
-                    let (added, skipped) = self.assign_paths_to_collection(id, paths)?;
+                    let (added, skipped, attached) = self.assign_paths_to_collection(id, paths)?;
+                    rescan_after |= attached;
                     format_collection_assignment_status(added, skipped)
                 }
             };
             self.collections.reload(&self.db_path, &self.images)?;
+            if sync_roots_after {
+                self.sync_roots_to_collection_memberships()?;
+                self.collections.reload(&self.db_path, &self.images)?;
+            }
             Ok(message)
         })();
 
@@ -517,16 +586,20 @@ impl ImageSearchApp {
             Ok(_) => {}
             Err(err) => self.last_error = Some(format!("Collection update failed: {err:#}")),
         }
+        if rescan_after && !self.busy && !self.roots.is_empty() {
+            self.start_rescan();
+        }
     }
 
     fn assign_paths_to_collection(
-        &self,
+        &mut self,
         collection_id: i64,
         paths: Vec<PathBuf>,
-    ) -> anyhow::Result<(usize, usize)> {
+    ) -> anyhow::Result<(usize, usize, bool)> {
         let mut folders = Vec::new();
         let mut files = Vec::new();
         let mut skipped = 0usize;
+        let mut attached_new_root = false;
         let mut unique = HashSet::new();
 
         for path in paths {
@@ -534,11 +607,11 @@ impl ImageSearchApp {
                 continue;
             }
             if path.is_dir() {
-                if self.folder_is_indexed(&path) {
-                    folders.push(path);
-                } else {
-                    skipped += 1;
+                if !self.folder_is_indexed(&path) {
+                    self.attach_collection_root(&path)?;
+                    attached_new_root = true;
                 }
+                folders.push(path);
             } else if is_supported_image(&path) && self.image_positions.contains_key(&path) {
                 files.push(path);
             } else {
@@ -548,7 +621,56 @@ impl ImageSearchApp {
 
         let added_folders = db::add_collection_folders(&self.db_path, collection_id, &folders)?;
         let added_files = db::add_collection_files(&self.db_path, collection_id, &files)?;
-        Ok((added_folders + added_files, skipped))
+        Ok((added_folders + added_files, skipped, attached_new_root))
+    }
+
+    fn attach_collection_root(&mut self, folder: &Path) -> anyhow::Result<()> {
+        if self.folder_is_indexed(folder) {
+            return Ok(());
+        }
+        portable::attach_root(&self.db_path, folder)?;
+        self.reload_after_root_registry_change();
+        Ok(())
+    }
+
+    fn sync_roots_to_collection_memberships(&mut self) -> anyhow::Result<()> {
+        let collections = db::load_collections(&self.db_path)?;
+        let mut folders = Vec::new();
+        let mut files = Vec::new();
+        for collection in collections {
+            let membership = db::load_collection_membership(&self.db_path, collection.id)?;
+            folders.extend(membership.folders);
+            files.extend(membership.files);
+        }
+
+        let mut removed_any = false;
+        for root in self.roots.clone() {
+            let referenced = folders
+                .iter()
+                .any(|folder| folder.starts_with(&root) || root.starts_with(folder))
+                || files.iter().any(|file| file.starts_with(&root));
+            if !referenced {
+                db::remove_root(&self.db_path, &root)?;
+                removed_any = true;
+            }
+        }
+        if removed_any {
+            self.reload_after_root_registry_change();
+        }
+        Ok(())
+    }
+
+    fn reload_after_root_registry_change(&mut self) {
+        self.roots = db::load_roots(&self.db_path).unwrap_or_default();
+        self.root_counts = db::load_root_counts(&self.db_path).unwrap_or_default();
+        self.thumb_pool.set_roots(self.roots.clone());
+        self.fs_watch_service.set_roots(self.roots.clone());
+        self.images = db::load_image_summaries(&self.db_path).unwrap_or_default();
+        self.rebuild_image_positions();
+        self.refresh_collection_effective_membership();
+        self.refresh_text_search_after_data_change();
+        self.similarity_results = None;
+        self.selected_paths.clear();
     }
 
     fn folder_is_indexed(&self, folder: &Path) -> bool {
@@ -558,6 +680,37 @@ impl ImageSearchApp {
     fn folder_assignment_available(&self, folder: &Path) -> bool {
         folder.exists() && self.folder_is_indexed(folder)
     }
+}
+
+fn migrate_legacy_roots_into_collections(db_path: &Path) -> anyhow::Result<()> {
+    let roots = db::load_roots(db_path)?;
+    if roots.is_empty() {
+        return Ok(());
+    }
+    let collections = db::load_collections(db_path)?;
+    let mut assigned_folders = Vec::new();
+    for collection in &collections {
+        assigned_folders.extend(db::load_collection_membership(db_path, collection.id)?.folders);
+    }
+    let uncovered = roots
+        .into_iter()
+        .filter(|root| {
+            !assigned_folders
+                .iter()
+                .any(|folder| root.starts_with(folder))
+        })
+        .collect::<Vec<_>>();
+    if uncovered.is_empty() {
+        return Ok(());
+    }
+
+    let imported = collections
+        .iter()
+        .find(|collection| collection.name == "Imported Library")
+        .cloned()
+        .unwrap_or(db::create_collection(db_path, "Imported Library")?);
+    db::add_collection_folders(db_path, imported.id, &uncovered)?;
+    Ok(())
 }
 
 fn paint_drop_feedback(ui: &egui::Ui, response: &egui::Response) {
@@ -614,7 +767,7 @@ fn format_collection_assignment_status(added: usize, skipped: usize) -> String {
         )
     } else {
         format!(
-            "Added {added} collection assignment{}; skipped {skipped} path{} because they are not indexed images/folders",
+            "Added {added} collection assignment{}; skipped {skipped} path{} because individual files must already be indexed; add new content by folder",
             if added == 1 { "" } else { "s" },
             if skipped == 1 { "" } else { "s" }
         )
