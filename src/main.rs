@@ -20,6 +20,7 @@ mod face_sface_benchmark;
 mod face_sface_production;
 mod face_similarity;
 mod face_store;
+mod face_yunet_benchmark;
 mod fs_watch;
 mod indexer;
 mod library_profile;
@@ -63,6 +64,7 @@ enum StartupMode {
     MaterialTextureBenchmark(usize),
     FaceBenchmark(PathBuf),
     FaceBenchmarkValidate(PathBuf),
+    YuNetBenchmark(PathBuf),
     SFaceBenchmark(PathBuf),
     PortableVerify(PathBuf, bool),
 }
@@ -154,6 +156,14 @@ fn startup_mode() -> StartupMode {
         }
         if arg == "--benchmark-face" {
             return StartupMode::FaceBenchmark(args.next().map(PathBuf::from).unwrap_or_default());
+        }
+        if let Some(value) = arg.strip_prefix("--benchmark-yunet=") {
+            if !value.trim().is_empty() {
+                return StartupMode::YuNetBenchmark(PathBuf::from(value));
+            }
+        }
+        if arg == "--benchmark-yunet" {
+            return StartupMode::YuNetBenchmark(args.next().map(PathBuf::from).unwrap_or_default());
         }
         if let Some(value) = arg.strip_prefix("--benchmark-sface=") {
             if !value.trim().is_empty() {
@@ -252,6 +262,10 @@ fn material_texture_benchmark_report_path(db_path: &Path) -> PathBuf {
 
 fn face_benchmark_report_path(db_path: &Path) -> PathBuf {
     benchmark_report_path(db_path, "face")
+}
+
+fn yunet_benchmark_report_path(db_path: &Path) -> PathBuf {
+    benchmark_report_path(db_path, "yunet")
 }
 
 fn sface_benchmark_report_path(db_path: &Path) -> PathBuf {
@@ -437,6 +451,18 @@ fn main() -> eframe::Result<()> {
                 write_benchmark_report(&face_benchmark_report_path(&db_path), &report, "face")
             }
             Err(err) => benchmark_failed("Face benchmark", &err),
+        }
+        return Ok(());
+    }
+
+    if let StartupMode::YuNetBenchmark(manifest_path) = &mode {
+        match face_yunet_benchmark::benchmark(manifest_path) {
+            Ok(report) => write_benchmark_report(
+                &yunet_benchmark_report_path(&db_path),
+                &report,
+                "YuNet ONNX",
+            ),
+            Err(err) => benchmark_failed("YuNet ONNX benchmark", &err),
         }
         return Ok(());
     }
