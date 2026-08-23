@@ -1,0 +1,47 @@
+name: Apply managed face model integration
+
+on:
+  push:
+    branches:
+      - feat/auto-download-face-models
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/auto-download-face-models
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply integration
+        run: python scripts/apply_managed_face_models.py
+      - name: Format
+        run: cargo fmt --all
+      - name: Check and test
+        run: |
+          cargo check --all-targets
+          cargo test --all-targets
+      - name: Remove temporary integration machinery
+        shell: pwsh
+        run: |
+          Remove-Item scripts/apply_managed_face_models.py -Force
+          Remove-Item .github/workflows/apply-managed-face-models.yml -Force
+          Remove-Item .managed-face-model-trigger -Force -ErrorAction SilentlyContinue
+      - name: Commit managed model source
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "feat: auto-download verified YuNet and SFace models"
+          git push origin HEAD:feat/auto-download-face-models
