@@ -19,12 +19,16 @@ pub fn show_context_menu(path: PathBuf) {
 
 #[cfg(target_os = "windows")]
 fn windows_context_menu(path: &std::path::Path) -> windows::core::Result<()> {
+    use std::ffi::c_void;
     use std::os::windows::ffi::OsStrExt;
-    use windows::core::{PCSTR, PCWSTR};
+    use std::ptr::null;
+    use windows::core::{Error, PCSTR, PCWSTR};
     use windows::Win32::Foundation::POINT;
-    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+    use windows::Win32::System::Com::{
+        CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED,
+    };
     use windows::Win32::UI::Shell::{
-        BHID_SFUIObject, IContextMenu, IShellItem, SHCreateItemFromParsingName, CMF_NORMAL,
+        IContextMenu, IShellFolder, ITEMIDLIST, SHBindToParent, SHSimpleIDListFromPath, CMF_NORMAL,
         CMINVOKECOMMANDINFO,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -39,13 +43,37 @@ fn windows_context_menu(path: &std::path::Path) -> windows::core::Result<()> {
         }
     }
 
+    struct PidlGuard(*mut ITEMIDLIST);
+    impl Drop for PidlGuard {
+        fn drop(&mut self) {
+            unsafe {
+                CoTaskMemFree(Some(self.0.cast::<c_void>()));
+            }
+        }
+    }
+
     unsafe {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
         let _com = ComGuard;
 
         let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-        let item: IShellItem = SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None)?;
-        let context: IContextMenu = item.BindToHandler(None, &BHID_SFUIObject)?;
+        let absolute_pidl = SHSimpleIDListFromPath(PCWSTR(wide.as_ptr()));
+        if absolute_pidl.is_null() {
+            return Err(Error::from_win32());
+        }
+        let _pidl = PidlGuard(absolute_pidl);
+
+        // Explorer obtains an item's IContextMenu from the item's parent IShellFolder.
+        // SHBindToParent also gives us the child PIDL in the parent folder's namespace,
+        // which is exactly what GetUIObjectOf expects.
+        let mut child_pidl: *const ITEMIDLIST = null();
+        let parent: IShellFolder = SHBindToParent(absolute_pidl, Some(&mut child_pidl))?;
+        if child_pidl.is_null() {
+            return Err(Error::from_win32());
+        }
+
+        let owner = GetForegroundWindow();
+        let context: IContextMenu = parent.GetUIObjectOf(owner, &[child_pidl], None)?;
         let menu = CreatePopupMenu()?;
 
         let menu_result = (|| -> windows::core::Result<()> {
@@ -56,7 +84,6 @@ fn windows_context_menu(path: &std::path::Path) -> windows::core::Result<()> {
 
             let mut point = POINT::default();
             GetCursorPos(&mut point)?;
-            let owner = GetForegroundWindow();
             let selected = TrackPopupMenuEx(
                 menu,
                 (TPM_RETURNCMD | TPM_RIGHTBUTTON).0,
