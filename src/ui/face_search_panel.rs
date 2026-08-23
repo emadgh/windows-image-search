@@ -10,6 +10,7 @@ use crate::face_search::{
 use crate::face_settings::FaceEmbeddingSettings;
 use crate::face_sface_production::SFaceProductionEmbedder;
 use crate::face_similarity::{FaceEmbeddingRevision, FaceSimilarityQuery};
+use crate::people_effective;
 use anyhow::{bail, Context, Result};
 use eframe::egui;
 use std::collections::HashMap;
@@ -47,6 +48,8 @@ enum FaceSearchUiMessage {
 pub(super) struct FaceSearchUiState {
     open: bool,
     suggestions: Vec<IndexedFaceSuggestion>,
+    suggestion_names: HashMap<String, String>,
+    filter_text: String,
     selected_face_id: Option<String>,
     external_source: Option<PathBuf>,
     external_faces: Vec<ExternalFaceChoice>,
@@ -69,6 +72,8 @@ impl Default for FaceSearchUiState {
         Self {
             open: false,
             suggestions: Vec::new(),
+            suggestion_names: HashMap::new(),
+            filter_text: String::new(),
             selected_face_id: None,
             external_source: None,
             external_faces: Vec::new(),
@@ -118,6 +123,7 @@ impl ImageSearchApp {
                     match result {
                         Ok(suggestions) => {
                             self.face_search_ui.suggestions = suggestions;
+                            self.refresh_face_suggestion_names();
                             let selected_exists = self
                                 .face_search_ui
                                 .selected_face_id
@@ -191,6 +197,38 @@ impl ImageSearchApp {
                     }
                 }
             }
+        }
+    }
+
+    fn refresh_face_suggestion_names(&mut self) {
+        self.face_search_ui.suggestion_names.clear();
+        let Ok(conn) = crate::db::open(&self.db_path) else {
+            return;
+        };
+        let Ok(catalog) = people_effective::load(&conn) else {
+            return;
+        };
+        let names = catalog
+            .people
+            .iter()
+            .filter_map(|person| {
+                let name = person.display_name.as_deref()?.trim();
+                (!name.is_empty()).then(|| (person.person_id.as_str(), name.to_owned()))
+            })
+            .collect::<HashMap<_, _>>();
+        for member in &catalog.members {
+            if member.ignored || member.detached {
+                continue;
+            }
+            let Some(person_id) = member.person_id.as_deref() else {
+                continue;
+            };
+            let Some(name) = names.get(person_id) else {
+                continue;
+            };
+            self.face_search_ui
+                .suggestion_names
+                .insert(member.face_id.clone(), name.clone());
         }
     }
 
@@ -520,6 +558,11 @@ impl ImageSearchApp {
 
                 ui.separator();
                 ui.strong("People / searchable faces in database");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.face_search_ui.filter_text)
+                        .hint_text("Filter named people…")
+                        .desired_width(ui.available_width().min(360.0)),
+                );
                 if self.face_search_ui.suggestions.is_empty() && !self.face_search_ui.loading {
                     ui.vertical_centered(|ui| {
                         ui.add_space(28.0);
@@ -531,7 +574,24 @@ impl ImageSearchApp {
                     return;
                 }
 
-                let suggestions = self.face_search_ui.suggestions.clone();
+                let filter = self.face_search_ui.filter_text.trim().to_lowercase();
+                let suggestions = self
+                    .face_search_ui
+                    .suggestions
+                    .iter()
+                    .filter(|face| {
+                        filter.is_empty()
+                            || self
+                                .face_search_ui
+                                .suggestion_names
+                                .get(&face.face_id)
+                                .is_some_and(|name| name.to_lowercase().contains(&filter))
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !filter.is_empty() {
+                    ui.small(format!("{} matching named People", suggestions.len()));
+                }
                 let available = ui.available_width().max(300.0);
                 let cell = 116.0;
                 let columns = ((available / cell).floor() as usize).max(1);
@@ -590,6 +650,13 @@ impl ImageSearchApp {
                                             }
                                             if response.double_clicked() && !self.busy {
                                                 self.start_indexed_face_search(face.clone());
+                                            }
+                                            if let Some(name) = self
+                                                .face_search_ui
+                                                .suggestion_names
+                                                .get(&face.face_id)
+                                            {
+                                                ui.strong(truncate(name, 16));
                                             }
                                             if let Some(group_size) = face.group_size {
                                                 ui.small(format!(
