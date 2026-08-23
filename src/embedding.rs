@@ -3,7 +3,11 @@ use anyhow::{Context, Result};
 use fastembed::{ImageEmbedding, ImageEmbeddingModel, ImageInitOptions};
 use ort::ep::DirectML;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::time::{Duration, Instant};
+
+const EMBEDDING_WAIT_POLL: Duration = Duration::from_secs(15);
+const EMBEDDING_MAX_WAIT: Duration = Duration::from_secs(600);
 
 #[derive(Debug)]
 pub struct EmbeddingResponse {
@@ -108,10 +112,27 @@ impl EmbeddingService {
             })
             .context("sending work to persistent CLIP service")?;
 
-        response_rx
-            .recv()
-            .context("persistent CLIP service stopped unexpectedly")?
-            .map_err(anyhow::Error::msg)
+        receive_with_deadline(&response_rx, EMBEDDING_MAX_WAIT)?.map_err(anyhow::Error::msg)
+    }
+}
+
+fn receive_with_deadline<T>(receiver: &Receiver<T>, max_wait: Duration) -> Result<T> {
+    let started = Instant::now();
+    loop {
+        let remaining = max_wait.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            anyhow::bail!(
+                "persistent CLIP service exceeded the {} second safety timeout; already committed index data is preserved, restart the application before retrying CLIP indexing",
+                max_wait.as_secs()
+            );
+        }
+        match receiver.recv_timeout(remaining.min(EMBEDDING_WAIT_POLL)) {
+            Ok(value) => return Ok(value),
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => {
+                anyhow::bail!("persistent CLIP service stopped unexpectedly")
+            }
+        }
     }
 }
 
@@ -233,6 +254,15 @@ mod tests {
         normalize_embedding(&mut values);
         let norm = values.iter().map(|value| value * value).sum::<f32>().sqrt();
         assert!((norm - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn embedding_response_wait_has_a_bounded_timeout() {
+        let (_tx, rx) = mpsc::channel::<()>();
+        let started = Instant::now();
+        let err = receive_with_deadline(&rx, Duration::from_millis(20)).unwrap_err();
+        assert!(err.to_string().contains("safety timeout"));
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]
