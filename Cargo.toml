@@ -2,15 +2,19 @@
 name = "windows-image-search"
 version = "0.3.0-alpha.6"
 edition = "2021"
+description = "Local image indexing and visual search for Windows"
+license = "MIT"
+repository = "https://github.com/emadgh/windows-image-search"
+default-run = "windows-image-search"
 
 [dependencies]
 anyhow = "1"
-blake3 = "1"
-chrono = "0.4"
-eframe = "0.32"
+chrono = { version = "0.4", default-features = true }
+dirs = "6"
+eframe = { version = "0.32", default-features = true }
 egui = "0.32"
-fast_image_resize = "5"
-hnsw_rs = "0.3"
+fastembed = { version = "5.17.4", features = ["directml"] }
+hnsw_rs = "0.3.4"
 image = { version = "0.25", features = ["jpeg", "png", "tiff"] }
 kamadak-exif = "0.6"
 notify = "8.2"
