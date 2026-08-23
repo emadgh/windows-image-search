@@ -261,6 +261,7 @@ impl ImageSearchApp {
         }
         self.refresh_people_manager();
         self.refresh_face_suggestions();
+        self.refresh_people_filter_catalog();
     }
 
     fn show_effective_person_images(&mut self, person_id: &str) -> anyhow::Result<()> {
