@@ -1,6 +1,7 @@
 mod collections;
 mod face_runtime;
 mod face_search_panel;
+mod people_manager;
 mod texture_lru;
 mod thumbnails;
 mod views;
@@ -70,6 +71,7 @@ pub struct ImageSearchApp {
     face_settings_path: PathBuf,
     face_runtime: face_runtime::FaceRuntimeState,
     face_search_ui: face_search_panel::FaceSearchUiState,
+    people_manager_ui: people_manager::PeopleManagerUiState,
     collections: collections::CollectionsState,
     pub(super) search_text: String,
     text_search_service: TextSearchService,
@@ -118,6 +120,7 @@ impl ImageSearchApp {
         let face_embedding_settings = face_settings::load(&face_settings_path);
         let face_runtime = face_runtime::FaceRuntimeState::new(app_data_dir);
         let face_search_ui = face_search_panel::FaceSearchUiState::default();
+        let people_manager_ui = people_manager::PeopleManagerUiState::default();
         let embedding_service = EmbeddingService::new(model_cache);
         let text_search_service = TextSearchService::new(db_path.clone());
         let fs_watch_service = FsWatchService::new(Vec::new());
@@ -181,6 +184,7 @@ impl ImageSearchApp {
             face_settings_path,
             face_runtime,
             face_search_ui,
+            people_manager_ui,
             collections: collections::CollectionsState::default(),
             search_text: String::new(),
             text_search_service,
@@ -1329,6 +1333,12 @@ impl eframe::App for ImageSearchApp {
                     self.settings_open = true;
                 }
                 if ui
+                    .add_enabled(!self.busy, egui::Button::new("👥 People"))
+                    .clicked()
+                {
+                    self.open_people_manager();
+                }
+                if ui
                     .add_enabled(
                         !self.busy && !self.roots.is_empty(),
                         egui::Button::new("⟳ Rescan"),
@@ -1348,6 +1358,7 @@ impl eframe::App for ImageSearchApp {
         self.show_search_sidebar(ctx);
         self.show_settings_window(ctx);
         self.show_face_search_window(ctx);
+        self.show_people_manager_window(ctx);
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
