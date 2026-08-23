@@ -28,6 +28,7 @@ mod metadata;
 mod model_benchmark;
 mod people_clustering;
 mod people_effective;
+mod people_filter;
 mod people_management;
 mod people_overrides;
 mod people_settings;

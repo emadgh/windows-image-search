@@ -19,7 +19,6 @@ pub(super) struct PeopleManagerUiState {
     move_target: Option<String>,
     preview_cache: HashMap<(String, String), Option<IndexedFaceSuggestion>>,
     confirm_delete_person: Option<String>,
-    filter_text: String,
 }
 
 #[derive(Clone, Debug)]
@@ -261,6 +260,7 @@ impl ImageSearchApp {
         }
         self.refresh_people_manager();
         self.refresh_face_suggestions();
+        self.refresh_people_filter_catalog();
     }
 
     fn show_effective_person_images(&mut self, person_id: &str) -> anyhow::Result<()> {
@@ -301,15 +301,12 @@ impl ImageSearchApp {
         let mut open = self.people_manager_ui.open;
         let mut action = None;
         let mut selection_changed = false;
-        let mut search_face = None;
-        let mut search_image = None;
         egui::Window::new("People")
             .open(&mut open)
             .resizable(true)
             .default_size([1080.0, 720.0])
-            .min_width(760.0)
+            .min_width(820.0)
             .min_height(540.0)
-            .max_width(ctx.available_rect().width().max(760.0))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.heading("People");
@@ -331,52 +328,19 @@ impl ImageSearchApp {
                 ui.separator();
 
                 ui.horizontal_top(|ui| {
-                    let total_width = ui.available_width();
-                    let list_width = (total_width * 0.34).clamp(260.0, 340.0);
-                    let editor_width = (total_width - list_width - 18.0).max(360.0);
                     ui.allocate_ui_with_layout(
-                        egui::vec2(list_width, ui.available_height()),
+                        egui::vec2(340.0, ui.available_height()),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
                             ui.strong("People groups");
                             ui.small("Check multiple groups, then merge them from the editor pane.");
                             ui.add_space(6.0);
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.people_manager_ui.filter_text)
-                                    .hint_text("Filter named people…")
-                                    .desired_width(f32::INFINITY),
-                            );
-                            ui.add_space(5.0);
-
-                            let filter = self.people_manager_ui.filter_text.trim().to_lowercase();
-                            let people = self
-                                .people_manager_ui
-                                .catalog
-                                .people
-                                .iter()
-                                .filter(|person| {
-                                    filter.is_empty()
-                                        || person
-                                            .display_name
-                                            .as_deref()
-                                            .is_some_and(|name| name.to_lowercase().contains(&filter))
-                                })
-                                .cloned()
-                                .collect::<Vec<_>>();
-                            if !filter.is_empty() {
-                                ui.small(format!(
-                                    "{} of {} named/visible groups",
-                                    people.len(),
-                                    self.people_manager_ui.catalog.people.len()
-                                ));
-                            }
-
                             egui::ScrollArea::vertical()
                                 .id_salt("people-manager-list")
                                 .auto_shrink([false, false])
-                                .show_rows(ui, 66.0, people.len(), |ui, row_range| {
-                                    for row in row_range {
-                                        let person = people[row].clone();
+                                .show(ui, |ui| {
+                                    let people = self.people_manager_ui.catalog.people.clone();
+                                    for person in people {
                                         let selected = self
                                             .people_manager_ui
                                             .selected_person_id
@@ -386,83 +350,68 @@ impl ImageSearchApp {
                                             .people_manager_ui
                                             .merge_selection
                                             .contains(&person.person_id);
-                                        ui.allocate_ui_with_layout(
-                                            egui::vec2(ui.available_width(), 64.0),
-                                            egui::Layout::left_to_right(egui::Align::Center),
-                                            |ui| {
-                                                if ui.checkbox(&mut merge_checked, "").changed() {
-                                                    if merge_checked {
-                                                        self.people_manager_ui
-                                                            .merge_selection
-                                                            .insert(person.person_id.clone());
-                                                    } else {
-                                                        self.people_manager_ui
-                                                            .merge_selection
-                                                            .remove(&person.person_id);
-                                                    }
-                                                }
-
-                                                let preview_response = if let Some((library_id, face_id)) = person
-                                                    .representative_library_id
-                                                    .as_deref()
-                                                    .zip(person.representative_face_id.as_deref())
-                                                {
-                                                    if let Some(preview) = self.people_preview(library_id, face_id) {
-                                                        if let Some(texture) = self.thumbnail(&preview.image_path) {
-                                                            face_crop_widget(
-                                                                ui,
-                                                                &texture,
-                                                                preview.bbox,
-                                                                egui::vec2(58.0, 58.0),
-                                                                selected,
-                                                            )
-                                                        } else {
-                                                            ui.add_sized(
-                                                                [58.0, 58.0],
-                                                                egui::Button::new("…"),
-                                                            )
-                                                        }
-                                                    } else {
-                                                        ui.add_sized(
-                                                            [58.0, 58.0],
-                                                            egui::Button::new("—"),
-                                                        )
-                                                    }
+                                        ui.horizontal(|ui| {
+                                            if ui.checkbox(&mut merge_checked, "").changed() {
+                                                if merge_checked {
+                                                    self.people_manager_ui
+                                                        .merge_selection
+                                                        .insert(person.person_id.clone());
                                                 } else {
-                                                    ui.add_sized(
-                                                        [58.0, 58.0],
-                                                        egui::Button::new("—"),
-                                                    )
-                                                };
-                                                if preview_response.clicked() {
-                                                    self.people_manager_ui.selected_person_id =
-                                                        Some(person.person_id.clone());
-                                                    selection_changed = true;
+                                                    self.people_manager_ui
+                                                        .merge_selection
+                                                        .remove(&person.person_id);
                                                 }
-
-                                                let name = person
-                                                    .display_name
-                                                    .clone()
-                                                    .unwrap_or_else(|| "Unnamed person".to_owned());
-                                                let source = match person.source {
-                                                    EffectivePersonSource::Automatic => "Auto",
-                                                    EffectivePersonSource::Manual => "Manual",
-                                                };
-                                                let response = ui.selectable_label(
-                                                    selected,
-                                                    format!(
-                                                        "{name}\n{} face{} · {source}",
-                                                        person.member_count,
-                                                        if person.member_count == 1 { "" } else { "s" }
-                                                    ),
-                                                );
-                                                if response.clicked() {
-                                                    self.people_manager_ui.selected_person_id =
-                                                        Some(person.person_id.clone());
-                                                    selection_changed = true;
+                                            }
+                                            if let Some((library_id, face_id)) = person
+                                                .representative_library_id
+                                                .as_deref()
+                                                .zip(person.representative_face_id.as_deref())
+                                            {
+                                                if let Some(preview) =
+                                                    self.people_preview(library_id, face_id)
+                                                {
+                                                    if let Some(texture) =
+                                                        self.thumbnail(&preview.image_path)
+                                                    {
+                                                        let response = face_crop_widget(
+                                                            ui,
+                                                            &texture,
+                                                            preview.bbox,
+                                                            egui::vec2(58.0, 58.0),
+                                                            selected,
+                                                        );
+                                                        if response.clicked() {
+                                                            self.people_manager_ui
+                                                                .selected_person_id =
+                                                                Some(person.person_id.clone());
+                                                            selection_changed = true;
+                                                        }
+                                                    }
                                                 }
-                                            },
-                                        );
+                                            }
+                                            let name = person
+                                                .display_name
+                                                .clone()
+                                                .unwrap_or_else(|| "Unnamed person".to_owned());
+                                            let source = match person.source {
+                                                EffectivePersonSource::Automatic => "Auto",
+                                                EffectivePersonSource::Manual => "Manual",
+                                            };
+                                            let response = ui.selectable_label(
+                                                selected,
+                                                format!(
+                                                    "{name}\n{} face{} · {source}",
+                                                    person.member_count,
+                                                    if person.member_count == 1 { "" } else { "s" }
+                                                ),
+                                            );
+                                            if response.clicked() {
+                                                self.people_manager_ui.selected_person_id =
+                                                    Some(person.person_id.clone());
+                                                selection_changed = true;
+                                            }
+                                        });
+                                        ui.add_space(3.0);
                                     }
                                 });
 
@@ -518,10 +467,8 @@ impl ImageSearchApp {
                         },
                     );
                     ui.separator();
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(editor_width, ui.available_height()),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
+                    ui.vertical(|ui| {
+                        ui.set_min_width(430.0);
                         let selected_person = self
                             .people_manager_ui
                             .selected_person_id
@@ -646,96 +593,67 @@ impl ImageSearchApp {
                         ui.separator();
                         ui.strong("Faces in this Person");
                         let selected_face = self.people_manager_ui.selected_face.clone();
-                        let card_width = 98.0;
-                        let columns = ((ui.available_width() / card_width).floor() as usize).max(1);
-                        let rows = members.len().div_ceil(columns);
                         egui::ScrollArea::vertical()
                             .id_salt("people-manager-members")
-                            .max_height(300.0)
-                            .auto_shrink([false, false])
-                            .show_rows(ui, 108.0, rows, |ui, row_range| {
-                                for row in row_range {
-                                    ui.horizontal(|ui| {
-                                        for column in 0..columns {
-                                            let index = row * columns + column;
-                                            if index >= members.len() {
-                                                break;
+                            .max_height(250.0)
+                            .show(ui, |ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    for member in &members {
+                                        let key =
+                                            (member.library_id.clone(), member.face_id.clone());
+                                        let is_selected = selected_face.as_ref() == Some(&key);
+                                        ui.vertical(|ui| {
+                                            let response = if let Some(preview) = self
+                                                .people_preview(&member.library_id, &member.face_id)
+                                            {
+                                                if let Some(texture) =
+                                                    self.thumbnail(&preview.image_path)
+                                                {
+                                                    face_crop_widget(
+                                                        ui,
+                                                        &texture,
+                                                        preview.bbox,
+                                                        egui::vec2(82.0, 82.0),
+                                                        is_selected,
+                                                    )
+                                                } else {
+                                                    ui.add_sized(
+                                                        [82.0, 82.0],
+                                                        egui::Button::new("Loading…"),
+                                                    )
+                                                }
+                                            } else {
+                                                ui.add_sized(
+                                                    [82.0, 82.0],
+                                                    egui::Button::new("Unavailable"),
+                                                )
+                                            };
+                                            if response.clicked() {
+                                                self.people_manager_ui.selected_face =
+                                                    Some(key.clone());
                                             }
-                                            let member = members[index].clone();
-                                            let key =
-                                                (member.library_id.clone(), member.face_id.clone());
-                                            let is_selected = selected_face.as_ref() == Some(&key);
-                                            ui.allocate_ui_with_layout(
-                                                egui::vec2(card_width, 104.0),
-                                                egui::Layout::top_down(egui::Align::Center),
-                                                |ui| {
-                                                    let response = if let Some(preview) = self
-                                                        .people_preview(&member.library_id, &member.face_id)
-                                                    {
-                                                        if let Some(texture) =
-                                                            self.thumbnail(&preview.image_path)
-                                                        {
-                                                            face_crop_widget(
-                                                                ui,
-                                                                &texture,
-                                                                preview.bbox,
-                                                                egui::vec2(82.0, 82.0),
-                                                                is_selected,
-                                                            )
-                                                        } else {
-                                                            ui.add_sized(
-                                                                [82.0, 82.0],
-                                                                egui::Button::new("Loading…"),
-                                                            )
-                                                        }
-                                                    } else {
-                                                        ui.add_sized(
-                                                            [82.0, 82.0],
-                                                            egui::Button::new("Unavailable"),
-                                                        )
-                                                    };
-                                                    if response.clicked() {
-                                                        self.people_manager_ui.selected_face =
-                                                            Some(key.clone());
-                                                    }
-                                                    let mut flags = Vec::new();
-                                                    if member.explicit_manual_assignment {
-                                                        flags.push("manual");
-                                                    }
-                                                    if member.detached {
-                                                        flags.push("detached");
-                                                    }
-                                                    if member.ignored {
-                                                        flags.push("ignored");
-                                                    }
-                                                    if !flags.is_empty() {
-                                                        ui.small(flags.join(" · "));
-                                                    }
-                                                },
-                                            );
-                                        }
-                                    });
-                                }
+                                            let mut flags = Vec::new();
+                                            if member.explicit_manual_assignment {
+                                                flags.push("manual");
+                                            }
+                                            if member.detached {
+                                                flags.push("detached");
+                                            }
+                                            if member.ignored {
+                                                flags.push("ignored");
+                                            }
+                                            if !flags.is_empty() {
+                                                ui.small(flags.join(" · "));
+                                            }
+                                        });
+                                    }
+                                });
                             });
 
                         if let Some((library_id, face_id)) =
                             self.people_manager_ui.selected_face.clone()
                         {
-                            let selected_preview =
-                                self.people_preview(&library_id, &face_id);
                             ui.add_space(8.0);
-                            ui.strong("Selected face actions");
-                            ui.horizontal_wrapped(|ui| {
-                                if let Some(preview) = selected_preview.clone() {
-                                    if ui.button("Search this face").clicked() {
-                                        search_face = Some(preview.clone());
-                                    }
-                                    if ui.button("Search by image").clicked() {
-                                        search_image = Some(preview.image_path.clone());
-                                    }
-                                }
-                            });
-                            ui.add_space(5.0);
                             ui.strong("Selected face correction");
                             ui.horizontal_wrapped(|ui| {
                                 if ui.button("Set representative").clicked() {
@@ -836,12 +754,6 @@ impl ImageSearchApp {
                 });
             });
         self.people_manager_ui.open = open;
-
-        if let Some(query) = search_face {
-            self.start_indexed_face_search(query);
-        } else if let Some(path) = search_image {
-            self.run_similarity_search(path);
-        }
 
         if selection_changed {
             self.sync_people_editor_fields();

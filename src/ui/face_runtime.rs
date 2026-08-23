@@ -94,6 +94,7 @@ impl ImageSearchApp {
                                 if summary.reused_person_ids == 1 { "" } else { "s" },
                             );
                             self.refresh_face_suggestions();
+                            self.refresh_people_filter_catalog();
                         }
                         Err(error) => {
                             self.status = "People clustering failed".to_owned();
