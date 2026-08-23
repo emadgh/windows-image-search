@@ -117,6 +117,7 @@ impl ImageSearchApp {
                     self.face_search_ui.loading = false;
                     match result {
                         Ok(suggestions) => {
+                            let suggestion_count = suggestions.len();
                             self.face_search_ui.suggestions = suggestions;
                             let selected_exists = self
                                 .face_search_ui
@@ -131,8 +132,18 @@ impl ImageSearchApp {
                             if !selected_exists {
                                 self.face_search_ui.selected_face_id = None;
                             }
+                            self.status = if suggestion_count == 0 {
+                                "No searchable faces are currently available".to_owned()
+                            } else {
+                                format!(
+                                    "Loaded {suggestion_count} People / searchable face suggestion{}",
+                                    if suggestion_count == 1 { "" } else { "s" }
+                                )
+                            };
                         }
                         Err(error) => {
+                            self.status =
+                                "Could not load People / searchable face suggestions".to_owned();
                             self.last_error = Some(error);
                         }
                     }
@@ -249,7 +260,7 @@ impl ImageSearchApp {
         });
     }
 
-    fn start_indexed_face_search(&mut self, query: IndexedFaceSuggestion) {
+    pub(super) fn start_indexed_face_search(&mut self, query: IndexedFaceSuggestion) {
         if self.busy || self.face_search_ui.searching {
             return;
         }
