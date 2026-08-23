@@ -42,4 +42,6 @@ The detail payload contains:
 
 The detail lookup validates current face-detection state against the current indexed image row. Effective People names and manual corrections come from the central session catalog.
 
+Windows validation is required before #61 closes.
+
 Refs #61 #60 #145.
