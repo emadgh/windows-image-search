@@ -1,0 +1,65 @@
+name: Package QA regression Windows test
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    if: github.head_ref == 'test/qa-regression-2026-08-23'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Cargo check
+        run: cargo check --all-targets
+      - name: Tests
+        run: cargo test --all-targets
+      - name: Release build
+        run: cargo build --release
+      - name: Prepare test bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force qa-build | Out-Null
+          Copy-Item target/release/windows-image-search.exe qa-build/windows-image-search.exe
+          @'
+          Windows Image Search - QA regression validation
+
+          Includes fixes from the latest Windows checklist:
+          - terminal People/face suggestion status
+          - stable People list + responsive multi-row member grid + bounded window
+          - People Manager named-person filtering
+          - Face Search named-person filtering
+          - effective/manual Person names in main text search
+          - People ANY/ALL filter composition
+          - Collections-first library/indexing workflow
+          - resizable grouped Preferences
+          - selected People face Search-this-face / Search-by-image actions
+          - corrected native Explorer context-menu implementation
+
+          Validate:
+          1. People top-of-list selection no longer scroll-jitters.
+          2. People member faces wrap into multiple rows and window does not grow horizontally.
+          3. Rename a Person, then search that name in People, Face Search, and main Search.
+          4. Try a mixed main query such as '<person name> <filename/path word>'.
+          5. Preferences can be resized narrower and Collections is the only library/indexing surface.
+          6. Add a folder from Collections and confirm normal Rescan changed indexing.
+          7. Select a face in People and test Search this face / Search by image.
+          8. Right-click Grid and Details items and verify the native Explorer context menu.
+          '@ | Set-Content -Encoding UTF8 qa-build/TEST-CHECKLIST.txt
+      - name: Upload Windows test bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-image-search-qa-regression-test
+          path: qa-build/*
+          retention-days: 14
