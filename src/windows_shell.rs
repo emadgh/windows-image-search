@@ -28,8 +28,8 @@ fn windows_context_menu(path: &std::path::Path) -> windows::core::Result<()> {
         CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED,
     };
     use windows::Win32::UI::Shell::{
-        IContextMenu, IShellFolder, ITEMIDLIST, SHBindToParent, SHSimpleIDListFromPath, CMF_NORMAL,
-        CMINVOKECOMMANDINFO,
+        IContextMenu, IShellFolder, SHBindToParent, SHSimpleIDListFromPath, CMF_NORMAL,
+        CMINVOKECOMMANDINFO, ITEMIDLIST,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CreatePopupMenu, DestroyMenu, GetCursorPos, GetForegroundWindow, TrackPopupMenuEx,
