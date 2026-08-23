@@ -1,6 +1,7 @@
 mod collections;
 mod face_runtime;
 mod face_search_panel;
+mod people_filter;
 mod people_manager;
 mod texture_lru;
 mod thumbnails;
@@ -71,6 +72,7 @@ pub struct ImageSearchApp {
     face_settings_path: PathBuf,
     face_runtime: face_runtime::FaceRuntimeState,
     face_search_ui: face_search_panel::FaceSearchUiState,
+    people_filter_ui: people_filter::PeopleFilterUiState,
     people_manager_ui: people_manager::PeopleManagerUiState,
     collections: collections::CollectionsState,
     pub(super) search_text: String,
@@ -120,6 +122,7 @@ impl ImageSearchApp {
         let face_embedding_settings = face_settings::load(&face_settings_path);
         let face_runtime = face_runtime::FaceRuntimeState::new(app_data_dir);
         let face_search_ui = face_search_panel::FaceSearchUiState::default();
+        let people_filter_ui = people_filter::PeopleFilterUiState::default();
         let people_manager_ui = people_manager::PeopleManagerUiState::default();
         let embedding_service = EmbeddingService::new(model_cache);
         let text_search_service = TextSearchService::new(db_path.clone());
@@ -184,6 +187,7 @@ impl ImageSearchApp {
             face_settings_path,
             face_runtime,
             face_search_ui,
+            people_filter_ui,
             people_manager_ui,
             collections: collections::CollectionsState::default(),
             search_text: String::new(),
@@ -684,6 +688,9 @@ impl ImageSearchApp {
                 if !self.collection_filter_matches(&record.path) {
                     return false;
                 }
+                if !self.people_filter_matches(&record.path) {
+                    return false;
+                }
                 if text_filter_active {
                     let Some(matches) = &self.text_search_matches else {
                         return false;
@@ -1110,6 +1117,8 @@ impl ImageSearchApp {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.heading("Search");
                     self.show_collection_filter(ui);
+                    self.show_people_filter(ui);
+                    ui.add_space(6.0);
                     ui.add(
                         egui::TextEdit::singleline(&mut self.search_text)
                             .hint_text("filename, path, description, keywords…")
@@ -1303,13 +1312,17 @@ impl eframe::App for ImageSearchApp {
         self.process_worker_messages();
         self.process_face_runtime_messages();
         self.process_face_search_messages();
+        self.process_people_filter_messages();
         self.process_fs_watch_messages();
         self.process_thumbnail_messages(ctx);
         self.observe_text_search_input();
         self.dispatch_text_search_if_due();
         self.process_text_search_results();
 
-        if self.text_search_pending || self.text_search_due.is_some() {
+        if self.text_search_pending
+            || self.text_search_due.is_some()
+            || self.people_filter_work_pending()
+        {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
 

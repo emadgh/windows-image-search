@@ -1,7 +1,5 @@
 use super::ImageSearchApp;
-use crate::people_filter::{
-    self, NamedPersonOption, PeopleFilterMode, ResolvedPeopleFilter,
-};
+use crate::people_filter::{self, NamedPersonOption, PeopleFilterMode, ResolvedPeopleFilter};
 use eframe::egui;
 use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
@@ -116,7 +114,8 @@ impl ImageSearchApp {
         let db_path = self.db_path.clone();
         let tx = self.people_filter_ui.tx.clone();
         std::thread::spawn(move || {
-            let result = people_filter::load_named_people(&db_path).map_err(|err| format!("{err:#}"));
+            let result =
+                people_filter::load_named_people(&db_path).map_err(|err| format!("{err:#}"));
             let _ = tx.send(PeopleFilterMessage::Catalog { generation, result });
         });
     }
