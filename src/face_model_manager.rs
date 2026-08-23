@@ -89,8 +89,8 @@ pub fn verify_model_file(
     manifest: FaceModelManifest,
     validate_onnx: bool,
 ) -> Result<()> {
-    let metadata = fs::metadata(path)
-        .with_context(|| format!("reading model metadata {}", path.display()))?;
+    let metadata =
+        fs::metadata(path).with_context(|| format!("reading model metadata {}", path.display()))?;
     if metadata.len() != manifest.expected_size {
         if looks_like_lfs_pointer(path)? {
             bail!(
@@ -293,7 +293,9 @@ mod tests {
             expected_size: 999,
             ..YUNET
         };
-        let error = verify_model_file(&path, manifest, false).unwrap_err().to_string();
+        let error = verify_model_file(&path, manifest, false)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("Git-LFS pointer"));
         let _ = fs::remove_dir_all(dir);
     }
@@ -303,7 +305,10 @@ mod tests {
         let dir = test_dir("bad");
         let path = model_path(&dir, YUNET);
         fs::write(&path, b"not an onnx model").unwrap();
-        assert!(matches!(inspect(&dir, YUNET), ManagedModelState::Invalid(_)));
+        assert!(matches!(
+            inspect(&dir, YUNET),
+            ManagedModelState::Invalid(_)
+        ));
         let _ = fs::remove_dir_all(dir);
     }
 }

@@ -5,20 +5,35 @@ use crate::face_detection::yunet_settings::{self, FaceDetectorSettings};
 use crate::face_embedding_pipeline::{
     FaceEmbeddingPipelineEvent, FaceEmbeddingPipelineOptions, FaceEmbeddingPipelineSummary,
 };
+use crate::face_model_manager::{self, FaceModelKind, ManagedModelState, SFACE, YUNET};
 use crate::face_pipeline::{FacePipelineEvent, FacePipelineOptions, FacePipelineSummary};
 use crate::face_sface_production;
 use crate::people_clustering::{self, PeopleClusteringOptions, PeopleClusteringSummary};
 use crate::people_settings::{self, PeopleSettings};
 use eframe::egui;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::Arc;
 
 #[derive(Debug)]
 enum FaceRuntimeMessage {
     DetectionEvent(FacePipelineEvent),
     EmbeddingEvent(FaceEmbeddingPipelineEvent),
     PeopleFinished(Result<PeopleClusteringSummary, String>),
+    ModelDownloadProgress {
+        kind: FaceModelKind,
+        downloaded: u64,
+        total: u64,
+    },
+    ModelDownloadFinished(Result<DownloadedDefaultModels, String>),
     Finished(Result<(FacePipelineSummary, Option<FaceEmbeddingPipelineSummary>), String>),
+}
+
+#[derive(Debug, Default)]
+struct DownloadedDefaultModels {
+    yunet: Option<PathBuf>,
+    sface: Option<PathBuf>,
 }
 
 pub(super) struct FaceRuntimeState {
@@ -31,12 +46,28 @@ pub(super) struct FaceRuntimeState {
     running: bool,
     run_after_base_index: bool,
     run_people_after_embedding: bool,
+    model_cache_dir: PathBuf,
+    managed_yunet_state: ManagedModelState,
+    managed_sface_state: ManagedModelState,
+    model_download_running: bool,
+    model_download_kind: Option<FaceModelKind>,
+    model_downloaded: u64,
+    model_download_total: u64,
+    model_download_cancel: Arc<AtomicBool>,
+    run_face_after_model_download: bool,
 }
 
 impl FaceRuntimeState {
     pub(super) fn new(app_data_dir: &Path) -> Self {
         let settings_path = app_data_dir.join("face-detector-settings.ini");
-        let settings = yunet_settings::load(&settings_path);
+        let mut settings = yunet_settings::load(&settings_path);
+        let model_cache_dir = face_model_manager::cache_dir(app_data_dir);
+        let managed_yunet_state = face_model_manager::inspect(&model_cache_dir, YUNET);
+        let managed_sface_state = face_model_manager::inspect(&model_cache_dir, SFACE);
+        if !settings.configured() && matches!(managed_yunet_state, ManagedModelState::Ready) {
+            settings.model_path = face_model_manager::model_path(&model_cache_dir, YUNET);
+            let _ = yunet_settings::save(&settings_path, &settings);
+        }
         let people_settings_path = app_data_dir.join("people-settings.ini");
         let people_settings = people_settings::load(&people_settings_path);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -50,6 +81,15 @@ impl FaceRuntimeState {
             running: false,
             run_after_base_index: false,
             run_people_after_embedding: false,
+            model_cache_dir,
+            managed_yunet_state,
+            managed_sface_state,
+            model_download_running: false,
+            model_download_kind: None,
+            model_downloaded: 0,
+            model_download_total: 0,
+            model_download_cancel: Arc::new(AtomicBool::new(false)),
+            run_face_after_model_download: false,
         }
     }
 
@@ -75,6 +115,68 @@ impl ImageSearchApp {
                 FaceRuntimeMessage::DetectionEvent(event) => self.apply_face_pipeline_event(event),
                 FaceRuntimeMessage::EmbeddingEvent(event) => {
                     self.apply_face_embedding_pipeline_event(event)
+                }
+                FaceRuntimeMessage::ModelDownloadProgress {
+                    kind,
+                    downloaded,
+                    total,
+                } => {
+                    self.face_runtime.model_download_kind = Some(kind);
+                    self.face_runtime.model_downloaded = downloaded;
+                    self.face_runtime.model_download_total = total;
+                    self.status = format!(
+                        "Downloading {}: {:.1}%",
+                        kind.label(),
+                        if total == 0 {
+                            0.0
+                        } else {
+                            downloaded as f64 * 100.0 / total as f64
+                        }
+                    );
+                }
+                FaceRuntimeMessage::ModelDownloadFinished(result) => {
+                    self.face_runtime.model_download_running = false;
+                    self.face_runtime.model_download_kind = None;
+                    self.face_runtime.managed_yunet_state =
+                        face_model_manager::inspect(&self.face_runtime.model_cache_dir, YUNET);
+                    self.face_runtime.managed_sface_state =
+                        face_model_manager::inspect(&self.face_runtime.model_cache_dir, SFACE);
+                    match result {
+                        Ok(downloaded) => {
+                            if let Some(path) = downloaded.yunet {
+                                self.face_runtime.settings.model_path = path;
+                                let _ = yunet_settings::save(
+                                    &self.face_runtime.settings_path,
+                                    &self.face_runtime.settings,
+                                );
+                            }
+                            if let Some(path) = downloaded.sface {
+                                self.face_embedding_settings.model_path = path;
+                                let _ = crate::face_settings::save(
+                                    &self.face_settings_path,
+                                    &self.face_embedding_settings,
+                                );
+                            }
+                            self.status = "Default face models are verified and ready".to_owned();
+                        }
+                        Err(error) if error.to_lowercase().contains("cancelled") => {
+                            self.status = "Face model download cancelled".to_owned();
+                        }
+                        Err(error) => {
+                            self.status = "Face model download failed".to_owned();
+                            self.last_error = Some(error);
+                        }
+                    }
+                    let run_after = self.face_runtime.run_face_after_model_download;
+                    self.face_runtime.run_face_after_model_download = false;
+                    if run_after
+                        && !self.face_runtime.model_download_running
+                        && !self.busy
+                        && self.face_runtime.settings.configured()
+                        && self.face_runtime.settings.model_path.is_file()
+                    {
+                        self.start_face_pipeline();
+                    }
                 }
                 FaceRuntimeMessage::PeopleFinished(result) => {
                     self.face_runtime.running = false;
@@ -160,8 +262,191 @@ impl ImageSearchApp {
         }
     }
 
+    pub(super) fn face_model_download_running(&self) -> bool {
+        self.face_runtime.model_download_running
+    }
+
+    fn model_path_is_custom(&self, kind: FaceModelKind) -> bool {
+        let path = match kind {
+            FaceModelKind::YuNet => &self.face_runtime.settings.model_path,
+            FaceModelKind::SFace => &self.face_embedding_settings.model_path,
+        };
+        if path.as_os_str().is_empty() {
+            return false;
+        }
+        let manifest = match kind {
+            FaceModelKind::YuNet => YUNET,
+            FaceModelKind::SFace => SFACE,
+        };
+        !face_model_manager::is_managed_path(path, &self.face_runtime.model_cache_dir, manifest)
+    }
+
+    fn start_default_face_model_download(&mut self, force: bool, run_face_after: bool) {
+        if self.face_runtime.model_download_running {
+            self.face_runtime.run_face_after_model_download |= run_face_after;
+            return;
+        }
+        let include_yunet = !self.model_path_is_custom(FaceModelKind::YuNet);
+        let include_sface = !self.model_path_is_custom(FaceModelKind::SFace);
+        if !include_yunet && !include_sface {
+            self.status =
+                "Custom YuNet and SFace models are in use; managed defaults were not changed"
+                    .to_owned();
+            return;
+        }
+
+        self.face_runtime
+            .model_download_cancel
+            .store(false, Ordering::Relaxed);
+        self.face_runtime.model_download_running = true;
+        self.face_runtime.model_downloaded = 0;
+        self.face_runtime.model_download_total = 0;
+        self.face_runtime.run_face_after_model_download = run_face_after;
+        self.last_error = None;
+        self.status = "Preparing default face model download…".to_owned();
+
+        let cache_dir = self.face_runtime.model_cache_dir.clone();
+        let cancel = self.face_runtime.model_download_cancel.clone();
+        let tx = self.face_runtime.tx.clone();
+        std::thread::spawn(move || {
+            let mut outcome = DownloadedDefaultModels::default();
+            let result = (|| -> anyhow::Result<()> {
+                if include_yunet {
+                    let path = face_model_manager::download_model(
+                        &cache_dir,
+                        YUNET,
+                        force,
+                        &cancel,
+                        |downloaded, total| {
+                            let _ = tx.send(FaceRuntimeMessage::ModelDownloadProgress {
+                                kind: FaceModelKind::YuNet,
+                                downloaded,
+                                total,
+                            });
+                        },
+                    )?;
+                    outcome.yunet = Some(path);
+                }
+                if include_sface {
+                    let path = face_model_manager::download_model(
+                        &cache_dir,
+                        SFACE,
+                        force,
+                        &cancel,
+                        |downloaded, total| {
+                            let _ = tx.send(FaceRuntimeMessage::ModelDownloadProgress {
+                                kind: FaceModelKind::SFace,
+                                downloaded,
+                                total,
+                            });
+                        },
+                    )?;
+                    outcome.sface = Some(path);
+                }
+                Ok(())
+            })();
+            let message = match result {
+                Ok(()) => FaceRuntimeMessage::ModelDownloadFinished(Ok(outcome)),
+                Err(err) => FaceRuntimeMessage::ModelDownloadFinished(Err(format!("{err:#}"))),
+            };
+            let _ = tx.send(message);
+        });
+    }
+
+    fn cancel_face_model_download(&mut self) {
+        if self.face_runtime.model_download_running {
+            self.face_runtime
+                .model_download_cancel
+                .store(true, Ordering::Relaxed);
+            self.status = "Cancelling face model download…".to_owned();
+        }
+    }
+
+    fn show_managed_face_models(&mut self, ui: &mut egui::Ui) {
+        ui.strong("Default face models");
+        ui.small(format!(
+            "Managed cache: {}",
+            self.face_runtime.model_cache_dir.display()
+        ));
+
+        for (kind, manifest, state) in [
+            (
+                FaceModelKind::YuNet,
+                YUNET,
+                &self.face_runtime.managed_yunet_state,
+            ),
+            (
+                FaceModelKind::SFace,
+                SFACE,
+                &self.face_runtime.managed_sface_state,
+            ),
+        ] {
+            let custom = self.model_path_is_custom(kind);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(kind.label());
+                if custom {
+                    ui.strong("Custom");
+                } else {
+                    match state {
+                        ManagedModelState::Missing => {
+                            ui.label("Missing");
+                        }
+                        ManagedModelState::Ready => {
+                            ui.strong("Ready");
+                        }
+                        ManagedModelState::Invalid(_) => {
+                            ui.colored_label(egui::Color32::LIGHT_RED, "Invalid");
+                        }
+                    }
+                }
+                ui.small(format!("{} · {}", manifest.file_name, manifest.license));
+            });
+            if !custom {
+                if let ManagedModelState::Invalid(error) = state {
+                    ui.small(error);
+                }
+            }
+        }
+
+        if self.face_runtime.model_download_running {
+            let fraction = if self.face_runtime.model_download_total == 0 {
+                0.0
+            } else {
+                self.face_runtime.model_downloaded as f32
+                    / self.face_runtime.model_download_total as f32
+            };
+            let label = self
+                .face_runtime
+                .model_download_kind
+                .map(|kind| kind.label())
+                .unwrap_or("Face model");
+            ui.add(
+                egui::ProgressBar::new(fraction.clamp(0.0, 1.0))
+                    .desired_width(ui.available_width().min(520.0))
+                    .text(format!("Downloading {label}")),
+            );
+            if ui.button("Cancel download").clicked() {
+                self.cancel_face_model_download();
+            }
+        } else {
+            ui.horizontal(|ui| {
+                if ui.button("Download default models").clicked() {
+                    self.start_default_face_model_download(false, false);
+                }
+                if ui.button("Repair / re-download defaults").clicked() {
+                    self.start_default_face_model_download(true, false);
+                }
+            });
+        }
+        ui.small("Defaults are downloaded from OpenCV Zoo, verified by exact size + SHA-256, validated as ONNX, then atomically installed. Browse paths below remain advanced custom overrides.");
+    }
+
     fn start_face_pipeline(&mut self) {
         if self.face_runtime.running || self.busy {
+            return;
+        }
+        if !self.face_runtime.settings.configured() || !self.face_embedding_settings.configured() {
+            self.start_default_face_model_download(false, true);
             return;
         }
         if !self.face_runtime.settings.configured() {
@@ -393,143 +678,148 @@ impl ImageSearchApp {
     }
 
     pub(super) fn show_face_detector_settings(&mut self, ui: &mut egui::Ui) {
+        self.show_managed_face_models(ui);
         ui.add_space(12.0);
         ui.separator();
         ui.heading("Face detection (YuNet)");
         ui.label(
-            "Use an external OpenCV YuNet-compatible ONNX model. Face detection runs only for collections with Detect faces enabled.",
+            "The verified managed YuNet is the default. Browse an ONNX file below only to use a custom detector. Face detection runs only for collections with Detect faces enabled.",
         );
 
         let mut changed = false;
         let mut people_changed = false;
-        ui.add_enabled_ui(!self.busy && !self.face_runtime.running, |ui| {
-            ui.horizontal(|ui| {
-                let mut model_path = self
-                    .face_runtime
-                    .settings
-                    .model_path
-                    .to_string_lossy()
-                    .into_owned();
-                if ui
-                    .add(
-                        egui::TextEdit::singleline(&mut model_path)
-                            .hint_text("Path to external YuNet .onnx")
-                            .desired_width(560.0),
-                    )
-                    .changed()
-                {
-                    self.face_runtime.settings.model_path = PathBuf::from(model_path.trim());
-                    changed = true;
-                }
-                if ui.button("Browse…").clicked() {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("ONNX model", &["onnx"])
-                        .pick_file()
+        ui.add_enabled_ui(
+            !self.busy && !self.face_runtime.running && !self.face_runtime.model_download_running,
+            |ui| {
+                ui.horizontal(|ui| {
+                    let mut model_path = self
+                        .face_runtime
+                        .settings
+                        .model_path
+                        .to_string_lossy()
+                        .into_owned();
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut model_path)
+                                .hint_text("Path to external YuNet .onnx")
+                                .desired_width(560.0),
+                        )
+                        .changed()
                     {
-                        self.face_runtime.settings.model_path = path;
+                        self.face_runtime.settings.model_path = PathBuf::from(model_path.trim());
                         changed = true;
                     }
-                }
-            });
-
-            let provider_before = self.face_runtime.settings.provider;
-            egui::ComboBox::from_label("YuNet execution provider")
-                .selected_text(self.face_runtime.settings.provider_label())
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut self.face_runtime.settings.provider,
-                        YuNetExecutionProvider::Cpu,
-                        "CPU",
-                    );
-                    ui.selectable_value(
-                        &mut self.face_runtime.settings.provider,
-                        YuNetExecutionProvider::DirectMl,
-                        "DirectML (Windows GPU)",
-                    );
+                    if ui.button("Browse…").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("ONNX model", &["onnx"])
+                            .pick_file()
+                        {
+                            self.face_runtime.settings.model_path = path;
+                            changed = true;
+                        }
+                    }
                 });
-            changed |= provider_before != self.face_runtime.settings.provider;
 
-            ui.horizontal(|ui| {
-                ui.label("Score threshold");
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut self.face_runtime.settings.score_threshold)
-                            .range(0.0..=1.0)
-                            .speed(0.01),
-                    )
-                    .changed();
-                ui.label("NMS threshold");
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut self.face_runtime.settings.nms_threshold)
-                            .range(0.0..=1.0)
-                            .speed(0.01),
-                    )
-                    .changed();
-                ui.label("Top-K");
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut self.face_runtime.settings.top_k)
-                            .range(1..=100_000)
-                            .speed(10.0),
-                    )
-                    .changed();
-            });
+                let provider_before = self.face_runtime.settings.provider;
+                egui::ComboBox::from_label("YuNet execution provider")
+                    .selected_text(self.face_runtime.settings.provider_label())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.face_runtime.settings.provider,
+                            YuNetExecutionProvider::Cpu,
+                            "CPU",
+                        );
+                        ui.selectable_value(
+                            &mut self.face_runtime.settings.provider,
+                            YuNetExecutionProvider::DirectMl,
+                            "DirectML (Windows GPU)",
+                        );
+                    });
+                changed |= provider_before != self.face_runtime.settings.provider;
 
-            ui.add_space(8.0);
-            ui.separator();
-            ui.strong("People clustering");
-            ui.small(
+                ui.horizontal(|ui| {
+                    ui.label("Score threshold");
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut self.face_runtime.settings.score_threshold)
+                                .range(0.0..=1.0)
+                                .speed(0.01),
+                        )
+                        .changed();
+                    ui.label("NMS threshold");
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut self.face_runtime.settings.nms_threshold)
+                                .range(0.0..=1.0)
+                                .speed(0.01),
+                        )
+                        .changed();
+                    ui.label("Top-K");
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut self.face_runtime.settings.top_k)
+                                .range(1..=100_000)
+                                .speed(10.0),
+                        )
+                        .changed();
+                });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.strong("People clustering");
+                ui.small(
                 "These thresholds are separate from the one-shot Face Search similarity threshold.",
             );
-            ui.horizontal(|ui| {
-                ui.label("Identity threshold");
-                people_changed |= ui
-                    .add(
-                        egui::Slider::new(
-                            &mut self.face_runtime.people_settings.similarity_threshold,
-                            0.0..=1.0,
+                ui.horizontal(|ui| {
+                    ui.label("Identity threshold");
+                    people_changed |= ui
+                        .add(
+                            egui::Slider::new(
+                                &mut self.face_runtime.people_settings.similarity_threshold,
+                                0.0..=1.0,
+                            )
+                            .fixed_decimals(2),
                         )
-                        .fixed_decimals(2),
-                    )
-                    .changed();
-                ui.label("Minimum faces per Person");
-                people_changed |= ui
-                    .add(
-                        egui::DragValue::new(
-                            &mut self.face_runtime.people_settings.min_cluster_size,
+                        .changed();
+                    ui.label("Minimum faces per Person");
+                    people_changed |= ui
+                        .add(
+                            egui::DragValue::new(
+                                &mut self.face_runtime.people_settings.min_cluster_size,
+                            )
+                            .range(2..=1_000_000)
+                            .speed(1.0),
                         )
-                        .range(2..=1_000_000)
-                        .speed(1.0),
+                        .changed();
+                });
+
+                let can_run =
+                    self.face_runtime.configured_and_available() && !self.roots.is_empty();
+                let label = if self.face_embedding_settings.configured()
+                    && self.face_embedding_settings.model_path.is_file()
+                {
+                    "Run face detection + identity backfill now"
+                } else {
+                    "Run face detection now"
+                };
+                if ui.add_enabled(can_run, egui::Button::new(label)).clicked() {
+                    self.start_face_pipeline();
+                }
+
+                let can_rebuild_people = self.face_embedding_settings.configured()
+                    && self.face_embedding_settings.model_path.is_file()
+                    && !self.roots.is_empty();
+                if ui
+                    .add_enabled(
+                        can_rebuild_people,
+                        egui::Button::new("Rebuild People groups from current embeddings"),
                     )
-                    .changed();
-            });
-
-            let can_run = self.face_runtime.configured_and_available() && !self.roots.is_empty();
-            let label = if self.face_embedding_settings.configured()
-                && self.face_embedding_settings.model_path.is_file()
-            {
-                "Run face detection + identity backfill now"
-            } else {
-                "Run face detection now"
-            };
-            if ui.add_enabled(can_run, egui::Button::new(label)).clicked() {
-                self.start_face_pipeline();
-            }
-
-            let can_rebuild_people = self.face_embedding_settings.configured()
-                && self.face_embedding_settings.model_path.is_file()
-                && !self.roots.is_empty();
-            if ui
-                .add_enabled(
-                    can_rebuild_people,
-                    egui::Button::new("Rebuild People groups from current embeddings"),
-                )
-                .clicked()
-            {
-                self.start_people_rebuild();
-            }
-        });
+                    .clicked()
+                {
+                    self.start_people_rebuild();
+                }
+            },
+        );
 
         self.face_runtime.settings = self.face_runtime.settings.clone().sanitized();
         self.face_runtime.people_settings = self.face_runtime.people_settings.sanitized();

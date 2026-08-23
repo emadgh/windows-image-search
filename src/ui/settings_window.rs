@@ -312,9 +312,9 @@ fn settings_faces_people(app: &mut ImageSearchApp, ui: &mut egui::Ui, effects: &
     ui.separator();
     ui.heading("Face identity (SFace)");
     ui.label(
-        "Use an external SFace-compatible ONNX model for portable face embeddings. Model weights are never downloaded or stored by the application.",
+        "The verified managed SFace model is the default. Browse an ONNX file below only to use a custom identity model.",
     );
-    ui.add_enabled_ui(!app.busy, |ui| {
+    ui.add_enabled_ui(!app.busy && !app.face_model_download_running(), |ui| {
         ui.horizontal(|ui| {
             let mut model_path = app
                 .face_embedding_settings
@@ -445,6 +445,9 @@ fn settings_storage(app: &mut ImageSearchApp, ui: &mut egui::Ui, effects: &mut E
         "Inspect local application state and manage disposable thumbnail cache data.",
     );
 
+    ui.strong("Face model attribution");
+    ui.small("YuNet 2026may — OpenCV Zoo — MIT. SFace 2021dec — OpenCV Zoo — Apache-2.0. Managed downloads are checksum-pinned; custom model paths remain user-owned.");
+    ui.add_space(12.0);
     ui.strong("Session database");
     ui.label(app.db_path.display().to_string());
     ui.small(

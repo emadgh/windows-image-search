@@ -8,6 +8,7 @@ mod face_detection;
 mod face_embedding;
 mod face_embedding_pipeline;
 mod face_embedding_store;
+mod face_model_manager;
 mod face_pipeline;
 #[cfg(test)]
 mod face_portable_tests;
