@@ -30,6 +30,7 @@ jobs:
             'scripts/new-material-eval-manifest-from-folders.ps1',
             'scripts/run-v0.2-benchmark-gate-from-folders.ps1',
             'scripts/run-v0.2-benchmark-gate.ps1',
+            'scripts/run-v0.3-face-benchmark-gate.ps1',
             'scripts/run-indexed-sample-benchmark.ps1'
           )
           foreach ($file in $files) {
@@ -50,6 +51,7 @@ jobs:
         run: |
           $files = @(
             'scripts/run-v0.2-benchmark-gate.ps1',
+            'scripts/run-v0.3-face-benchmark-gate.ps1',
             'scripts/run-indexed-sample-benchmark.ps1'
           )
           foreach ($file in $files) {
@@ -65,8 +67,10 @@ jobs:
               exit 1
             }
           }
-          if (Select-String -Path 'scripts/run-v0.2-benchmark-gate.ps1' -Pattern '\.ArgumentList' -Quiet) {
-            throw 'Benchmark runner uses ProcessStartInfo.ArgumentList, which is unavailable on Windows PowerShell 5.1.'
+          foreach ($file in @('scripts/run-v0.2-benchmark-gate.ps1', 'scripts/run-v0.3-face-benchmark-gate.ps1')) {
+            if (Select-String -Path $file -Pattern '\.ArgumentList' -Quiet) {
+              throw "$file uses ProcessStartInfo.ArgumentList, which is unavailable on Windows PowerShell 5.1."
+            }
           }
       - name: Format check
         run: cargo fmt --all -- --check
@@ -83,6 +87,7 @@ jobs:
           Copy-Item target/release/windows-image-search.exe artifact/
           Copy-Item scripts/run-indexed-sample-benchmark.ps1 artifact/
           Copy-Item scripts/run-v0.2-benchmark-gate.ps1 artifact/
+          Copy-Item scripts/run-v0.3-face-benchmark-gate.ps1 artifact/
           Copy-Item README.md artifact/
           Copy-Item LICENSE artifact/
           git rev-parse HEAD | Set-Content artifact/COMMIT.txt -Encoding ascii
