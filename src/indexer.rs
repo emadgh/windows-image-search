@@ -767,7 +767,7 @@ fn rescan(
                             .unwrap_or_default()
                             .to_owned(),
                     ));
-                    let result = inspect_image(&item.path, &item.root, item.size).map(
+                    let result = inspect_pending_image(item).map(
                         |(
                             width,
                             height,
