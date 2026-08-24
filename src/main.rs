@@ -30,6 +30,7 @@ mod material_texture;
 mod metadata;
 mod model_benchmark;
 mod oversized_preview;
+mod oversized_validation;
 mod people_clustering;
 mod people_effective;
 mod people_filter;
@@ -70,6 +71,8 @@ enum StartupMode {
     YuNetBenchmark(PathBuf),
     SFaceBenchmark(PathBuf),
     PortableVerify(PathBuf, bool),
+    OversizedPreviewValidation(PathBuf),
+    OversizedIndexValidation(PathBuf),
 }
 
 fn app_paths() -> Result<(PathBuf, PathBuf)> {
@@ -88,6 +91,26 @@ fn startup_mode() -> StartupMode {
     while let Some(arg) = args.next() {
         if arg == "--version" || arg == "-V" {
             return StartupMode::Version;
+        }
+        if let Some(value) = arg.strip_prefix("--validate-oversized-preview=") {
+            if !value.trim().is_empty() {
+                return StartupMode::OversizedPreviewValidation(PathBuf::from(value));
+            }
+        }
+        if arg == "--validate-oversized-preview" {
+            return StartupMode::OversizedPreviewValidation(
+                args.next().map(PathBuf::from).unwrap_or_default(),
+            );
+        }
+        if let Some(value) = arg.strip_prefix("--validate-oversized-indexing=") {
+            if !value.trim().is_empty() {
+                return StartupMode::OversizedIndexValidation(PathBuf::from(value));
+            }
+        }
+        if arg == "--validate-oversized-indexing" {
+            return StartupMode::OversizedIndexValidation(
+                args.next().map(PathBuf::from).unwrap_or_default(),
+            );
         }
         if let Some(value) = arg.strip_prefix("--benchmark-ann=") {
             let queries = value
@@ -348,6 +371,23 @@ fn main() -> eframe::Result<()> {
         let fallback = PathBuf::from(".");
         (fallback.join("index.sqlite3"), fallback.join("models"))
     });
+
+    if let StartupMode::OversizedPreviewValidation(source) = &mode {
+        match oversized_validation::validate_preview(source) {
+            Ok(report) => println!("{report}"),
+            Err(err) => benchmark_failed("Oversized preview validation", &err),
+        }
+        return Ok(());
+    }
+
+    if let StartupMode::OversizedIndexValidation(source) = &mode {
+        match oversized_validation::validate_indexing(source, &model_cache) {
+            Ok(report) => println!("{report}"),
+            Err(err) => benchmark_failed("Oversized full-index validation", &err),
+        }
+        return Ok(());
+    }
+
     if let StartupMode::PortableVerify(root, deep) = &mode {
         let verify_mode = if *deep {
             portable_verify::VerifyMode::DeepFingerprint
