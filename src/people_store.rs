@@ -1,6 +1,8 @@
+use crate::{db, portable};
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 pub const ALGORITHM_REVISION: i64 = 3;
 
@@ -38,6 +40,18 @@ pub struct PersonClusterMember {
     pub is_outlier: bool,
 }
 
+#[derive(Clone, Debug, Default)]
+struct CollectionScope {
+    folders: Vec<PathBuf>,
+    files: HashSet<PathBuf>,
+}
+
+impl CollectionScope {
+    fn contains(&self, path: &Path) -> bool {
+        self.files.contains(path) || self.folders.iter().any(|folder| path.starts_with(folder))
+    }
+}
+
 pub fn ensure_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
@@ -50,7 +64,7 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
             alignment_revision INTEGER NOT NULL,
             algorithm_revision INTEGER NOT NULL,
             similarity_threshold REAL NOT NULL,
-            min_cluster_size INTEGER NOT NULL DEFAULT 2,
+            min_cluster_size INTEGER NOT NULL,
             updated_at INTEGER NOT NULL DEFAULT (unixepoch())
         );
 
@@ -80,15 +94,11 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
             ON people_cluster_members(is_outlier, person_id);
         "#,
     )?;
-    // Migration for People snapshots created by algorithm revisions before min_cluster_size
-    // became part of the compatibility contract. Duplicate-column errors are benign.
-    let _ = conn.execute(
-        "ALTER TABLE people_cluster_state ADD COLUMN min_cluster_size INTEGER NOT NULL DEFAULT 2",
-        [],
-    );
     Ok(())
 }
 
+/// Replace the disposable session snapshot and persist authoritative per-library
+/// shards into every currently attached portable root.
 pub fn replace_automatic_snapshot(
     conn: &mut Connection,
     state: &PeopleClusterState,
@@ -96,146 +106,126 @@ pub fn replace_automatic_snapshot(
     members: &[PersonClusterMember],
 ) -> Result<()> {
     validate_snapshot(state, clusters, members)?;
-    ensure_schema(conn)?;
+    write_snapshot_local(conn, state, clusters, members)?;
+    mirror_snapshot_to_portable_roots(conn, state, clusters, members)
+}
 
-    let tx = conn.transaction()?;
-    tx.execute("DELETE FROM people_cluster_members", [])?;
-    tx.execute("DELETE FROM people_clusters", [])?;
-    tx.execute("DELETE FROM people_cluster_state", [])?;
-
-    tx.execute(
-        r#"
-        INSERT INTO people_cluster_state(
-            singleton_id,
-            model_id, model_version, model_cache_revision,
-            dimension, alignment_revision,
-            algorithm_revision, similarity_threshold, min_cluster_size,
-            updated_at
-        ) VALUES(1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, unixepoch())
-        "#,
-        params![
-            state.embedding.model_id,
-            state.embedding.model_version,
-            state.embedding.model_cache_revision,
-            state.embedding.dimension as i64,
-            state.embedding.alignment_revision,
-            state.algorithm_revision,
-            state.similarity_threshold,
-            state.min_cluster_size as i64,
-        ],
-    )?;
-
-    for cluster in clusters {
-        tx.execute(
-            r#"
-            INSERT INTO people_clusters(
-                person_id,
-                representative_library_id, representative_face_id,
-                member_count, created_at, updated_at
-            ) VALUES(?1, ?2, ?3, ?4, unixepoch(), unixepoch())
-            "#,
-            params![
-                cluster.person_id,
-                cluster.representative_library_id,
-                cluster.representative_face_id,
-                cluster.member_count as i64,
-            ],
-        )?;
+/// Rebuild the disposable session People snapshot from currently attached and
+/// available portable roots. Detached/unavailable roots are deliberately absent.
+pub fn refresh_cache_from_portable_roots(conn: &Connection) -> Result<()> {
+    if !is_session_connection(conn)? {
+        return Ok(());
     }
 
-    for member in members {
-        tx.execute(
-            r#"
-            INSERT INTO people_cluster_members(
-                library_id, face_id, person_id,
-                assignment_similarity, is_outlier, updated_at
-            ) VALUES(?1, ?2, ?3, ?4, ?5, unixepoch())
-            "#,
-            params![
-                member.library_id,
-                member.face_id,
-                member.person_id,
-                member.assignment_similarity,
-                if member.is_outlier { 1 } else { 0 },
-            ],
-        )?;
+    let roots = attached_portable_roots(conn)?;
+    let mut state: Option<PeopleClusterState> = None;
+    let mut members_by_key = BTreeMap::<(String, String), PersonClusterMember>::new();
+    let mut cluster_candidates = HashMap::<String, Vec<PersonCluster>>::new();
+
+    for (library_id, root) in roots {
+        let db_path = portable::index_db_path(&root);
+        if !db_path.is_file() {
+            continue;
+        }
+        let root_conn = match db::open(&db_path) {
+            Ok(conn) => conn,
+            Err(_) => continue,
+        };
+        ensure_schema(&root_conn)?;
+        let Some(root_state) = load_state_local(&root_conn)? else {
+            continue;
+        };
+        if let Some(expected) = state.as_ref() {
+            if expected != &root_state {
+                // A portable root from another People revision must not poison the
+                // current cross-root cache. A normal recluster will rewrite it.
+                continue;
+            }
+        } else {
+            state = Some(root_state);
+        }
+
+        for member in load_members_local(&root_conn)? {
+            if member.library_id == library_id {
+                members_by_key.insert(
+                    (member.library_id.clone(), member.face_id.clone()),
+                    member,
+                );
+            }
+        }
+        for cluster in load_clusters_local(&root_conn)? {
+            cluster_candidates
+                .entry(cluster.person_id.clone())
+                .or_default()
+                .push(cluster);
+        }
     }
 
-    tx.commit()
-        .context("committing People clustering snapshot")?;
-    Ok(())
+    let Some(state) = state else {
+        clear_snapshot_local(conn)?;
+        return Ok(());
+    };
+
+    let members = members_by_key.into_values().collect::<Vec<_>>();
+    let clusters = rebuild_clusters(&members, &cluster_candidates);
+    write_snapshot_local(conn, &state, &clusters, &members)
+}
+
+/// Return the face identities whose source images still belong to at least one
+/// current Collection. `None` means this is not the session DB (unit tests and
+/// root-local callers should not be collection-filtered).
+pub fn active_collection_face_keys(
+    conn: &Connection,
+) -> Result<Option<HashSet<(String, String)>>> {
+    if !is_session_connection(conn)? {
+        return Ok(None);
+    }
+
+    let scope = load_collection_scope(conn)?;
+    let mut active = HashSet::new();
+    for (library_id, root) in attached_portable_roots(conn)? {
+        let db_path = portable::index_db_path(&root);
+        if !db_path.is_file() {
+            continue;
+        }
+        let root_conn = match db::open(&db_path) {
+            Ok(conn) => conn,
+            Err(_) => continue,
+        };
+        if !table_exists(&root_conn, "faces")? {
+            continue;
+        }
+        let mut stmt = root_conn.prepare("SELECT face_id, image_path FROM faces")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (face_id, relative) = row?;
+            let relative = PathBuf::from(relative);
+            let Ok(absolute) = portable::absolute_source_path(&root, &relative) else {
+                continue;
+            };
+            if scope.contains(&absolute) {
+                active.insert((library_id.clone(), face_id));
+            }
+        }
+    }
+    Ok(Some(active))
 }
 
 pub fn load_state(conn: &Connection) -> Result<Option<PeopleClusterState>> {
-    ensure_schema(conn)?;
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT model_id, model_version, model_cache_revision,
-               dimension, alignment_revision,
-               algorithm_revision, similarity_threshold, min_cluster_size
-        FROM people_cluster_state
-        WHERE singleton_id = 1
-        "#,
-    )?;
-    let mut rows = stmt.query([])?;
-    let Some(row) = rows.next()? else {
-        return Ok(None);
-    };
-    Ok(Some(PeopleClusterState {
-        embedding: PeopleEmbeddingRevision {
-            model_id: row.get(0)?,
-            model_version: row.get(1)?,
-            model_cache_revision: row.get(2)?,
-            dimension: row.get::<_, i64>(3)?.max(0) as usize,
-            alignment_revision: row.get(4)?,
-        },
-        algorithm_revision: row.get(5)?,
-        similarity_threshold: row.get(6)?,
-        min_cluster_size: row.get::<_, i64>(7)?.max(2) as usize,
-    }))
+    refresh_cache_from_portable_roots(conn)?;
+    load_state_local(conn)
 }
 
 pub fn load_clusters(conn: &Connection) -> Result<Vec<PersonCluster>> {
-    ensure_schema(conn)?;
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT person_id, representative_library_id, representative_face_id, member_count
-        FROM people_clusters
-        ORDER BY member_count DESC, person_id
-        "#,
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(PersonCluster {
-            person_id: row.get(0)?,
-            representative_library_id: row.get(1)?,
-            representative_face_id: row.get(2)?,
-            member_count: row.get::<_, i64>(3)?.max(0) as usize,
-        })
-    })?;
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .context("loading People clusters")
+    refresh_cache_from_portable_roots(conn)?;
+    load_clusters_local(conn)
 }
 
 pub fn load_members(conn: &Connection) -> Result<Vec<PersonClusterMember>> {
-    ensure_schema(conn)?;
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT library_id, face_id, person_id, assignment_similarity, is_outlier
-        FROM people_cluster_members
-        ORDER BY library_id, face_id
-        "#,
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(PersonClusterMember {
-            library_id: row.get(0)?,
-            face_id: row.get(1)?,
-            person_id: row.get(2)?,
-            assignment_similarity: row.get(3)?,
-            is_outlier: row.get::<_, i64>(4)? != 0,
-        })
-    })?;
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .context("loading People cluster members")
+    refresh_cache_from_portable_roots(conn)?;
+    load_members_local(conn)
 }
 
 pub fn stable_person_id(
@@ -274,6 +264,314 @@ pub fn stable_person_id(
         hash = hash.wrapping_mul(0x100000001b3);
     }
     Ok(format!("person-{hash:016x}"))
+}
+
+fn mirror_snapshot_to_portable_roots(
+    conn: &Connection,
+    state: &PeopleClusterState,
+    clusters: &[PersonCluster],
+    members: &[PersonClusterMember],
+) -> Result<()> {
+    if !is_session_connection(conn)? {
+        return Ok(());
+    }
+
+    let cluster_map: HashMap<String, Vec<PersonCluster>> = clusters
+        .iter()
+        .cloned()
+        .map(|cluster| (cluster.person_id.clone(), vec![cluster]))
+        .collect();
+
+    for (library_id, root) in attached_portable_roots(conn)? {
+        let db_path = portable::index_db_path(&root);
+        if !db_path.is_file() {
+            continue;
+        }
+        let local_members = members
+            .iter()
+            .filter(|member| member.library_id == library_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        let local_clusters = rebuild_clusters(&local_members, &cluster_map);
+        let root_conn = db::open(&db_path)
+            .with_context(|| format!("opening portable People shard {}", db_path.display()))?;
+        write_snapshot_local(&root_conn, state, &local_clusters, &local_members)?;
+    }
+    Ok(())
+}
+
+fn rebuild_clusters(
+    members: &[PersonClusterMember],
+    candidates: &HashMap<String, Vec<PersonCluster>>,
+) -> Vec<PersonCluster> {
+    let mut grouped = BTreeMap::<String, Vec<&PersonClusterMember>>::new();
+    for member in members {
+        if member.is_outlier {
+            continue;
+        }
+        if let Some(person_id) = member.person_id.as_ref() {
+            grouped.entry(person_id.clone()).or_default().push(member);
+        }
+    }
+
+    let mut clusters = Vec::with_capacity(grouped.len());
+    for (person_id, mut group) in grouped {
+        group.sort_by(|left, right| {
+            left.library_id
+                .cmp(&right.library_id)
+                .then_with(|| left.face_id.cmp(&right.face_id))
+        });
+        let member_keys = group
+            .iter()
+            .map(|member| (member.library_id.as_str(), member.face_id.as_str()))
+            .collect::<HashSet<_>>();
+        let candidate_rep = candidates.get(&person_id).and_then(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    (
+                        item.representative_library_id.as_str(),
+                        item.representative_face_id.as_str(),
+                    )
+                })
+                .filter(|key| member_keys.contains(key))
+                .min()
+        });
+        let fallback = (
+            group[0].library_id.as_str(),
+            group[0].face_id.as_str(),
+        );
+        let representative = candidate_rep.unwrap_or(fallback);
+        clusters.push(PersonCluster {
+            person_id,
+            representative_library_id: representative.0.to_owned(),
+            representative_face_id: representative.1.to_owned(),
+            member_count: group.len(),
+        });
+    }
+    clusters
+}
+
+fn write_snapshot_local(
+    conn: &Connection,
+    state: &PeopleClusterState,
+    clusters: &[PersonCluster],
+    members: &[PersonClusterMember],
+) -> Result<()> {
+    validate_snapshot(state, clusters, members)?;
+    ensure_schema(conn)?;
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| -> Result<()> {
+        conn.execute("DELETE FROM people_cluster_members", [])?;
+        conn.execute("DELETE FROM people_clusters", [])?;
+        conn.execute("DELETE FROM people_cluster_state", [])?;
+
+        conn.execute(
+            r#"
+            INSERT INTO people_cluster_state(
+                singleton_id,
+                model_id, model_version, model_cache_revision,
+                dimension, alignment_revision,
+                algorithm_revision, similarity_threshold, min_cluster_size,
+                updated_at
+            ) VALUES(1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, unixepoch())
+            "#,
+            params![
+                state.embedding.model_id,
+                state.embedding.model_version,
+                state.embedding.model_cache_revision,
+                state.embedding.dimension as i64,
+                state.embedding.alignment_revision,
+                state.algorithm_revision,
+                state.similarity_threshold,
+                state.min_cluster_size as i64,
+            ],
+        )?;
+
+        for cluster in clusters {
+            conn.execute(
+                r#"
+                INSERT INTO people_clusters(
+                    person_id,
+                    representative_library_id, representative_face_id,
+                    member_count, created_at, updated_at
+                ) VALUES(?1, ?2, ?3, ?4, unixepoch(), unixepoch())
+                "#,
+                params![
+                    cluster.person_id,
+                    cluster.representative_library_id,
+                    cluster.representative_face_id,
+                    cluster.member_count as i64,
+                ],
+            )?;
+        }
+
+        for member in members {
+            conn.execute(
+                r#"
+                INSERT INTO people_cluster_members(
+                    library_id, face_id, person_id,
+                    assignment_similarity, is_outlier, updated_at
+                ) VALUES(?1, ?2, ?3, ?4, ?5, unixepoch())
+                "#,
+                params![
+                    member.library_id,
+                    member.face_id,
+                    member.person_id,
+                    member.assignment_similarity,
+                    if member.is_outlier { 1 } else { 0 },
+                ],
+            )?;
+        }
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => conn
+            .execute_batch("COMMIT")
+            .context("committing People clustering snapshot"),
+        Err(err) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(err)
+        }
+    }
+}
+
+fn clear_snapshot_local(conn: &Connection) -> Result<()> {
+    ensure_schema(conn)?;
+    conn.execute_batch(
+        "DELETE FROM people_cluster_members;\
+         DELETE FROM people_clusters;\
+         DELETE FROM people_cluster_state;",
+    )?;
+    Ok(())
+}
+
+fn load_state_local(conn: &Connection) -> Result<Option<PeopleClusterState>> {
+    ensure_schema(conn)?;
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT model_id, model_version, model_cache_revision,
+               dimension, alignment_revision,
+               algorithm_revision, similarity_threshold, min_cluster_size
+        FROM people_cluster_state
+        WHERE singleton_id = 1
+        "#,
+    )?;
+    let mut rows = stmt.query([])?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    Ok(Some(PeopleClusterState {
+        embedding: PeopleEmbeddingRevision {
+            model_id: row.get(0)?,
+            model_version: row.get(1)?,
+            model_cache_revision: row.get(2)?,
+            dimension: row.get::<_, i64>(3)?.max(0) as usize,
+            alignment_revision: row.get(4)?,
+        },
+        algorithm_revision: row.get(5)?,
+        similarity_threshold: row.get(6)?,
+        min_cluster_size: row.get::<_, i64>(7)?.max(2) as usize,
+    }))
+}
+
+fn load_clusters_local(conn: &Connection) -> Result<Vec<PersonCluster>> {
+    ensure_schema(conn)?;
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT person_id, representative_library_id, representative_face_id, member_count
+        FROM people_clusters
+        ORDER BY member_count DESC, person_id
+        "#,
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(PersonCluster {
+            person_id: row.get(0)?,
+            representative_library_id: row.get(1)?,
+            representative_face_id: row.get(2)?,
+            member_count: row.get::<_, i64>(3)?.max(0) as usize,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .context("loading People clusters")
+}
+
+fn load_members_local(conn: &Connection) -> Result<Vec<PersonClusterMember>> {
+    ensure_schema(conn)?;
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT library_id, face_id, person_id, assignment_similarity, is_outlier
+        FROM people_cluster_members
+        ORDER BY library_id, face_id
+        "#,
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(PersonClusterMember {
+            library_id: row.get(0)?,
+            face_id: row.get(1)?,
+            person_id: row.get(2)?,
+            assignment_similarity: row.get(3)?,
+            is_outlier: row.get::<_, i64>(4)? != 0,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .context("loading People cluster members")
+}
+
+fn attached_portable_roots(conn: &Connection) -> Result<Vec<(String, PathBuf)>> {
+    if !is_session_connection(conn)? {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT registry.library_id, registry.root_path
+        FROM portable_root_registry registry
+        JOIN roots ON roots.path = registry.root_path COLLATE NOCASE
+        ORDER BY registry.library_id
+        "#,
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            PathBuf::from(row.get::<_, String>(1)?),
+        ))
+    })?;
+    let mut roots = Vec::new();
+    for row in rows {
+        let (library_id, root) = row?;
+        if root.is_dir() && portable::index_db_path(&root).is_file() {
+            roots.push((library_id, root));
+        }
+    }
+    Ok(roots)
+}
+
+fn load_collection_scope(conn: &Connection) -> Result<CollectionScope> {
+    let mut scope = CollectionScope::default();
+    let mut folder_stmt = conn.prepare("SELECT folder_path FROM collection_folders")?;
+    let folders = folder_stmt.query_map([], |row| row.get::<_, String>(0))?;
+    for folder in folders {
+        scope.folders.push(PathBuf::from(folder?));
+    }
+    let mut file_stmt = conn.prepare("SELECT file_path FROM collection_files")?;
+    let files = file_stmt.query_map([], |row| row.get::<_, String>(0))?;
+    for file in files {
+        scope.files.insert(PathBuf::from(file?));
+    }
+    Ok(scope)
+}
+
+fn is_session_connection(conn: &Connection) -> Result<bool> {
+    table_exists(conn, "portable_root_registry")
+}
+
+fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        params![table],
+        |row| row.get::<_, i64>(0),
+    )? != 0)
 }
 
 fn validate_snapshot(
