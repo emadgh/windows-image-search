@@ -134,7 +134,7 @@ fn portable_sync_preserves_faces_for_metadata_only_updates_and_invalidates_sourc
     // A real source-state change must invalidate detections through the portable
     // image trigger when the reconciled row is updated.
     {
-        let session = db::open(&session_db).unwrap();
+        let mut session = db::open(&session_db).unwrap();
         db::upsert_image(
             &session,
             &source,
@@ -153,7 +153,7 @@ fn portable_sync_preserves_faces_for_metadata_only_updates_and_invalidates_sourc
         )
         .unwrap();
         db::set_content_fingerprint(&session, &source, 78).unwrap();
-        portable::sync_paths_from_session(&mut db::open(&session_db).unwrap(), std::slice::from_ref(&source)).unwrap();
+        portable::sync_paths_from_session(&mut session, std::slice::from_ref(&source)).unwrap();
     }
     {
         let portable_conn = db::open(&portable::index_db_path(&root)).unwrap();
@@ -201,7 +201,10 @@ fn automatic_people_snapshot_survives_root_detach_and_rehydrates_on_reattach() {
     }
     {
         let portable_conn = db::open(&portable::index_db_path(&root)).unwrap();
-        assert_eq!(people_store::load_members(&portable_conn).unwrap(), vec![member.clone()]);
+        assert_eq!(
+            people_store::load_members(&portable_conn).unwrap(),
+            vec![member.clone()]
+        );
     }
 
     db::remove_root(&session_db, &root).unwrap();
@@ -211,14 +214,20 @@ fn automatic_people_snapshot_survives_root_detach_and_rehydrates_on_reattach() {
     }
     {
         let portable_conn = db::open(&portable::index_db_path(&root)).unwrap();
-        assert_eq!(people_store::load_members(&portable_conn).unwrap(), vec![member.clone()]);
+        assert_eq!(
+            people_store::load_members(&portable_conn).unwrap(),
+            vec![member.clone()]
+        );
     }
 
     portable::attach_root(&session_db, &root).unwrap();
     {
         let session = db::open(&session_db).unwrap();
         assert_eq!(people_store::load_members(&session).unwrap(), vec![member]);
-        assert_eq!(people_store::load_clusters(&session).unwrap(), vec![cluster]);
+        assert_eq!(
+            people_store::load_clusters(&session).unwrap(),
+            vec![cluster]
+        );
     }
 
     cleanup(&root, &session_db);
@@ -247,7 +256,12 @@ fn manual_people_edits_survive_root_detach_and_rehydrate_on_reattach() {
             .unwrap()
             .unwrap();
         assert_eq!(person.display_name, "Alice");
-        assert_eq!(people_overrides::load_face_overrides(&portable_conn).unwrap().len(), 1);
+        assert_eq!(
+            people_overrides::load_face_overrides(&portable_conn)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     db::remove_root(&session_db, &root).unwrap();
@@ -413,7 +427,10 @@ fn shared_root_people_catalog_excludes_faces_outside_current_collection_membersh
         assert_eq!(catalog.people[0].member_count, 1);
         assert_eq!(catalog.members.len(), 1);
         assert_eq!(catalog.members[0].face_id, keep_face_id);
-        assert!(!catalog.members.iter().any(|member| member.face_id == removed_face_id));
+        assert!(!catalog
+            .members
+            .iter()
+            .any(|member| member.face_id == removed_face_id));
         assert!(db::load_roots(&session_db)
             .unwrap()
             .iter()
