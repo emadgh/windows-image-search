@@ -323,7 +323,8 @@ try {
         [pscustomobject]@{ Name = 'yunet-cpu'; Provider = 'cpu'; Arguments = @('--benchmark-yunet', $yunetCpu) },
         [pscustomobject]@{ Name = 'yunet-directml'; Provider = 'directml'; Arguments = @('--benchmark-yunet', $yunetDirectMl) },
         [pscustomobject]@{ Name = 'sface-cpu'; Provider = 'cpu'; Arguments = @('--benchmark-sface', $sfaceCpu) },
-        [pscustomobject]@{ Name = 'sface-directml'; Provider = 'directml'; Arguments = @('--benchmark-sface', $sfaceDirectMl) }
+        [pscustomobject]@{ Name = 'sface-directml'; Provider = 'directml'; Arguments = @('--benchmark-sface', $sfaceDirectMl) },
+        [pscustomobject]@{ Name = 'face-ann'; Provider = 'index'; Arguments = @('--benchmark-face-ann', '32') }
     )
 
     foreach ($benchmark in $benchmarks) {
@@ -421,6 +422,7 @@ Compress-Archive -Path (Join-Path $resultDirectory "*") -DestinationPath $zipPat
 
 $cpuFailures = @($results | Where-Object { $_.provider -eq 'cpu' -and -not $_.succeeded })
 $directMlFailures = @($results | Where-Object { $_.provider -eq 'directml' -and -not $_.succeeded })
+$indexFailures = @($results | Where-Object { $_.provider -eq 'index' -and -not $_.succeeded })
 
 Write-Host ""
 Write-Host "Face benchmark gate complete."
@@ -428,7 +430,8 @@ Write-Host "Result directory: $resultDirectory"
 Write-Host "ZIP bundle: $zipPath"
 Write-Host "CPU succeeded: $(2 - $cpuFailures.Count)/2"
 Write-Host "DirectML succeeded: $(2 - $directMlFailures.Count)/2"
+Write-Host "Face ANN index benchmark succeeded: $($indexFailures.Count -eq 0)"
 
-if ($versionExitCode -ne 0 -or $cpuFailures.Count -gt 0 -or ($RequireDirectML -and $directMlFailures.Count -gt 0)) {
+if ($versionExitCode -ne 0 -or $cpuFailures.Count -gt 0 -or $indexFailures.Count -gt 0 -or ($RequireDirectML -and $directMlFailures.Count -gt 0)) {
     exit 1
 }
