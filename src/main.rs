@@ -3,6 +3,7 @@
 mod ann;
 mod db;
 mod embedding;
+mod face_ann_benchmark;
 mod face_benchmark;
 mod face_detection;
 mod face_embedding;
@@ -56,6 +57,7 @@ enum StartupMode {
     Gui,
     Version,
     AnnBenchmark(usize),
+    FaceAnnBenchmark(usize),
     ClipPreviewBenchmark(usize),
     ClipRuntimeBenchmark(usize),
     ImageModelBenchmark(usize),
@@ -100,6 +102,21 @@ fn startup_mode() -> StartupMode {
                 .unwrap_or_else(ann::default_benchmark_queries)
                 .max(1);
             return StartupMode::AnnBenchmark(queries);
+        }
+        if let Some(value) = arg.strip_prefix("--benchmark-face-ann=") {
+            let queries = value
+                .parse::<usize>()
+                .unwrap_or_else(|_| face_ann_benchmark::default_query_count())
+                .max(1);
+            return StartupMode::FaceAnnBenchmark(queries);
+        }
+        if arg == "--benchmark-face-ann" {
+            let queries = args
+                .peek()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or_else(face_ann_benchmark::default_query_count)
+                .max(1);
+            return StartupMode::FaceAnnBenchmark(queries);
         }
         if let Some(value) = arg.strip_prefix("--benchmark-clip-preview=") {
             let samples = value
@@ -232,6 +249,10 @@ fn startup_mode() -> StartupMode {
     StartupMode::Gui
 }
 
+fn face_ann_benchmark_report_path(db_path: &Path) -> PathBuf {
+    benchmark_report_path(db_path, "face-ann")
+}
+
 fn ann_benchmark_report_path(db_path: &Path) -> PathBuf {
     benchmark_report_path(db_path, "ann")
 }
@@ -353,6 +374,19 @@ fn main() -> eframe::Result<()> {
         let _ = db::open(&db_path);
         let registered_roots = db::load_roots(&db_path).unwrap_or_default();
         let _ = portable::prepare_registered_roots(&db_path, &registered_roots);
+    }
+
+    if let StartupMode::FaceAnnBenchmark(query_count) = &mode {
+        let roots = db::load_roots(&db_path).unwrap_or_default();
+        match face_ann_benchmark::benchmark(&roots, *query_count) {
+            Ok(report) => write_benchmark_report(
+                &face_ann_benchmark_report_path(&db_path),
+                &report,
+                "face ANN crossover",
+            ),
+            Err(err) => benchmark_failed("Face ANN crossover benchmark", &err),
+        }
+        return Ok(());
     }
 
     if let StartupMode::AnnBenchmark(query_count) = &mode {
