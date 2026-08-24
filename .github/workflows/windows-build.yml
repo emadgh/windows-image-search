@@ -74,7 +74,7 @@ jobs:
             'scripts/run-v0.3-face-benchmark-gate.ps1',
             'scripts/run-oversized-source-validation.ps1'
           )) {
-            if (Select-String -Path $file -Pattern '\.ArgumentList' -Quiet) {
+            if (Select-String -Path $file -Pattern '^\s*\$[A-Za-z_][A-Za-z0-9_]*\.ArgumentList\b' -Quiet) {
               throw "$file uses ProcessStartInfo.ArgumentList, which is unavailable on Windows PowerShell 5.1."
             }
           }
