@@ -123,6 +123,7 @@ impl ImageSearchApp {
                     self.face_search_ui.loading = false;
                     match result {
                         Ok(suggestions) => {
+                            let suggestion_count = suggestions.len();
                             self.face_search_ui.suggestions = suggestions;
                             self.refresh_face_suggestion_names();
                             let selected_exists = self
@@ -138,8 +139,19 @@ impl ImageSearchApp {
                             if !selected_exists {
                                 self.face_search_ui.selected_face_id = None;
                             }
+                            self.status = if suggestion_count == 0 {
+                                "People / searchable face suggestions loaded: no indexed faces available"
+                                    .to_owned()
+                            } else {
+                                format!(
+                                    "People / searchable face suggestions ready: {suggestion_count} suggestion{}",
+                                    if suggestion_count == 1 { "" } else { "s" }
+                                )
+                            };
                         }
                         Err(error) => {
+                            self.status =
+                                "Failed to load People / searchable face suggestions".to_owned();
                             self.last_error = Some(error);
                         }
                     }
@@ -241,6 +253,7 @@ impl ImageSearchApp {
         let session_db_path = self.db_path.clone();
         let tx = self.face_search_ui.tx.clone();
         self.face_search_ui.loading = true;
+        self.last_error = None;
         self.status = "Loading People / searchable face suggestions…".to_owned();
         std::thread::spawn(move || {
             let result = face_search::list_people_representatives(
