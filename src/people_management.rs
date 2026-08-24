@@ -291,8 +291,9 @@ fn sync_manual_cache_to_portable_roots(conn: &Connection) -> Result<()> {
             .cloned()
             .collect::<Vec<_>>();
 
-        let root_conn = db::open(&db_path)
-            .with_context(|| format!("opening portable manual People shard {}", db_path.display()))?;
+        let root_conn = db::open(&db_path).with_context(|| {
+            format!("opening portable manual People shard {}", db_path.display())
+        })?;
         people_overrides::ensure_schema(&root_conn)?;
         replace_manual_rows_local(&root_conn, &local_people, &local_overrides)?;
     }
