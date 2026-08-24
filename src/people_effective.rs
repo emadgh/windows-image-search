@@ -1,4 +1,4 @@
-use crate::{people_overrides, people_store};
+use crate::{people_management, people_overrides, people_store};
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -39,11 +39,19 @@ pub struct EffectivePeopleCatalog {
 pub fn load(conn: &Connection) -> Result<EffectivePeopleCatalog> {
     people_store::ensure_schema(conn)?;
     people_overrides::ensure_schema(conn)?;
+    people_management::refresh_manual_cache_from_portable_roots(conn)?;
 
+    let active_faces = people_store::active_collection_face_keys(conn)?;
     let auto_clusters = people_store::load_clusters(conn)?;
-    let auto_members = people_store::load_members(conn)?;
+    let auto_members = people_store::load_members(conn)?
+        .into_iter()
+        .filter(|member| face_is_active(&active_faces, &member.library_id, &member.face_id))
+        .collect::<Vec<_>>();
     let manual_people = people_overrides::load_people(conn)?;
-    let overrides = people_overrides::load_face_overrides(conn)?;
+    let overrides = people_overrides::load_face_overrides(conn)?
+        .into_iter()
+        .filter(|item| face_is_active(&active_faces, &item.library_id, &item.face_id))
+        .collect::<Vec<_>>();
 
     let override_by_face: HashMap<(String, String), people_overrides::FaceOverride> = overrides
         .into_iter()
@@ -136,8 +144,8 @@ pub fn load(conn: &Connection) -> Result<EffectivePeopleCatalog> {
         effective_members.push(resolved);
     }
 
-    // Keep explicit user work even when the current automatic snapshot no longer contains
-    // the face. Portable availability is checked by the UI/search layer when rendering it.
+    // Preserve explicit user work when automatic clustering changes, but only while
+    // the underlying face still belongs to a currently attached Collection.
     for (key, override_item) in &override_by_face {
         if seen_faces.contains(key) {
             continue;
@@ -209,24 +217,27 @@ pub fn load(conn: &Connection) -> Result<EffectivePeopleCatalog> {
         }
     }
 
-    // Empty manual people still belong in the management surface so they can be renamed,
-    // populated again, or deleted after a destructive correction.
-    for manual in manual_by_id.values() {
-        if people.iter().any(|person| {
-            person.source == EffectivePersonSource::Manual
-                && person.person_id == manual.manual_person_id
-        }) {
-            continue;
+    // In unit/local stores without a portable session registry, retain the historical
+    // empty-manual-person behavior. In the real app, an identity with no currently
+    // attached Collection member must not render as a ghost People card.
+    if active_faces.is_none() {
+        for manual in manual_by_id.values() {
+            if people.iter().any(|person| {
+                person.source == EffectivePersonSource::Manual
+                    && person.person_id == manual.manual_person_id
+            }) {
+                continue;
+            }
+            people.push(EffectivePerson {
+                person_id: manual.manual_person_id.clone(),
+                display_name: (!manual.display_name.trim().is_empty())
+                    .then(|| manual.display_name.clone()),
+                source: EffectivePersonSource::Manual,
+                representative_library_id: None,
+                representative_face_id: None,
+                member_count: 0,
+            });
         }
-        people.push(EffectivePerson {
-            person_id: manual.manual_person_id.clone(),
-            display_name: (!manual.display_name.trim().is_empty())
-                .then(|| manual.display_name.clone()),
-            source: EffectivePersonSource::Manual,
-            representative_library_id: None,
-            representative_face_id: None,
-            member_count: 0,
-        });
     }
 
     people.sort_by(|left, right| {
@@ -251,6 +262,16 @@ pub fn load(conn: &Connection) -> Result<EffectivePeopleCatalog> {
     Ok(EffectivePeopleCatalog {
         people,
         members: effective_members,
+    })
+}
+
+fn face_is_active(
+    active_faces: &Option<HashSet<(String, String)>>,
+    library_id: &str,
+    face_id: &str,
+) -> bool {
+    active_faces.as_ref().map_or(true, |keys| {
+        keys.contains(&(library_id.to_owned(), face_id.to_owned()))
     })
 }
 
