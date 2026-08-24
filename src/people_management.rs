@@ -1,6 +1,27 @@
-use crate::{people_effective, people_overrides};
+use crate::{db, people_effective, people_overrides, portable};
 use anyhow::{bail, Context, Result};
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+
+#[derive(Clone, Debug)]
+struct ManualPersonRow {
+    manual_person_id: String,
+    display_name: String,
+    representative_library_id: Option<String>,
+    representative_face_id: Option<String>,
+    updated_at: i64,
+}
+
+#[derive(Clone, Debug)]
+struct ManualOverrideRow {
+    library_id: String,
+    face_id: String,
+    disposition: String,
+    manual_person_id: Option<String>,
+    propagates_cluster: bool,
+    updated_at: i64,
+}
 
 pub fn materialize_effective_person(
     conn: &Connection,
@@ -17,6 +38,7 @@ pub fn materialize_effective_person(
     if person.source == people_effective::EffectivePersonSource::Manual {
         if let Some(name) = display_name {
             people_overrides::rename_person(conn, &person.person_id, name)?;
+            sync_manual_cache_to_portable_roots(conn)?;
         }
         return Ok(person.person_id.clone());
     }
@@ -57,6 +79,7 @@ pub fn materialize_effective_person(
         &representative.0,
         &representative.1,
     )?;
+    sync_manual_cache_to_portable_roots(conn)?;
     Ok(manual.manual_person_id)
 }
 
@@ -99,6 +122,7 @@ pub fn merge_effective_people(
     if let Some(name) = display_name {
         people_overrides::rename_person(conn, &keep, name)?;
     }
+    sync_manual_cache_to_portable_roots(conn)?;
     Ok(keep)
 }
 
@@ -108,7 +132,8 @@ pub fn move_face_to_person(
     face_id: &str,
     manual_person_id: &str,
 ) -> Result<()> {
-    people_overrides::assign_face(conn, library_id, face_id, manual_person_id)
+    people_overrides::assign_face(conn, library_id, face_id, manual_person_id)?;
+    sync_manual_cache_to_portable_roots(conn)
 }
 
 pub fn split_face_to_new_person(
@@ -120,19 +145,24 @@ pub fn split_face_to_new_person(
     let person = people_overrides::create_person(conn, display_name, library_id, face_id)?;
     people_overrides::assign_face(conn, library_id, face_id, &person.manual_person_id)?;
     people_overrides::set_representative(conn, &person.manual_person_id, library_id, face_id)?;
+    sync_manual_cache_to_portable_roots(conn)?;
     Ok(person.manual_person_id)
 }
 
 pub fn detach_face(conn: &Connection, library_id: &str, face_id: &str) -> Result<()> {
-    people_overrides::detach_face(conn, library_id, face_id)
+    people_overrides::detach_face(conn, library_id, face_id)?;
+    sync_manual_cache_to_portable_roots(conn)
 }
 
 pub fn ignore_face(conn: &Connection, library_id: &str, face_id: &str) -> Result<()> {
-    people_overrides::ignore_face(conn, library_id, face_id)
+    people_overrides::ignore_face(conn, library_id, face_id)?;
+    sync_manual_cache_to_portable_roots(conn)
 }
 
 pub fn restore_automatic_face(conn: &Connection, library_id: &str, face_id: &str) -> Result<bool> {
-    people_overrides::clear_face_override(conn, library_id, face_id)
+    let changed = people_overrides::clear_face_override(conn, library_id, face_id)?;
+    sync_manual_cache_to_portable_roots(conn)?;
+    Ok(changed)
 }
 
 pub fn set_person_representative(
@@ -153,11 +183,261 @@ pub fn set_person_representative(
     if !already_assigned_to_person {
         people_overrides::assign_face(conn, library_id, face_id, manual_person_id)?;
     }
-    people_overrides::set_representative(conn, manual_person_id, library_id, face_id)
+    people_overrides::set_representative(conn, manual_person_id, library_id, face_id)?;
+    sync_manual_cache_to_portable_roots(conn)
 }
 
 pub fn delete_manual_person(conn: &Connection, manual_person_id: &str) -> Result<bool> {
-    people_overrides::delete_person(conn, manual_person_id)
+    let changed = people_overrides::delete_person(conn, manual_person_id)?;
+    sync_manual_cache_to_portable_roots(conn)?;
+    Ok(changed)
+}
+
+/// Rebuild the disposable session copy of manual People edits from all currently
+/// attached portable roots. Newest duplicate metadata wins by `updated_at`.
+pub fn refresh_manual_cache_from_portable_roots(conn: &Connection) -> Result<()> {
+    if !is_session_connection(conn)? {
+        return Ok(());
+    }
+    people_overrides::ensure_schema(conn)?;
+
+    let mut people = HashMap::<String, ManualPersonRow>::new();
+    let mut overrides = HashMap::<(String, String), ManualOverrideRow>::new();
+
+    for (library_id, root) in attached_portable_roots(conn)? {
+        let db_path = portable::index_db_path(&root);
+        if !db_path.is_file() {
+            continue;
+        }
+        let root_conn = match db::open(&db_path) {
+            Ok(conn) => conn,
+            Err(_) => continue,
+        };
+        people_overrides::ensure_schema(&root_conn)?;
+
+        let root_overrides = load_manual_override_rows(&root_conn)?
+            .into_iter()
+            .filter(|item| item.library_id == library_id)
+            .collect::<Vec<_>>();
+        let referenced_people = root_overrides
+            .iter()
+            .filter_map(|item| item.manual_person_id.clone())
+            .collect::<HashSet<_>>();
+
+        for item in load_manual_person_rows(&root_conn)? {
+            if !referenced_people.contains(&item.manual_person_id) {
+                continue;
+            }
+            match people.get(&item.manual_person_id) {
+                Some(existing) if existing.updated_at > item.updated_at => {}
+                _ => {
+                    people.insert(item.manual_person_id.clone(), item);
+                }
+            }
+        }
+        for item in root_overrides {
+            let key = (item.library_id.clone(), item.face_id.clone());
+            match overrides.get(&key) {
+                Some(existing) if existing.updated_at > item.updated_at => {}
+                _ => {
+                    overrides.insert(key, item);
+                }
+            }
+        }
+    }
+
+    // Drop assigned overrides whose person metadata is unavailable/corrupt. Detached
+    // and ignored overrides do not reference a manual Person and remain valid.
+    overrides.retain(|_, item| {
+        item.disposition != "assigned"
+            || item
+                .manual_person_id
+                .as_ref()
+                .is_some_and(|id| people.contains_key(id))
+    });
+
+    replace_manual_rows_local(
+        conn,
+        &people.into_values().collect::<Vec<_>>(),
+        &overrides.into_values().collect::<Vec<_>>(),
+    )
+}
+
+fn sync_manual_cache_to_portable_roots(conn: &Connection) -> Result<()> {
+    if !is_session_connection(conn)? {
+        return Ok(());
+    }
+    people_overrides::ensure_schema(conn)?;
+    let people = load_manual_person_rows(conn)?;
+    let overrides = load_manual_override_rows(conn)?;
+
+    for (library_id, root) in attached_portable_roots(conn)? {
+        let db_path = portable::index_db_path(&root);
+        if !db_path.is_file() {
+            continue;
+        }
+        let local_overrides = overrides
+            .iter()
+            .filter(|item| item.library_id == library_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        let person_ids = local_overrides
+            .iter()
+            .filter_map(|item| item.manual_person_id.clone())
+            .collect::<HashSet<_>>();
+        let local_people = people
+            .iter()
+            .filter(|item| person_ids.contains(&item.manual_person_id))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let root_conn = db::open(&db_path)
+            .with_context(|| format!("opening portable manual People shard {}", db_path.display()))?;
+        people_overrides::ensure_schema(&root_conn)?;
+        replace_manual_rows_local(&root_conn, &local_people, &local_overrides)?;
+    }
+    Ok(())
+}
+
+fn replace_manual_rows_local(
+    conn: &Connection,
+    people: &[ManualPersonRow],
+    overrides: &[ManualOverrideRow],
+) -> Result<()> {
+    people_overrides::ensure_schema(conn)?;
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| -> Result<()> {
+        conn.execute("DELETE FROM people_manual_face_overrides", [])?;
+        conn.execute("DELETE FROM people_manual_persons", [])?;
+
+        for person in people {
+            conn.execute(
+                r#"
+                INSERT INTO people_manual_persons(
+                    manual_person_id, display_name,
+                    representative_library_id, representative_face_id,
+                    created_at, updated_at
+                ) VALUES(?1, ?2, ?3, ?4, ?5, ?5)
+                "#,
+                params![
+                    person.manual_person_id,
+                    person.display_name,
+                    person.representative_library_id,
+                    person.representative_face_id,
+                    person.updated_at,
+                ],
+            )?;
+        }
+        for item in overrides {
+            conn.execute(
+                r#"
+                INSERT INTO people_manual_face_overrides(
+                    library_id, face_id, disposition, manual_person_id,
+                    propagates_cluster, updated_at
+                ) VALUES(?1, ?2, ?3, ?4, ?5, ?6)
+                "#,
+                params![
+                    item.library_id,
+                    item.face_id,
+                    item.disposition,
+                    item.manual_person_id,
+                    if item.propagates_cluster { 1i64 } else { 0i64 },
+                    item.updated_at,
+                ],
+            )?;
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => conn
+            .execute_batch("COMMIT")
+            .context("committing portable manual People state"),
+        Err(err) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(err)
+        }
+    }
+}
+
+fn load_manual_person_rows(conn: &Connection) -> Result<Vec<ManualPersonRow>> {
+    people_overrides::ensure_schema(conn)?;
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT manual_person_id, display_name,
+               representative_library_id, representative_face_id,
+               updated_at
+        FROM people_manual_persons
+        ORDER BY manual_person_id
+        "#,
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(ManualPersonRow {
+            manual_person_id: row.get(0)?,
+            display_name: row.get(1)?,
+            representative_library_id: row.get(2)?,
+            representative_face_id: row.get(3)?,
+            updated_at: row.get(4)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .context("loading portable manual People rows")
+}
+
+fn load_manual_override_rows(conn: &Connection) -> Result<Vec<ManualOverrideRow>> {
+    people_overrides::ensure_schema(conn)?;
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT library_id, face_id, disposition, manual_person_id,
+               propagates_cluster, updated_at
+        FROM people_manual_face_overrides
+        ORDER BY library_id, face_id
+        "#,
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(ManualOverrideRow {
+            library_id: row.get(0)?,
+            face_id: row.get(1)?,
+            disposition: row.get(2)?,
+            manual_person_id: row.get(3)?,
+            propagates_cluster: row.get::<_, i64>(4)? != 0,
+            updated_at: row.get(5)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .context("loading portable manual People override rows")
+}
+
+fn attached_portable_roots(conn: &Connection) -> Result<Vec<(String, PathBuf)>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT registry.library_id, registry.root_path
+        FROM portable_root_registry registry
+        JOIN roots ON roots.path = registry.root_path COLLATE NOCASE
+        ORDER BY registry.library_id
+        "#,
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            PathBuf::from(row.get::<_, String>(1)?),
+        ))
+    })?;
+    let mut roots = Vec::new();
+    for row in rows {
+        let (library_id, root) = row?;
+        if root.is_dir() && portable::index_db_path(&root).is_file() {
+            roots.push((library_id, root));
+        }
+    }
+    Ok(roots)
+}
+
+fn is_session_connection(conn: &Connection) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'portable_root_registry')",
+        [],
+        |row| row.get::<_, i64>(0),
+    )? != 0)
 }
 
 #[cfg(test)]
