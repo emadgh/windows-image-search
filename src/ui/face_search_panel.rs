@@ -1,3 +1,4 @@
+use super::photo_grid::{self, PhotoGridSpec, PhotoTileMode};
 use super::ImageSearchApp;
 use crate::face_detection::{
     self, yunet_production::YuNetProductionDetector, yunet_settings::FaceDetectorSettings, FaceBox,
@@ -530,13 +531,7 @@ impl ImageSearchApp {
                             ui.vertical(|ui| {
                                 let response = if let Some(texture) = self.thumbnail(&face.image_path)
                                 {
-                                    face_crop_widget(
-                                        ui,
-                                        &texture,
-                                        face.bbox,
-                                        egui::vec2(104.0, 104.0),
-                                        is_selected,
-                                    )
+                                    photo_grid::photo_tile(ui, &texture, egui::vec2(104.0, 104.0), PhotoTileMode::Face(face.bbox), is_selected, egui::Sense::click())
                                 } else {
                                     ui.add_sized([104.0, 104.0], egui::Button::new("Loading…"))
                                 };
@@ -592,94 +587,61 @@ impl ImageSearchApp {
                 if !filter.is_empty() {
                     ui.small(format!("{} matching named People", suggestions.len()));
                 }
-                let available = ui.available_width().max(300.0);
-                let cell = 116.0;
-                let columns = ((available / cell).floor() as usize).max(1);
-                let rows = suggestions.len().div_ceil(columns);
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show_rows(ui, 142.0, rows, |ui, row_range| {
-                        for row in row_range {
-                            ui.horizontal(|ui| {
-                                for column in 0..columns {
-                                    let index = row * columns + column;
-                                    if index >= suggestions.len() {
-                                        break;
-                                    }
-                                    let face = &suggestions[index];
-                                    let is_selected = self
-                                        .face_search_ui
-                                        .selected_face_id
-                                        .as_ref()
-                                        .is_some_and(|id| id == &face.face_id);
-                                    ui.allocate_ui_with_layout(
-                                        egui::vec2(108.0, 136.0),
-                                        egui::Layout::top_down(egui::Align::Center),
-                                        |ui| {
-                                            let response = if let Some(texture) =
-                                                self.thumbnail(&face.image_path)
-                                            {
-                                                face_crop_widget(
-                                                    ui,
-                                                    &texture,
-                                                    face.bbox,
-                                                    egui::vec2(96.0, 96.0),
-                                                    is_selected,
-                                                )
-                                            } else {
-                                                let response = ui.add_sized(
-                                                    [96.0, 96.0],
-                                                    egui::Button::new("Loading…"),
-                                                );
-                                                if is_selected {
-                                                    ui.painter().rect_stroke(
-                                                        response.rect,
-                                                        5.0,
-                                                        egui::Stroke::new(
-                                                            3.0,
-                                                            ui.visuals().selection.stroke.color,
-                                                        ),
-                                                        egui::StrokeKind::Inside,
-                                                    );
-                                                }
-                                                response
-                                            };
-                                            if response.clicked() {
-                                                self.face_search_ui.selected_face_id =
-                                                    Some(face.face_id.clone());
-                                            }
-                                            if response.double_clicked() && !self.busy {
-                                                self.start_indexed_face_search(face.clone());
-                                            }
-                                            if let Some(name) = self
-                                                .face_search_ui
-                                                .suggestion_names
-                                                .get(&face.face_id)
-                                            {
-                                                ui.strong(truncate(name, 16));
-                                            }
-                                            if let Some(group_size) = face.group_size {
-                                                ui.small(format!(
-                                                    "Person · {group_size} face{}",
-                                                    if group_size == 1 { "" } else { "s" }
-                                                ));
-                                            } else {
-                                                ui.small(format!("{:.0}%", face.confidence * 100.0));
-                                            }
-                                            ui.small(
-                                                face.image_path
-                                                    .file_name()
-                                                    .and_then(|name| name.to_str())
-                                                    .map(|name| truncate(name, 16))
-                                                    .unwrap_or_else(|| "image".to_owned()),
-                                            )
-                                            .on_hover_text(face.image_path.display().to_string());
-                                        },
-                                    );
-                                }
-                            });
+                let spec = PhotoGridSpec::new("face-search-database-photo-grid", 108.0, 142.0);
+                photo_grid::show(ui, suggestions.len(), spec, |ui, index| {
+                    let face = &suggestions[index];
+                    let is_selected = self
+                        .face_search_ui
+                        .selected_face_id
+                        .as_ref()
+                        .is_some_and(|id| id == &face.face_id);
+                    let response = if let Some(texture) = self.thumbnail(&face.image_path) {
+                        photo_grid::photo_tile(
+                            ui,
+                            &texture,
+                            egui::vec2(96.0, 96.0),
+                            PhotoTileMode::Face(face.bbox),
+                            is_selected,
+                            egui::Sense::click(),
+                        )
+                    } else {
+                        let response = ui.add_sized([96.0, 96.0], egui::Button::new("Loading…"));
+                        if is_selected {
+                            ui.painter().rect_stroke(
+                                response.rect,
+                                5.0,
+                                egui::Stroke::new(3.0, ui.visuals().selection.stroke.color),
+                                egui::StrokeKind::Inside,
+                            );
                         }
-                    });
+                        response
+                    };
+                    if response.clicked() {
+                        self.face_search_ui.selected_face_id = Some(face.face_id.clone());
+                    }
+                    if response.double_clicked() && !self.busy {
+                        self.start_indexed_face_search(face.clone());
+                    }
+                    if let Some(name) = self.face_search_ui.suggestion_names.get(&face.face_id) {
+                        ui.strong(truncate(name, 16));
+                    }
+                    if let Some(group_size) = face.group_size {
+                        ui.small(format!(
+                            "Person · {group_size} face{}",
+                            if group_size == 1 { "" } else { "s" }
+                        ));
+                    } else {
+                        ui.small(format!("{:.0}%", face.confidence * 100.0));
+                    }
+                    ui.small(
+                        face.image_path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .map(|name| truncate(name, 16))
+                            .unwrap_or_else(|| "image".to_owned()),
+                    )
+                    .on_hover_text(face.image_path.display().to_string());
+                });
             });
         self.face_search_ui.open = open;
     }
@@ -760,56 +722,6 @@ fn prepare_external_faces(
         );
     }
     Ok(output)
-}
-
-fn face_crop_widget(
-    ui: &mut egui::Ui,
-    texture: &egui::TextureHandle,
-    bbox: FaceBox,
-    desired: egui::Vec2,
-    selected: bool,
-) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::click());
-    ui.painter()
-        .rect_filled(rect, 5.0, ui.visuals().extreme_bg_color);
-
-    let center_x = bbox.x + bbox.width * 0.5;
-    let center_y = bbox.y + bbox.height * 0.5;
-    let square = (bbox.width.max(bbox.height) * 1.45).clamp(0.06, 1.0);
-    let half = square * 0.5;
-    let mut min_x = (center_x - half).clamp(0.0, 1.0);
-    let mut min_y = (center_y - half).clamp(0.0, 1.0);
-    let mut max_x = (center_x + half).clamp(0.0, 1.0);
-    let mut max_y = (center_y + half).clamp(0.0, 1.0);
-    if max_x - min_x < square {
-        if min_x <= 0.0 {
-            max_x = square.min(1.0);
-        } else if max_x >= 1.0 {
-            min_x = (1.0 - square).max(0.0);
-        }
-    }
-    if max_y - min_y < square {
-        if min_y <= 0.0 {
-            max_y = square.min(1.0);
-        } else if max_y >= 1.0 {
-            min_y = (1.0 - square).max(0.0);
-        }
-    }
-    ui.painter().image(
-        texture.id(),
-        rect,
-        egui::Rect::from_min_max(egui::pos2(min_x, min_y), egui::pos2(max_x, max_y)),
-        egui::Color32::WHITE,
-    );
-    if selected {
-        ui.painter().rect_stroke(
-            rect,
-            5.0,
-            egui::Stroke::new(3.0, ui.visuals().selection.stroke.color),
-            egui::StrokeKind::Inside,
-        );
-    }
-    response
 }
 
 fn truncate(value: &str, max_chars: usize) -> String {

@@ -1,3 +1,4 @@
+use super::photo_grid::{self, PhotoGridSpec, PhotoTileMode};
 use super::ImageSearchApp;
 use crate::face_detection::FaceBox;
 use crate::face_search::{self, IndexedFaceSuggestion};
@@ -373,13 +374,7 @@ impl ImageSearchApp {
                                                     if let Some(texture) =
                                                         self.thumbnail(&preview.image_path)
                                                     {
-                                                        let response = face_crop_widget(
-                                                            ui,
-                                                            &texture,
-                                                            preview.bbox,
-                                                            egui::vec2(58.0, 58.0),
-                                                            selected,
-                                                        );
+                                                        let response = photo_grid::photo_tile(ui, &texture, egui::vec2(58.0, 58.0), PhotoTileMode::Face(preview.bbox), selected, egui::Sense::click());
                                                         if response.clicked() {
                                                             self.people_manager_ui
                                                                 .selected_person_id =
@@ -441,13 +436,7 @@ impl ImageSearchApp {
                                                     &member.face_id,
                                                 ) {
                                                     if let Some(texture) = self.thumbnail(&preview.image_path) {
-                                                        let _ = face_crop_widget(
-                                                            ui,
-                                                            &texture,
-                                                            preview.bbox,
-                                                            egui::vec2(42.0, 42.0),
-                                                            false,
-                                                        );
+                                                        let _ = photo_grid::photo_tile(ui, &texture, egui::vec2(42.0, 42.0), PhotoTileMode::Face(preview.bbox), false, egui::Sense::click());
                                                     }
                                                 }
                                                 ui.vertical(|ui| {
@@ -593,62 +582,52 @@ impl ImageSearchApp {
                         ui.separator();
                         ui.strong("Faces in this Person");
                         let selected_face = self.people_manager_ui.selected_face.clone();
-                        egui::ScrollArea::vertical()
-                            .id_salt("people-manager-members")
-                            .max_height(250.0)
-                            .show(ui, |ui| {
-                                ui.horizontal_wrapped(|ui| {
-                                    for member in &members {
-                                        let key =
-                                            (member.library_id.clone(), member.face_id.clone());
-                                        let is_selected = selected_face.as_ref() == Some(&key);
-                                        ui.vertical(|ui| {
-                                            let response = if let Some(preview) = self
-                                                .people_preview(&member.library_id, &member.face_id)
-                                            {
-                                                if let Some(texture) =
-                                                    self.thumbnail(&preview.image_path)
-                                                {
-                                                    face_crop_widget(
-                                                        ui,
-                                                        &texture,
-                                                        preview.bbox,
-                                                        egui::vec2(82.0, 82.0),
-                                                        is_selected,
-                                                    )
-                                                } else {
-                                                    ui.add_sized(
-                                                        [82.0, 82.0],
-                                                        egui::Button::new("Loading…"),
-                                                    )
-                                                }
-                                            } else {
-                                                ui.add_sized(
-                                                    [82.0, 82.0],
-                                                    egui::Button::new("Unavailable"),
-                                                )
-                                            };
-                                            if response.clicked() {
-                                                self.people_manager_ui.selected_face =
-                                                    Some(key.clone());
-                                            }
-                                            let mut flags = Vec::new();
-                                            if member.explicit_manual_assignment {
-                                                flags.push("manual");
-                                            }
-                                            if member.detached {
-                                                flags.push("detached");
-                                            }
-                                            if member.ignored {
-                                                flags.push("ignored");
-                                            }
-                                            if !flags.is_empty() {
-                                                ui.small(flags.join(" · "));
-                                            }
-                                        });
-                                    }
-                                });
-                            });
+                        let member_grid = PhotoGridSpec::new(
+                            "people-manager-members",
+                            94.0,
+                            108.0,
+                        )
+                        .max_height(250.0);
+                        photo_grid::show(ui, members.len(), member_grid, |ui, index| {
+                            let member = &members[index];
+                            let key = (member.library_id.clone(), member.face_id.clone());
+                            let is_selected = selected_face.as_ref() == Some(&key);
+                            let response = if let Some(preview) =
+                                self.people_preview(&member.library_id, &member.face_id)
+                            {
+                                if let Some(texture) = self.thumbnail(&preview.image_path) {
+                                    photo_grid::photo_tile(
+                                        ui,
+                                        &texture,
+                                        egui::vec2(82.0, 82.0),
+                                        PhotoTileMode::Face(preview.bbox),
+                                        is_selected,
+                                        egui::Sense::click(),
+                                    )
+                                } else {
+                                    ui.add_sized([82.0, 82.0], egui::Button::new("Loading…"))
+                                }
+                            } else {
+                                ui.add_sized([82.0, 82.0], egui::Button::new("Unavailable"))
+                            };
+                            if response.clicked() {
+                                self.people_manager_ui.selected_face = Some(key);
+                            }
+                            let mut flags = Vec::new();
+                            if member.explicit_manual_assignment {
+                                flags.push("manual");
+                            }
+                            if member.detached {
+                                flags.push("detached");
+                            }
+                            if member.ignored {
+                                flags.push("ignored");
+                            }
+                            if !flags.is_empty() {
+                                ui.small(flags.join(" · "));
+                            }
+                        });
+
 
                         if let Some((library_id, face_id)) =
                             self.people_manager_ui.selected_face.clone()
@@ -790,38 +769,4 @@ impl ImageSearchApp {
             }
         }
     }
-}
-
-fn face_crop_widget(
-    ui: &mut egui::Ui,
-    texture: &egui::TextureHandle,
-    bbox: FaceBox,
-    desired: egui::Vec2,
-    selected: bool,
-) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::click());
-    ui.painter()
-        .rect_filled(rect, 5.0, ui.visuals().extreme_bg_color);
-    let bbox = bbox.clamped();
-    let pad_x = bbox.width * 0.18;
-    let pad_y = bbox.height * 0.22;
-    let x0 = (bbox.x - pad_x).clamp(0.0, 1.0);
-    let y0 = (bbox.y - pad_y).clamp(0.0, 1.0);
-    let x1 = (bbox.x + bbox.width + pad_x).clamp(0.0, 1.0);
-    let y1 = (bbox.y + bbox.height + pad_y).clamp(0.0, 1.0);
-    ui.painter().image(
-        texture.id(),
-        rect,
-        egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1)),
-        egui::Color32::WHITE,
-    );
-    if selected {
-        ui.painter().rect_stroke(
-            rect,
-            5.0,
-            egui::Stroke::new(3.0_f32, ui.visuals().selection.stroke.color),
-            egui::StrokeKind::Inside,
-        );
-    }
-    response
 }

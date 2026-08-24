@@ -3,6 +3,7 @@ mod face_runtime;
 mod face_search_panel;
 mod people_filter;
 mod people_manager;
+mod photo_grid;
 mod settings_window;
 mod texture_lru;
 mod thumbnails;
