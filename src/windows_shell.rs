@@ -2,14 +2,18 @@ use std::path::PathBuf;
 
 pub fn show_context_menu(path: PathBuf) {
     #[cfg(target_os = "windows")]
-    std::thread::spawn(move || {
+    {
+        // Keep Shell menu creation on the GUI thread that owns the foreground window.
+        // Shell context-menu handlers can depend on the owner thread's window/message
+        // loop; running the whole IContextMenu/TrackPopupMenuEx sequence on a detached
+        // worker thread can make the native menu silently fail to appear.
         if let Err(err) = windows_context_menu(&path) {
             eprintln!(
                 "Windows shell context menu failed for {}: {err}",
                 path.display()
             );
         }
-    });
+    }
 
     #[cfg(not(target_os = "windows"))]
     {
@@ -54,6 +58,9 @@ fn windows_context_menu(path: &std::path::Path) -> windows::core::Result<()> {
     }
 
     unsafe {
+        // This now runs on the eframe UI thread. Keeping COM, the owner HWND and the
+        // TrackPopupMenuEx modal loop on the same thread is important for Shell menu
+        // handlers that expect their owner window to participate in message dispatch.
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
         let _com = ComGuard;
 
