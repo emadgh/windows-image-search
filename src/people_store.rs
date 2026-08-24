@@ -147,10 +147,7 @@ pub fn refresh_cache_from_portable_roots(conn: &Connection) -> Result<()> {
 
         for member in load_members_local(&root_conn)? {
             if member.library_id == library_id {
-                members_by_key.insert(
-                    (member.library_id.clone(), member.face_id.clone()),
-                    member,
-                );
+                members_by_key.insert((member.library_id.clone(), member.face_id.clone()), member);
             }
         }
         for cluster in load_clusters_local(&root_conn)? {
@@ -174,9 +171,7 @@ pub fn refresh_cache_from_portable_roots(conn: &Connection) -> Result<()> {
 /// Return the face identities whose source images still belong to at least one
 /// current Collection. `None` means this is not the session DB (unit tests and
 /// root-local callers should not be collection-filtered).
-pub fn active_collection_face_keys(
-    conn: &Connection,
-) -> Result<Option<HashSet<(String, String)>>> {
+pub fn active_collection_face_keys(conn: &Connection) -> Result<Option<HashSet<(String, String)>>> {
     if !is_session_connection(conn)? {
         return Ok(None);
     }
@@ -337,10 +332,7 @@ fn rebuild_clusters(
                 .filter(|key| member_keys.contains(key))
                 .min()
         });
-        let fallback = (
-            group[0].library_id.as_str(),
-            group[0].face_id.as_str(),
-        );
+        let fallback = (group[0].library_id.as_str(), group[0].face_id.as_str());
         let representative = candidate_rep.unwrap_or(fallback);
         clusters.push(PersonCluster {
             person_id,
