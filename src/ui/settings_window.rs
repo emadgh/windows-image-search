@@ -68,6 +68,10 @@ pub(super) fn show(app: &mut ImageSearchApp, ctx: &egui::Context) {
     if !app.settings_open {
         return;
     }
+    if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+        app.settings_open = false;
+        return;
+    }
 
     let category_id = egui::Id::new("preferences-category");
     let mut category = SettingsCategory::from_index(

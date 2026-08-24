@@ -298,6 +298,14 @@ impl ImageSearchApp {
         if !self.people_manager_ui.open {
             return;
         }
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            if self.people_manager_ui.confirm_delete_person.is_some() {
+                self.people_manager_ui.confirm_delete_person = None;
+            } else {
+                self.people_manager_ui.open = false;
+            }
+            return;
+        }
 
         let mut open = self.people_manager_ui.open;
         let mut action = None;
