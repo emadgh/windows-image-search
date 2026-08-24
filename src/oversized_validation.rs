@@ -143,17 +143,14 @@ pub fn validate_preview(source: &Path) -> Result<String> {
         preview_meta.len()
     ));
     report.push_str(&format!("cold_reused={}\n", cold.reused));
-    report.push_str(&format!(
-        "cold_wall_ms={}\n",
-        cold_elapsed.as_millis()
-    ));
+    report.push_str(&format!("cold_wall_ms={}\n", cold_elapsed.as_millis()));
     report.push_str(&format!("warm_reused={}\n", warm.reused));
-    report.push_str(&format!(
-        "warm_wall_ms={}\n",
-        warm_elapsed.as_millis()
-    ));
+    report.push_str(&format!("warm_wall_ms={}\n", warm_elapsed.as_millis()));
     report.push_str("source_state_unchanged=true\n");
-    report.push_str(&format!("total_wall_ms={}\n", started.elapsed().as_millis()));
+    report.push_str(&format!(
+        "total_wall_ms={}\n",
+        started.elapsed().as_millis()
+    ));
     report.push_str("validation_passed=true\n");
     Ok(report)
 }
@@ -233,7 +230,7 @@ pub fn validate_indexing(source: &Path, model_cache: &Path) -> Result<String> {
     }
 
     let row = conn.query_row(
-        "SELECT size, width, height, COALESCE(embedding_dim, 0), length(embedding), \
+        "SELECT size, modified, width, height, COALESCE(embedding_dim, 0), length(embedding), \
                 COALESCE(color_histogram_dim, 0), COALESCE(material_texture_dim, 0) \
          FROM images WHERE path = ?1",
         params![relative.to_string_lossy().to_string()],
@@ -243,16 +240,32 @@ pub fn validate_indexing(source: &Path, model_cache: &Path) -> Result<String> {
                 row.get::<_, i64>(1)?,
                 row.get::<_, i64>(2)?,
                 row.get::<_, i64>(3)?,
-                row.get::<_, Option<i64>>(4)?,
-                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, Option<i64>>(5)?,
                 row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
             ))
         },
     )?;
-    let (stored_size, width, height, embedding_dim, embedding_bytes, histogram_dim, texture_dim) =
-        row;
+    let (
+        stored_size,
+        stored_modified,
+        width,
+        height,
+        embedding_dim,
+        embedding_bytes,
+        histogram_dim,
+        texture_dim,
+    ) = row;
     if stored_size.max(0) as u64 != original_state.size {
         bail!("indexed record did not preserve the authoritative original source size");
+    }
+    let expected_modified = i64::try_from(original_state.modified_secs)
+        .context("source modified time does not fit persisted index metadata")?;
+    if stored_modified != expected_modified {
+        bail!(
+            "indexed record did not preserve authoritative source mtime: expected={expected_modified} actual={stored_modified}"
+        );
     }
     if width <= 0 || height <= 0 {
         bail!("indexed record has invalid original dimensions {width}x{height}");
@@ -268,9 +281,17 @@ pub fn validate_indexing(source: &Path, model_cache: &Path) -> Result<String> {
         );
     }
 
-    let preview = oversized_preview::load_current_for_root(&workspace.root, &workspace.linked_source)?;
+    let preview =
+        oversized_preview::load_current_for_root(&workspace.root, &workspace.linked_source)?;
     if !preview.reused {
         bail!("post-index validation could not reuse the generated oversized derivative");
+    }
+    if width as u32 != preview.source_width || height as u32 != preview.source_height {
+        bail!(
+            "indexed dimensions {width}x{height} do not match authoritative source dimensions {}x{}",
+            preview.source_width,
+            preview.source_height
+        );
     }
     ensure_source_unchanged(&original, original_state)?;
 
@@ -279,6 +300,7 @@ pub fn validate_indexing(source: &Path, model_cache: &Path) -> Result<String> {
     append_source_report(&mut report, &original, original_state);
     report.push_str(&format!("configured_allowance_mib={max_file_size_mib}\n"));
     report.push_str("clip_provider=CPU\n");
+    report.push_str(&format!("indexed_modified_secs={stored_modified}\n"));
     report.push_str(&format!("indexed_dimensions={}x{}\n", width, height));
     report.push_str("descriptor_source=OversizedPreview\n");
     report.push_str(&format!(
@@ -293,21 +315,23 @@ pub fn validate_indexing(source: &Path, model_cache: &Path) -> Result<String> {
     report.push_str(&format!("warnings={}\n", warnings.len()));
     report.push_str(&format!("status_updates={}\n", statuses.len()));
     report.push_str("source_state_unchanged=true\n");
-    report.push_str(&format!("total_wall_ms={}\n", started.elapsed().as_millis()));
+    report.push_str(&format!(
+        "total_wall_ms={}\n",
+        started.elapsed().as_millis()
+    ));
     report.push_str("validation_passed=true\n");
     for (index, warning) in warnings.iter().enumerate() {
-        report.push_str(&format!(
-            "warning_{}={}\n",
-            index + 1,
-            single_line(warning)
-        ));
+        report.push_str(&format!("warning_{}={}\n", index + 1, single_line(warning)));
     }
     Ok(report)
 }
 
 fn validate_source(path: &Path, size: u64) -> Result<()> {
     if !path.is_file() {
-        bail!("validation source is not a regular file: {}", path.display());
+        bail!(
+            "validation source is not a regular file: {}",
+            path.display()
+        );
     }
     let extension = path
         .extension()
@@ -355,9 +379,7 @@ fn source_state(path: &Path) -> Result<SourceState> {
 fn ensure_source_unchanged(path: &Path, before: SourceState) -> Result<()> {
     let after = source_state(path)?;
     if before != after {
-        bail!(
-            "validation changed authoritative source state: before={before:?} after={after:?}"
-        );
+        bail!("validation changed authoritative source state: before={before:?} after={after:?}");
     }
     Ok(())
 }
@@ -365,7 +387,10 @@ fn ensure_source_unchanged(path: &Path, before: SourceState) -> Result<()> {
 fn append_source_report(report: &mut String, source: &Path, state: SourceState) {
     report.push_str(&format!("source={}\n", source.display()));
     report.push_str(&format!("source_size_bytes={}\n", state.size));
-    report.push_str(&format!("source_size_mib={:.2}\n", bytes_to_mib(state.size)));
+    report.push_str(&format!(
+        "source_size_mib={:.2}\n",
+        bytes_to_mib(state.size)
+    ));
     report.push_str(&format!("source_modified_secs={}\n", state.modified_secs));
     report.push_str(&format!("source_modified_nanos={}\n", state.modified_nanos));
 }
