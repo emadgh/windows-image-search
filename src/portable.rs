@@ -10,7 +10,7 @@ pub const INDEX_DIR_NAME: &str = ".imagesearch";
 pub const INDEX_DB_NAME: &str = "index.sqlite3";
 pub const THUMBNAIL_DIR_NAME: &str = "thumbnails";
 pub const ANN_DIR_NAME: &str = "ann-index";
-pub(crate) const PORTABLE_SCHEMA_VERSION: i64 = 1;
+pub(crate) const PORTABLE_SCHEMA_VERSION: i64 = 2;
 const ATTACHED_DB: &str = "portable_root";
 
 #[derive(Clone, Debug)]
@@ -569,14 +569,14 @@ fn image_columns_with_path() -> &'static str {
     "path, root, file_name, extension, size, modified, width, height, description, keywords, \
      dominant_r, dominant_g, dominant_b, visual_hash, color_histogram, color_histogram_dim, \
      material_texture, material_texture_dim, material_texture_version, embedding, embedding_dim, \
-     embedding_normalized, last_seen_scan, content_fingerprint"
+     embedding_normalized, last_seen_scan, content_fingerprint, descriptor_source, preview_revision, preview_edge"
 }
 
 fn image_columns_without_path_root() -> &'static str {
     "file_name, extension, size, modified, width, height, description, keywords, \
      dominant_r, dominant_g, dominant_b, visual_hash, color_histogram, color_histogram_dim, \
      material_texture, material_texture_dim, material_texture_version, embedding, embedding_dim, \
-     embedding_normalized, last_seen_scan, content_fingerprint"
+     embedding_normalized, last_seen_scan, content_fingerprint, descriptor_source, preview_revision, preview_edge"
 }
 
 fn image_update_assignments() -> &'static str {
@@ -590,7 +590,9 @@ fn image_update_assignments() -> &'static str {
      material_texture_dim = excluded.material_texture_dim, \
      material_texture_version = excluded.material_texture_version, embedding = excluded.embedding, \
      embedding_dim = excluded.embedding_dim, embedding_normalized = excluded.embedding_normalized, \
-     last_seen_scan = excluded.last_seen_scan, content_fingerprint = excluded.content_fingerprint"
+     last_seen_scan = excluded.last_seen_scan, content_fingerprint = excluded.content_fingerprint, \
+     descriptor_source = excluded.descriptor_source, preview_revision = excluded.preview_revision, \
+     preview_edge = excluded.preview_edge"
 }
 
 #[cfg(test)]

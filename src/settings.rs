@@ -2,7 +2,10 @@ use anyhow::{Context, Result};
 use std::path::Path;
 
 pub const MAX_BATCH_SIZE: usize = 256;
-pub const DEFAULT_MAX_FILE_SIZE_MIB: usize = 256;
+pub const DIRECT_DECODE_MAX_FILE_SIZE_MIB: usize = 256;
+pub const DIRECT_DECODE_MAX_FILE_SIZE_BYTES: u64 =
+    DIRECT_DECODE_MAX_FILE_SIZE_MIB as u64 * 1024 * 1024;
+pub const DEFAULT_MAX_FILE_SIZE_MIB: usize = DIRECT_DECODE_MAX_FILE_SIZE_MIB;
 pub const MAX_FILE_SIZE_MIB: usize = 16_384;
 const MAX_CONFIGURED_THREADS: usize = 8;
 
@@ -34,6 +37,13 @@ impl ClipExecutionProvider {
             _ => None,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourcePolicy {
+    DirectSource,
+    OversizedPreview,
+    SkipConfigured,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,6 +85,16 @@ impl IndexingSettings {
 
     pub fn allows_file_size(self, bytes: u64) -> bool {
         bytes <= self.max_file_size_bytes()
+    }
+
+    pub fn source_policy(self, bytes: u64) -> SourcePolicy {
+        if !self.allows_file_size(bytes) {
+            SourcePolicy::SkipConfigured
+        } else if bytes > DIRECT_DECODE_MAX_FILE_SIZE_BYTES {
+            SourcePolicy::OversizedPreview
+        } else {
+            SourcePolicy::DirectSource
+        }
     }
 }
 
@@ -243,6 +263,39 @@ mod tests {
         let limit = 256_u64 * 1024 * 1024;
         assert!(settings.allows_file_size(limit));
         assert!(!settings.allows_file_size(limit + 1));
+    }
+
+    #[test]
+    fn source_policy_enforces_256_mib_direct_decode_ceiling() {
+        let raised = IndexingSettings {
+            max_file_size_mib: 1024,
+            ..IndexingSettings::default()
+        };
+        assert_eq!(
+            raised.source_policy(DIRECT_DECODE_MAX_FILE_SIZE_BYTES),
+            SourcePolicy::DirectSource
+        );
+        assert_eq!(
+            raised.source_policy(DIRECT_DECODE_MAX_FILE_SIZE_BYTES + 1),
+            SourcePolicy::OversizedPreview
+        );
+        assert_eq!(
+            raised.source_policy(1024_u64 * 1024 * 1024 + 1),
+            SourcePolicy::SkipConfigured
+        );
+
+        let lowered = IndexingSettings {
+            max_file_size_mib: 128,
+            ..IndexingSettings::default()
+        };
+        assert_eq!(
+            lowered.source_policy(128_u64 * 1024 * 1024),
+            SourcePolicy::DirectSource
+        );
+        assert_eq!(
+            lowered.source_policy(128_u64 * 1024 * 1024 + 1),
+            SourcePolicy::SkipConfigured
+        );
     }
 
     #[test]
