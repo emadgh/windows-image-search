@@ -26,7 +26,7 @@ impl PhotoGridSpec {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub(super) enum PhotoTileMode {
     Full(ThumbnailFit),
     Face(FaceBox),
