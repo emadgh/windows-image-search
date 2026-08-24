@@ -390,7 +390,7 @@ fn settings_performance(app: &mut ImageSearchApp, ui: &mut egui::Ui, effects: &m
 
     let logical_threads = settings::logical_parallelism();
     ui.small(format!(
-        "Detected {logical_threads} logical CPU thread{}. Safe defaults: Decode 2 / CLIP up to 4 / Batch 16 / Device CPU.",
+        "Detected {logical_threads} logical CPU thread{}. Safe defaults: Decode 2 / CLIP up to 4 / Batch 16 / Device CPU / Max source 256 MiB.",
         if logical_threads == 1 { "" } else { "s" }
     ));
 
@@ -422,8 +422,21 @@ fn settings_performance(app: &mut ImageSearchApp, ui: &mut egui::Ui, effects: &m
                 .text("Index / embedding batch size"),
             )
             .changed();
+        let max_file_size_changed = ui
+            .add(
+                egui::Slider::new(
+                    &mut app.indexing_settings.max_file_size_mib,
+                    1..=settings::MAX_FILE_SIZE_MIB,
+                )
+                .text("Maximum source file size (MiB)"),
+            )
+            .changed();
+        ui.small(format!(
+            "Files larger than {} MiB are skipped before metadata, image decode, visual descriptors and CLIP work. Raise this only when large source images are intentional.",
+            app.indexing_settings.max_file_size_mib
+        ));
 
-        if decode_changed || clip_changed || batch_changed {
+        if decode_changed || clip_changed || batch_changed || max_file_size_changed {
             app.indexing_settings = app.indexing_settings.sanitized();
             effects.save_performance_settings = true;
         }
@@ -535,11 +548,12 @@ fn apply_effects(app: &mut ImageSearchApp, effects: Effects) {
         match settings::save(&app.settings_path, app.indexing_settings) {
             Ok(()) => {
                 app.status = format!(
-                    "Performance settings saved: decode {}, CLIP {} threads on {}, batch {}",
+                    "Performance settings saved: decode {}, CLIP {} threads on {}, batch {}, max source {} MiB",
                     app.indexing_settings.decode_workers,
                     app.indexing_settings.clip_threads,
                     app.indexing_settings.clip_execution_provider.label(),
-                    app.indexing_settings.batch_size
+                    app.indexing_settings.batch_size,
+                    app.indexing_settings.max_file_size_mib
                 );
             }
             Err(err) => {
