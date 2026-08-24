@@ -1,0 +1,38 @@
+name: Apply shared photo grid refactor
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refactor/shared-photo-grid
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply shared grid integration
+        run: python scripts/apply_shared_photo_grid.py
+      - name: Format
+        run: cargo fmt --all
+      - name: Check and test
+        run: |
+          cargo check --all-targets
+          cargo test --all-targets
+      - name: Commit generated integration
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/ui/mod.rs src/ui/photo_grid.rs src/ui/views.rs src/ui/face_search_panel.rs src/ui/people_manager.rs
+          git commit -m "refactor: migrate photo grids to shared component"
+          git push origin HEAD:refactor/shared-photo-grid
