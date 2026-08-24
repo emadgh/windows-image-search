@@ -79,75 +79,82 @@ pub(super) fn show(app: &mut ImageSearchApp, ctx: &egui::Context) {
     egui::Window::new("Preferences")
         .open(&mut open)
         .resizable(true)
-        .default_size([860.0, 620.0])
+        .default_size([920.0, 640.0])
         .min_width(580.0)
         .min_height(460.0)
         .max_height((ctx.available_rect().height() - 48.0).max(320.0))
         .show(ctx, |ui| {
             let height = ui.available_height().max(440.0);
             let sidebar_width = 168.0;
-            let gap = ui.spacing().item_spacing.x + 8.0;
-            let content_width = (ui.available_width() - sidebar_width - gap).max(300.0);
 
-            ui.horizontal(|ui| {
-                ui.allocate_ui_with_layout(
-                    egui::vec2(content_width, height),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        egui::ScrollArea::vertical()
-                            .id_salt("preferences-category-content")
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| match category {
-                                SettingsCategory::Collections => settings_collections(app, ui),
-                                SettingsCategory::SearchClip => {
-                                    settings_search_clip(app, ui, &mut effects)
+            // Consume one fixed outer region, then let the right-to-left layout reserve
+            // the sidebar/separator before the content takes the exact remainder. Avoid
+            // deriving a child width from the parent's current width and then adding
+            // spacing/separator back on top: that creates a frame-to-frame growth loop.
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), height),
+                egui::Layout::right_to_left(egui::Align::Min),
+                |ui| {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(sidebar_width, height),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.heading("Preferences");
+                            ui.add_space(5.0);
+                            for item in SettingsCategory::ALL {
+                                if ui
+                                    .selectable_label(category == item, item.label())
+                                    .clicked()
+                                {
+                                    category = item;
                                 }
-                                SettingsCategory::FacesPeople => {
-                                    settings_faces_people(app, ui, &mut effects)
-                                }
-                                SettingsCategory::Performance => {
-                                    settings_performance(app, ui, &mut effects)
-                                }
-                                SettingsCategory::Storage => {
-                                    settings_storage(app, ui, &mut effects)
-                                }
-                            });
-                    },
-                );
-
-                ui.separator();
-
-                ui.allocate_ui_with_layout(
-                    egui::vec2(sidebar_width, height),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.heading("Preferences");
-                        ui.add_space(5.0);
-                        for item in SettingsCategory::ALL {
-                            if ui
-                                .selectable_label(category == item, item.label())
-                                .clicked()
-                            {
-                                category = item;
                             }
-                        }
 
-                        ui.add_space(14.0);
-                        ui.separator();
-                        ui.small(format!("{} indexed images", app.images.len()));
-                        ui.small(format!(
-                            "{} indexed root{}",
-                            app.roots.len(),
-                            if app.roots.len() == 1 { "" } else { "s" }
-                        ));
-                        if app.busy {
-                            ui.add_space(4.0);
-                            ui.spinner();
-                            ui.small("Background work active");
-                        }
-                    },
-                );
-            });
+                            ui.add_space(14.0);
+                            ui.separator();
+                            ui.small(format!("{} indexed images", app.images.len()));
+                            ui.small(format!(
+                                "{} indexed root{}",
+                                app.roots.len(),
+                                if app.roots.len() == 1 { "" } else { "s" }
+                            ));
+                            if app.busy {
+                                ui.add_space(4.0);
+                                ui.spinner();
+                                ui.small("Background work active");
+                            }
+                        },
+                    );
+
+                    ui.separator();
+
+                    let content_width = ui.available_width().max(1.0);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(content_width, height),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            egui::ScrollArea::vertical()
+                                .id_salt("preferences-category-content")
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| match category {
+                                    SettingsCategory::Collections => settings_collections(app, ui),
+                                    SettingsCategory::SearchClip => {
+                                        settings_search_clip(app, ui, &mut effects)
+                                    }
+                                    SettingsCategory::FacesPeople => {
+                                        settings_faces_people(app, ui, &mut effects)
+                                    }
+                                    SettingsCategory::Performance => {
+                                        settings_performance(app, ui, &mut effects)
+                                    }
+                                    SettingsCategory::Storage => {
+                                        settings_storage(app, ui, &mut effects)
+                                    }
+                                });
+                        },
+                    );
+                },
+            );
         });
 
     ctx.data_mut(|data| data.insert_temp(category_id, category.index()));
