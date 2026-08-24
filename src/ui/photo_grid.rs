@@ -90,12 +90,8 @@ pub(super) fn photo_tile(
                 let scale = (rect.width() / source.x).min(rect.height() / source.y);
                 let size = source * scale;
                 let paint_rect = egui::Rect::from_center_size(rect.center(), size);
-                ui.painter().image(
-                    texture.id(),
-                    paint_rect,
-                    full_uv(),
-                    egui::Color32::WHITE,
-                );
+                ui.painter()
+                    .image(texture.id(), paint_rect, full_uv(), egui::Color32::WHITE);
             }
             PhotoTileMode::Full(ThumbnailFit::Cover) => {
                 ui.painter().image(
@@ -106,12 +102,8 @@ pub(super) fn photo_tile(
                 );
             }
             PhotoTileMode::Face(bbox) => {
-                ui.painter().image(
-                    texture.id(),
-                    rect,
-                    face_crop_uv(bbox),
-                    egui::Color32::WHITE,
-                );
+                ui.painter()
+                    .image(texture.id(), rect, face_crop_uv(bbox), egui::Color32::WHITE);
             }
         }
     }

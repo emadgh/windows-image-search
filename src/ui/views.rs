@@ -1,3 +1,4 @@
+use super::photo_grid::{self, PhotoGridSpec, PhotoTileMode};
 use super::{ImageSearchApp, ThumbnailFit};
 use crate::face_detection::FaceBox;
 use chrono::{Local, TimeZone};
@@ -41,92 +42,62 @@ impl ImageSearchApp {
 
     pub(super) fn show_grid(&mut self, ui: &mut egui::Ui, visible: &[usize]) {
         let cell_width = self.thumb_size + 24.0;
-        let columns = ((ui.available_width() / cell_width).floor() as usize).max(1);
-        let rows = visible.len().div_ceil(columns);
         let row_height = self.thumb_size + 62.0;
+        let fit = self.thumb_fit;
+        let spec = PhotoGridSpec::new("main-result-photo-grid", cell_width, row_height);
 
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show_rows(ui, row_height, rows, |ui, row_range| {
-                for row in row_range {
-                    ui.horizontal(|ui| {
-                        for column in 0..columns {
-                            let pos = row * columns + column;
-                            if pos >= visible.len() {
-                                break;
-                            }
-                            let record = self.record_view(visible[pos]);
-                            let selected = self.selected_paths.contains(&record.path);
-                            let fit = self.thumb_fit;
+        photo_grid::show(ui, visible.len(), spec, |ui, pos| {
+            let record = self.record_view(visible[pos]);
+            let selected = self.selected_paths.contains(&record.path);
 
-                            ui.allocate_ui_with_layout(
-                                egui::vec2(cell_width, row_height),
-                                egui::Layout::top_down(egui::Align::Center),
-                                |ui| {
-                                    let response =
-                                        if let Some(texture) = self.thumbnail(&record.path) {
-                                            let response = thumbnail_widget(
-                                                ui,
-                                                &texture,
-                                                egui::vec2(self.thumb_size, self.thumb_size),
-                                                fit,
-                                                selected,
-                                                egui::Sense::click_and_drag(),
-                                            );
-                                            if let Some(bbox) = self.face_match_box(&record.path) {
-                                                draw_face_match_box(
-                                                    ui,
-                                                    &texture,
-                                                    response.rect,
-                                                    fit,
-                                                    bbox,
-                                                );
-                                            }
-                                            response
-                                        } else {
-                                            let response = ui.add_sized(
-                                                [self.thumb_size, self.thumb_size],
-                                                egui::Button::new("Loading thumbnail…")
-                                                    .sense(egui::Sense::click_and_drag()),
-                                            );
-                                            if selected {
-                                                ui.painter().rect_stroke(
-                                                    response.rect,
-                                                    4.0,
-                                                    egui::Stroke::new(
-                                                        2.0_f32,
-                                                        ui.visuals().selection.stroke.color,
-                                                    ),
-                                                    egui::StrokeKind::Inside,
-                                                );
-                                            }
-                                            response
-                                        };
+            let response = if let Some(texture) = self.thumbnail(&record.path) {
+                let response = photo_grid::photo_tile(
+                    ui,
+                    &texture,
+                    egui::vec2(self.thumb_size, self.thumb_size),
+                    PhotoTileMode::Full(fit),
+                    selected,
+                    egui::Sense::click_and_drag(),
+                );
+                if let Some(bbox) = self.face_match_box(&record.path) {
+                    draw_face_match_box(ui, &texture, response.rect, fit, bbox);
+                }
+                response
+            } else {
+                let response = ui.add_sized(
+                    [self.thumb_size, self.thumb_size],
+                    egui::Button::new("Loading thumbnail…").sense(egui::Sense::click_and_drag()),
+                );
+                if selected {
+                    ui.painter().rect_stroke(
+                        response.rect,
+                        5.0,
+                        egui::Stroke::new(3.0, ui.visuals().selection.stroke.color),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                response
+            };
 
-                                    self.handle_result_response(&response, &record.path);
-                                    self.attach_collection_drag_source(&response, &record.path);
+            self.handle_result_response(&response, &record.path);
+            self.attach_collection_drag_source(&response, &record.path);
 
-                                    let label = ui.add(
-                                        egui::Label::new(truncate_middle(&record.file_name, 30))
-                                            .sense(egui::Sense::click_and_drag()),
-                                    );
-                                    self.handle_result_response(&label, &record.path);
-                                    self.attach_collection_drag_source(&label, &record.path);
-                                    label.on_hover_text(record.path.display().to_string());
+            let label = ui.add(
+                egui::Label::new(truncate_middle(&record.file_name, 30))
+                    .sense(egui::Sense::click_and_drag()),
+            );
+            self.handle_result_response(&label, &record.path);
+            self.attach_collection_drag_source(&label, &record.path);
+            label.on_hover_text(record.path.display().to_string());
 
-                                    ui.horizontal(|ui| {
-                                        swatch(ui, record.dominant);
-                                        ui.small(format!("{}×{}", record.width, record.height));
-                                        if let Some(score) = record.score {
-                                            ui.small(format!("{:.1}%", score * 100.0));
-                                        }
-                                    });
-                                },
-                            );
-                        }
-                    });
+            ui.horizontal(|ui| {
+                swatch(ui, record.dominant);
+                ui.small(format!("{}×{}", record.width, record.height));
+                if let Some(score) = record.score {
+                    ui.small(format!("{:.1}%", score * 100.0));
                 }
             });
+        });
     }
 
     pub(super) fn show_details(&mut self, ui: &mut egui::Ui, visible: &[usize]) {
