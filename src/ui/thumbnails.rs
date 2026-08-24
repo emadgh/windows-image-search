@@ -1,4 +1,4 @@
-use crate::{portable, thumbnail_cache};
+use crate::{oversized_preview, portable, settings, thumbnail_cache};
 use image::DynamicImage;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
@@ -290,7 +290,15 @@ fn load_or_build(
         .and_then(|roots| portable::indexed_root_for_path(source, &roots).cloned());
     let image = match root {
         Some(root) if portable::is_indexed_root(&root) => {
-            thumbnail_cache::load_or_build_for_root(&root, source)
+            let oversized = std::fs::metadata(source)
+                .map(|meta| meta.len() > settings::DIRECT_DECODE_MAX_FILE_SIZE_BYTES)
+                .unwrap_or(false);
+            if oversized {
+                oversized_preview::load_current_for_root(&root, source).ok()?;
+                thumbnail_cache::load_cached_for_root(&root, source)
+            } else {
+                thumbnail_cache::load_or_build_for_root(&root, source)
+            }
         }
         _ => thumbnail_cache::load_or_build(fallback_cache, source),
     }?;

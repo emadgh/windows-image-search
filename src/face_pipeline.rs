@@ -1,4 +1,4 @@
-use crate::{db, face_detection, face_scope, face_store, portable};
+use crate::{db, face_detection, face_scope, face_store, portable, settings};
 use anyhow::{Context, Result};
 use image::GenericImageView;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -172,6 +172,35 @@ where
                     );
                     continue;
                 };
+
+                let provenance = db::descriptor_provenance(&conn, &relative)?;
+                let oversized = size > settings::DIRECT_DECODE_MAX_FILE_SIZE_BYTES
+                    || provenance.is_some_and(|value| {
+                        value.source == db::DescriptorSource::OversizedPreview
+                    });
+                if oversized {
+                    let _ = conn.execute(
+                        "DELETE FROM face_detection_state WHERE image_path = ?1",
+                        params![relative.to_string_lossy().to_string()],
+                    );
+                    root_failures += 1;
+                    emit(FacePipelineEvent::ImageFailed {
+                        root: root.clone(),
+                        image: absolute.clone(),
+                        error: "face detection skipped for oversized-preview source; the original is never reopened"
+                            .to_owned(),
+                    });
+                    emit_progress(
+                        &mut emit,
+                        root,
+                        root_visited,
+                        eligible,
+                        root_processed,
+                        root_faces,
+                        root_failures,
+                    );
+                    continue;
+                }
 
                 if face_store::detection_is_current_with_revision(
                     &conn,

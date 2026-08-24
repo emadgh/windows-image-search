@@ -1,4 +1,4 @@
-use crate::{db, face_embedding, face_embedding_store, face_store, portable};
+use crate::{db, face_embedding, face_embedding_store, face_store, portable, settings};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -148,6 +148,30 @@ where
                 cursor = Some(candidate.face_id.clone());
                 root_visited += 1;
                 let absolute = root.join(&candidate.image_path);
+                let provenance = db::descriptor_provenance(&conn, &candidate.image_path)?;
+                let oversized = candidate.source_size > settings::DIRECT_DECODE_MAX_FILE_SIZE_BYTES
+                    || provenance.is_some_and(|value| {
+                        value.source == db::DescriptorSource::OversizedPreview
+                    });
+                if oversized {
+                    root_failures += 1;
+                    emit(FaceEmbeddingPipelineEvent::FaceFailed {
+                        root: root.clone(),
+                        face_id: candidate.face_id.clone(),
+                        image: absolute.clone(),
+                        error: "face embedding skipped for oversized-preview source; the original is never reopened"
+                            .to_owned(),
+                    });
+                    emit_progress(
+                        &mut emit,
+                        root,
+                        root_visited,
+                        pending,
+                        root_embedded,
+                        root_failures,
+                    );
+                    continue;
+                }
 
                 if !filesystem_state_matches(
                     &absolute,

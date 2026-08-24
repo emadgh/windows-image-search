@@ -1,4 +1,4 @@
-use crate::portable;
+use crate::{db, oversized_preview, portable, settings};
 use anyhow::{bail, Context, Result};
 use image::GenericImageView;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
@@ -286,25 +286,59 @@ where
                         VerifyProblemKind::MissingFingerprint,
                         "no stored content fingerprint".to_owned(),
                     ),
-                    Some(stored) => match decoded_content_fingerprint(&absolute) {
-                        Ok(actual) => {
-                            report.deep_fingerprints_checked += 1;
-                            if actual as i64 != stored {
-                                push_problem(
-                                    &mut report,
-                                    relative.clone(),
-                                    VerifyProblemKind::FingerprintMismatch,
-                                    format!("stored={:016x} actual={actual:016x}", stored as u64),
-                                );
-                            }
+                    Some(stored) => {
+                        let provenance = db::descriptor_provenance(&conn, &relative)?;
+                        let oversized =
+                            stored_size.max(0) as u64 > settings::DIRECT_DECODE_MAX_FILE_SIZE_BYTES;
+                        if oversized
+                            && !provenance.is_some_and(|value| {
+                                value.source == db::DescriptorSource::OversizedPreview
+                            })
+                        {
+                            push_problem(
+                                &mut report,
+                                relative.clone(),
+                                VerifyProblemKind::SourceDecodeFailed,
+                                "oversized source has unsafe direct provenance; refusing full decode"
+                                    .to_owned(),
+                            );
+                            progress(report.records_checked);
+                            continue;
                         }
-                        Err(err) => push_problem(
-                            &mut report,
-                            relative.clone(),
-                            VerifyProblemKind::SourceDecodeFailed,
-                            format!("{err:#}"),
-                        ),
-                    },
+                        let fingerprint_result = if oversized {
+                            oversized_preview::load_or_build(
+                                root,
+                                &absolute,
+                                stored_size.max(0) as u64,
+                                stored_modified,
+                            )
+                            .map(|asset| decoded_image_fingerprint(&asset.image))
+                        } else {
+                            decoded_content_fingerprint(&absolute)
+                        };
+                        match fingerprint_result {
+                            Ok(actual) => {
+                                report.deep_fingerprints_checked += 1;
+                                if actual as i64 != stored {
+                                    push_problem(
+                                        &mut report,
+                                        relative.clone(),
+                                        VerifyProblemKind::FingerprintMismatch,
+                                        format!(
+                                            "stored={:016x} actual={actual:016x}",
+                                            stored as u64
+                                        ),
+                                    );
+                                }
+                            }
+                            Err(err) => push_problem(
+                                &mut report,
+                                relative.clone(),
+                                VerifyProblemKind::SourceDecodeFailed,
+                                format!("{err:#}"),
+                            ),
+                        }
+                    }
                 }
             }
             progress(report.records_checked);
@@ -422,6 +456,10 @@ fn decoded_content_fingerprint(path: &Path) -> Result<u64> {
         .with_guessed_format()?
         .decode()
         .with_context(|| format!("decoding {}", path.display()))?;
+    Ok(decoded_image_fingerprint(&image))
+}
+
+fn decoded_image_fingerprint(image: &image::DynamicImage) -> u64 {
     const OFFSET: u64 = 0xcbf29ce484222325;
     const PRIME: u64 = 0x100000001b3;
     let mut hash = OFFSET;
@@ -435,7 +473,7 @@ fn decoded_content_fingerprint(path: &Path) -> Result<u64> {
         hash ^= byte as u64;
         hash = hash.wrapping_mul(PRIME);
     }
-    Ok(hash)
+    hash
 }
 
 #[cfg(test)]

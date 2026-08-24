@@ -401,7 +401,7 @@ fn settings_performance(app: &mut ImageSearchApp, ui: &mut egui::Ui, effects: &m
 
     let logical_threads = settings::logical_parallelism();
     ui.small(format!(
-        "Detected {logical_threads} logical CPU thread{}. Safe defaults: Decode 2 / CLIP up to 4 / Batch 16 / Device CPU / Max source 256 MiB.",
+        "Detected {logical_threads} logical CPU thread{}. Safe defaults: Decode 2 / CLIP up to 4 / Batch 16 / Device CPU / Direct source ceiling 256 MiB.",
         if logical_threads == 1 { "" } else { "s" }
     ));
 
@@ -442,10 +442,17 @@ fn settings_performance(app: &mut ImageSearchApp, ui: &mut egui::Ui, effects: &m
                 .text("Maximum source file size (MiB)"),
             )
             .changed();
-        ui.small(format!(
-            "Files larger than {} MiB are skipped before metadata, image decode, visual descriptors and CLIP work. Raise this only when large source images are intentional.",
-            app.indexing_settings.max_file_size_mib
-        ));
+        if app.indexing_settings.max_file_size_mib <= settings::DIRECT_DECODE_MAX_FILE_SIZE_MIB {
+            ui.small(format!(
+                "Files larger than {} MiB are skipped before metadata, image decode, visual descriptors and CLIP work. Direct decoding is hard-capped at 256 MiB.",
+                app.indexing_settings.max_file_size_mib
+            ));
+        } else {
+            ui.small(format!(
+                "Sources up to 256 MiB use the normal direct path. Sources above 256 MiB and up to {} MiB are forced through a bounded 2048 px resized-preview path; larger sources are skipped. Oversized non-JPEG sources are safely skipped until a bounded decoder is available.",
+                app.indexing_settings.max_file_size_mib
+            ));
+        }
 
         if decode_changed || clip_changed || batch_changed || max_file_size_changed {
             app.indexing_settings = app.indexing_settings.sanitized();

@@ -99,7 +99,10 @@ pub fn open(db_path: &Path) -> Result<Connection> {
             embedding_dim INTEGER,
             embedding_normalized INTEGER NOT NULL DEFAULT 0,
             last_seen_scan INTEGER NOT NULL DEFAULT 0,
-            content_fingerprint INTEGER
+            content_fingerprint INTEGER,
+            descriptor_source TEXT NOT NULL DEFAULT 'direct_source',
+            preview_revision INTEGER,
+            preview_edge INTEGER
         );
 
         CREATE INDEX IF NOT EXISTS idx_images_root ON images(root);
@@ -168,6 +171,14 @@ pub fn open(db_path: &Path) -> Result<Connection> {
         "INTEGER NOT NULL DEFAULT 0",
     )?;
     ensure_column(&conn, "images", "content_fingerprint", "INTEGER")?;
+    ensure_column(
+        &conn,
+        "images",
+        "descriptor_source",
+        "TEXT NOT NULL DEFAULT 'direct_source'",
+    )?;
+    ensure_column(&conn, "images", "preview_revision", "INTEGER")?;
+    ensure_column(&conn, "images", "preview_edge", "INTEGER")?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_images_root_scan ON images(root, last_seen_scan)",
         [],
@@ -475,6 +486,36 @@ pub fn load_collection_membership(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DescriptorSource {
+    DirectSource,
+    OversizedPreview,
+}
+
+impl DescriptorSource {
+    pub fn as_storage(self) -> &'static str {
+        match self {
+            Self::DirectSource => "direct_source",
+            Self::OversizedPreview => "oversized_preview",
+        }
+    }
+
+    pub fn from_storage(value: &str) -> Result<Self> {
+        match value {
+            "direct_source" => Ok(Self::DirectSource),
+            "oversized_preview" => Ok(Self::OversizedPreview),
+            other => bail!("unknown descriptor source {other:?}"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DescriptorProvenance {
+    pub source: DescriptorSource,
+    pub preview_revision: Option<u32>,
+    pub preview_edge: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FileState {
     pub size: u64,
     pub modified: i64,
@@ -639,6 +680,57 @@ pub fn set_content_fingerprint(conn: &Connection, path: &Path, fingerprint: u64)
     Ok(())
 }
 
+pub fn set_descriptor_provenance(
+    conn: &Connection,
+    path: &Path,
+    source: DescriptorSource,
+    preview_revision: Option<u32>,
+    preview_edge: Option<u32>,
+) -> Result<()> {
+    if source == DescriptorSource::OversizedPreview
+        && (preview_revision.is_none() || preview_edge.is_none())
+    {
+        bail!("oversized preview provenance requires revision and edge");
+    }
+    conn.execute(
+        "UPDATE images SET descriptor_source = ?2, preview_revision = ?3, preview_edge = ?4 WHERE path = ?1",
+        params![
+            path.to_string_lossy().to_string(),
+            source.as_storage(),
+            preview_revision.map(|value| value as i64),
+            preview_edge.map(|value| value as i64),
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn descriptor_provenance(
+    conn: &Connection,
+    path: &Path,
+) -> Result<Option<DescriptorProvenance>> {
+    let result = conn.query_row(
+        "SELECT descriptor_source, preview_revision, preview_edge FROM images WHERE path = ?1",
+        params![path.to_string_lossy().to_string()],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+            ))
+        },
+    );
+    let (source, revision, edge) = match result {
+        Ok(value) => value,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+    Ok(Some(DescriptorProvenance {
+        source: DescriptorSource::from_storage(&source)?,
+        preview_revision: revision.map(|value| value.max(0) as u32),
+        preview_edge: edge.map(|value| value.max(0) as u32),
+    }))
+}
+
 pub fn paths_missing_visual_descriptor(conn: &Connection) -> Result<Vec<PathBuf>> {
     let mut stmt = conn.prepare(
         "SELECT path FROM images WHERE visual_hash IS NULL OR color_histogram IS NULL OR material_texture IS NULL OR material_texture_version <> ?1 ORDER BY path",
@@ -734,6 +826,21 @@ where
     }
     tx.commit()?;
     Ok(updated)
+}
+
+pub fn stale_paths_for_root(
+    conn: &Connection,
+    root: &Path,
+    generation: i64,
+) -> Result<Vec<PathBuf>> {
+    let mut stmt = conn.prepare(
+        "SELECT path FROM images WHERE root = ?1 AND last_seen_scan <> ?2 ORDER BY path",
+    )?;
+    let rows = stmt.query_map(
+        params![root.to_string_lossy().to_string(), generation],
+        |row| row.get::<_, String>(0),
+    )?;
+    Ok(rows.filter_map(|row| row.ok()).map(PathBuf::from).collect())
 }
 
 pub fn delete_stale_for_root(conn: &Connection, root: &Path, generation: i64) -> Result<usize> {

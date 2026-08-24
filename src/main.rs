@@ -29,6 +29,7 @@ mod material_eval;
 mod material_texture;
 mod metadata;
 mod model_benchmark;
+mod oversized_preview;
 mod people_clustering;
 mod people_effective;
 mod people_filter;

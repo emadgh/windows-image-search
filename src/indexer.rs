@@ -3,8 +3,11 @@ use crate::db::{self, ImageRecord, ImageSummary};
 use crate::embedding::EmbeddingService;
 use crate::material_texture;
 use crate::metadata;
+use crate::oversized_preview;
 use crate::portable;
-use crate::settings::{ClipExecutionProvider, IndexingSettings};
+use crate::settings::{
+    ClipExecutionProvider, IndexingSettings, SourcePolicy, DIRECT_DECODE_MAX_FILE_SIZE_BYTES,
+};
 use crate::thumbnail_cache;
 use anyhow::{bail, Context, Result};
 use image::{imageops::FilterType, DynamicImage, GenericImageView, Pixel};
@@ -267,6 +270,7 @@ fn incremental_update(
     let mut candidates = HashMap::<PathBuf, PathBuf>::new();
     let mut removed_targets = Vec::<PathBuf>::new();
     let mut oversized_skipped = 0usize;
+    let mut oversized_preview_eligible = 0usize;
 
     for changed in unique_paths {
         control.wait_if_paused();
@@ -276,15 +280,25 @@ fn incremental_update(
         if changed.exists() {
             if changed.is_file() {
                 if is_supported_image(&changed) {
-                    let oversized = std::fs::metadata(&changed)
-                        .map(|meta| !indexing_settings.allows_file_size(meta.len()))
-                        .unwrap_or(false);
-                    if oversized {
-                        oversized_skipped += 1;
-                        // Excluded files must also leave a previously-built index.
-                        removed_targets.push(changed);
-                    } else {
-                        candidates.insert(changed, root.clone());
+                    let policy = std::fs::metadata(&changed)
+                        .map(|meta| indexing_settings.source_policy(meta.len()))
+                        .unwrap_or(SourcePolicy::DirectSource);
+                    match policy {
+                        SourcePolicy::SkipConfigured => {
+                            oversized_skipped += 1;
+                            // Excluded files must also leave a previously-built index.
+                            removed_targets.push(changed);
+                        }
+                        SourcePolicy::OversizedPreview => {
+                            oversized_preview_eligible += 1;
+                            // A watcher explicitly reported this file. Rebuild even when a copy
+                            // preserved size/mtime so a stale derivative cannot be reused.
+                            let _ = oversized_preview::remove_source_cache(root, &changed);
+                            candidates.insert(changed, root.clone());
+                        }
+                        SourcePolicy::DirectSource => {
+                            candidates.insert(changed, root.clone());
+                        }
                     }
                 }
             } else if changed.is_dir() {
@@ -299,14 +313,21 @@ fn incremental_update(
                             if entry.file_type().is_file() && is_supported_image(entry.path()) =>
                         {
                             let path = entry.into_path();
-                            let oversized = std::fs::metadata(&path)
-                                .map(|meta| !indexing_settings.allows_file_size(meta.len()))
-                                .unwrap_or(false);
-                            if oversized {
-                                oversized_skipped += 1;
-                                removed_targets.push(path);
-                            } else {
-                                candidates.insert(path, root.clone());
+                            let policy = std::fs::metadata(&path)
+                                .map(|meta| indexing_settings.source_policy(meta.len()))
+                                .unwrap_or(SourcePolicy::DirectSource);
+                            match policy {
+                                SourcePolicy::SkipConfigured => {
+                                    oversized_skipped += 1;
+                                    removed_targets.push(path);
+                                }
+                                SourcePolicy::OversizedPreview => {
+                                    oversized_preview_eligible += 1;
+                                    candidates.insert(path, root.clone());
+                                }
+                                SourcePolicy::DirectSource => {
+                                    candidates.insert(path, root.clone());
+                                }
                             }
                         }
                         Ok(_) => {}
@@ -342,6 +363,11 @@ fn incremental_update(
     removed_paths.sort();
     removed_paths.dedup();
     if !removed_paths.is_empty() {
+        for path in &removed_paths {
+            if let Some(root) = indexed_root_for_path(path, roots) {
+                let _ = oversized_preview::remove_source_cache(root, path);
+            }
+        }
         portable::remove_absolute_paths(roots, &removed_paths)?;
         let _ = tx.send(WorkerMessage::RemovedPaths(removed_paths.clone()));
     }
@@ -384,7 +410,7 @@ fn incremental_update(
 
     if pending.is_empty() {
         let _ = tx.send(WorkerMessage::Status(format!(
-            "Live index synchronized: 0 changed, {} removed, {oversized_skipped} oversized skipped",
+            "Live index synchronized: 0 changed, {} removed, {oversized_preview_eligible} resized-preview eligible, {oversized_skipped} oversized skipped",
             removed_paths.len()
         )));
         return Ok(());
@@ -498,7 +524,7 @@ fn incremental_update(
                 )?;
                 db::set_material_texture(&transaction, &item.path, &item.material_texture)?;
                 db::set_content_fingerprint(&transaction, &item.path, item.content_fingerprint)?;
-                db::set_content_fingerprint(&transaction, &item.path, item.content_fingerprint)?;
+                persist_descriptor_provenance(&transaction, &item.path, item.size)?;
                 committed_paths.push(item.path.clone());
             }
             transaction.commit()?;
@@ -529,7 +555,7 @@ fn incremental_update(
     portable::sync_paths_from_session(&mut conn, &committed_paths)?;
 
     let _ = tx.send(WorkerMessage::Status(format!(
-        "Live index synchronized: {} changed, {} removed, {oversized_skipped} oversized skipped",
+        "Live index synchronized: {} changed, {} removed, {oversized_preview_eligible} resized-preview eligible, {oversized_skipped} oversized skipped",
         committed_paths.len(),
         removed_paths.len()
     )));
@@ -589,6 +615,7 @@ fn rescan(
     )));
     let mut traversal_errors = 0usize;
     let mut oversized_skipped = 0usize;
+    let mut oversized_preview_eligible = 0usize;
     let mut prunable_roots = Vec::<PathBuf>::new();
     for root in roots {
         control.wait_if_paused();
@@ -612,13 +639,16 @@ fn rescan(
                 Ok(entry) => {
                     if entry.file_type().is_file() && is_supported_image(entry.path()) {
                         let path = entry.into_path();
-                        let oversized = std::fs::metadata(&path)
-                            .map(|meta| !indexing_settings.allows_file_size(meta.len()))
-                            .unwrap_or(false);
-                        if oversized {
-                            oversized_skipped += 1;
-                        } else {
-                            candidates.push((root.clone(), path));
+                        let policy = std::fs::metadata(&path)
+                            .map(|meta| indexing_settings.source_policy(meta.len()))
+                            .ok();
+                        match policy {
+                            Some(SourcePolicy::SkipConfigured) => oversized_skipped += 1,
+                            Some(SourcePolicy::OversizedPreview) => {
+                                oversized_preview_eligible += 1;
+                                candidates.push((root.clone(), path));
+                            }
+                            _ => candidates.push((root.clone(), path)),
                         }
                     }
                 }
@@ -652,7 +682,7 @@ fn rescan(
         let _ = db::delete_stale_discovered_for_root(&conn, root, scan_generation)?;
     }
     let _ = tx.send(WorkerMessage::Status(format!(
-        "Discovered {discovered_marked}/{total} eligible image paths; skipped {oversized_skipped} above {} MiB; checking index state…",
+        "Discovered {discovered_marked}/{total} eligible image paths; {oversized_preview_eligible} routed through resized preview; skipped {oversized_skipped} above {} MiB; checking index state…",
         indexing_settings.max_file_size_mib
     )));
     let _ = tx.send(WorkerMessage::RootCounts(db::load_root_counts(db_path)?));
@@ -737,7 +767,7 @@ fn rescan(
                             .unwrap_or_default()
                             .to_owned(),
                     ));
-                    let result = inspect_image(&item.path, &item.root).map(
+                    let result = inspect_image(&item.path, &item.root, item.size).map(
                         |(
                             width,
                             height,
@@ -824,7 +854,7 @@ fn rescan(
                 )?;
                 db::set_material_texture(&transaction, &item.path, &item.material_texture)?;
                 db::set_content_fingerprint(&transaction, &item.path, item.content_fingerprint)?;
-                db::set_content_fingerprint(&transaction, &item.path, item.content_fingerprint)?;
+                persist_descriptor_provenance(&transaction, &item.path, item.size)?;
             }
             transaction.commit()?;
         }
@@ -847,6 +877,9 @@ fn rescan(
     )?;
     let mut removed = 0usize;
     for root in &prunable_roots {
+        for path in db::stale_paths_for_root(&conn, root, scan_generation)? {
+            let _ = oversized_preview::remove_source_cache(root, &path);
+        }
         removed += db::delete_stale_for_root(&conn, root, scan_generation)?;
     }
     let _ = tx.send(WorkerMessage::Status(format!(
@@ -866,6 +899,7 @@ fn rescan(
             &mut conn,
             &missing_visual,
             indexing_settings,
+            roots,
             Some(control),
             tx,
         )?;
@@ -916,7 +950,7 @@ fn rescan(
     }
 
     let _ = tx.send(WorkerMessage::Status(format!(
-        "Index ready: {total} eligible image{} ({oversized_skipped} oversized skipped, recursive scan, {traversal_errors} traversal error{})",
+        "Index ready: {total} eligible image{} ({oversized_preview_eligible} routed via resized preview, {oversized_skipped} oversized skipped, recursive scan, {traversal_errors} traversal error{})",
         if total == 1 { "" } else { "s" },
         if traversal_errors == 1 { "" } else { "s" }
     )));
@@ -927,6 +961,7 @@ fn build_visual_descriptors(
     conn: &mut rusqlite::Connection,
     paths: &[PathBuf],
     indexing_settings: IndexingSettings,
+    roots: &[PathBuf],
     control: Option<&IndexControl>,
     tx: &Sender<WorkerMessage>,
 ) -> Result<()> {
@@ -960,7 +995,7 @@ fn build_visual_descriptors(
         let committed_before_batch = committed;
         // Hold only one bounded descriptor batch in memory. Each successfully
         // decoded batch is committed before the next batch is decoded.
-        let descriptors: Vec<(PathBuf, u64, Vec<f32>, Vec<f32>, u64)> = pool.install(|| {
+        let descriptors: Vec<(PathBuf, u64, Vec<f32>, Vec<f32>, u64, bool)> = pool.install(|| {
             batch
                 .par_iter()
                 .filter_map(|path| {
@@ -970,11 +1005,20 @@ fn build_visual_descriptors(
                     let _ = tx.send(WorkerMessage::CurrentFile(
                         path.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_owned(),
                     ));
-                    let result = decode_image(path).map(|image| {
-                        let fingerprint = decoded_content_fingerprint(&image);
-                        let (_, visual_hash, color_histogram, material_texture) = visual_descriptor(&image);
-                        (visual_hash, color_histogram, material_texture, fingerprint)
-                    });
+                    let result = safe_descriptor_image(path, roots, indexing_settings).map(
+                        |(image, _, oversized)| {
+                            let fingerprint = decoded_content_fingerprint(&image);
+                            let (_, visual_hash, color_histogram, material_texture) =
+                                visual_descriptor(&image);
+                            (
+                                visual_hash,
+                                color_histogram,
+                                material_texture,
+                                fingerprint,
+                                oversized,
+                            )
+                        },
+                    );
                     let current = decoded.fetch_add(1, Ordering::Relaxed) + 1;
                     if current % 16 == 0 || current == total {
                         let _ = tx.send(WorkerMessage::Status(format!(
@@ -982,12 +1026,19 @@ fn build_visual_descriptors(
                         )));
                     }
                     match result {
-                        Ok((visual_hash, color_histogram, material_texture, fingerprint)) => Some((
+                        Ok((
+                            visual_hash,
+                            color_histogram,
+                            material_texture,
+                            fingerprint,
+                            oversized,
+                        )) => Some((
                             path.clone(),
                             visual_hash,
                             color_histogram,
                             material_texture,
                             fingerprint,
+                            oversized,
                         )),
                         Err(err) => {
                             failed.fetch_add(1, Ordering::Relaxed);
@@ -1008,17 +1059,35 @@ fn build_visual_descriptors(
 
         {
             let transaction = conn.transaction()?;
-            for (path, visual_hash, color_histogram, material_texture, fingerprint) in &descriptors
+            for (path, visual_hash, color_histogram, material_texture, fingerprint, oversized) in
+                &descriptors
             {
                 db::set_visual_descriptor(&transaction, path, *visual_hash, color_histogram)?;
                 db::set_material_texture(&transaction, path, material_texture)?;
                 db::set_content_fingerprint(&transaction, path, *fingerprint)?;
+                if *oversized {
+                    db::set_descriptor_provenance(
+                        &transaction,
+                        path,
+                        db::DescriptorSource::OversizedPreview,
+                        Some(oversized_preview::PREVIEW_REVISION as u32),
+                        Some(oversized_preview::PREVIEW_EDGE),
+                    )?;
+                } else {
+                    db::set_descriptor_provenance(
+                        &transaction,
+                        path,
+                        db::DescriptorSource::DirectSource,
+                        None,
+                        None,
+                    )?;
+                }
             }
             transaction.commit()?;
         }
         let descriptor_paths: Vec<PathBuf> = descriptors
             .iter()
-            .map(|(path, _, _, _, _)| path.clone())
+            .map(|(path, _, _, _, _, _)| path.clone())
             .collect();
         portable::sync_paths_from_session(conn, &descriptor_paths)?;
 
@@ -1065,15 +1134,9 @@ fn build_embeddings(
         let input_paths: Vec<PathBuf> = batch
             .iter()
             .map(|path| {
-                if prefer_thumbnails {
-                    indexed_root_for_path(path, roots)
-                        .and_then(|root| thumbnail_cache::valid_cache_path_for_root(root, path))
-                        .unwrap_or_else(|| path.clone())
-                } else {
-                    path.clone()
-                }
+                safe_embedding_input_path(path, roots, indexing_settings, prefer_thumbnails)
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
         if let Some(path) = batch.first() {
             let _ = tx.send(WorkerMessage::CurrentFile(
                 path.file_name()
@@ -1306,6 +1369,7 @@ fn similarity_search(
 ) -> Result<Vec<ImageSummary>> {
     let indexing_settings = indexing_settings.sanitized();
     let mut conn = db::open(db_path)?;
+    let roots = db::load_roots(db_path)?;
 
     let missing_visual = db::paths_missing_visual_descriptor(&conn)?;
     if !missing_visual.is_empty() && allow_descriptor_backfill {
@@ -1314,7 +1378,14 @@ fn similarity_search(
             missing_visual.len(),
             if missing_visual.len() == 1 { "" } else { "s" }
         )));
-        build_visual_descriptors(&mut conn, &missing_visual, indexing_settings, None, tx)?;
+        build_visual_descriptors(
+            &mut conn,
+            &missing_visual,
+            indexing_settings,
+            &roots,
+            None,
+            tx,
+        )?;
     } else if !missing_visual.is_empty() {
         let _ = tx.send(WorkerMessage::Status(format!(
             "Searching committed index; {} pending descriptor{} skipped while indexing is paused",
@@ -1323,14 +1394,15 @@ fn similarity_search(
         )));
     }
 
-    let query_image = decode_image(query_path)?;
+    let (query_image, query_input_path, _) =
+        safe_descriptor_image(query_path, &roots, indexing_settings)?;
     let (query_dominant, query_hash, query_histogram, query_material_texture) =
         visual_descriptor(&query_image);
 
     let query_embedding = if settings.clip_weight > 0.0 {
         match query_clip_embedding(
             embedding_service,
-            query_path,
+            &query_input_path,
             indexing_settings.clip_threads,
             indexing_settings.clip_execution_provider,
         ) {
@@ -1696,6 +1768,22 @@ fn normalized_path_key(path: &Path) -> String {
 fn inspect_pending_image(
     item: &PendingImage,
 ) -> Result<(u32, u32, [u8; 3], u64, Vec<f32>, Vec<f32>, u64)> {
+    if item.size > DIRECT_DECODE_MAX_FILE_SIZE_BYTES {
+        let asset =
+            oversized_preview::load_or_build(&item.root, &item.path, item.size, item.modified)?;
+        let content_fingerprint = decoded_content_fingerprint(&asset.image);
+        let (dominant, visual_hash, color_histogram, material_texture) =
+            visual_descriptor(&asset.image);
+        return Ok((
+            asset.source_width,
+            asset.source_height,
+            dominant,
+            visual_hash,
+            color_histogram,
+            material_texture,
+            content_fingerprint,
+        ));
+    }
     if item.prefer_thumbnail {
         if let (Some(image), Some(fingerprint)) = (
             thumbnail_cache::load_cached_for_root(&item.root, &item.path),
@@ -1724,13 +1812,20 @@ fn inspect_pending_image(
             ));
         }
     }
-    inspect_image(&item.path, &item.root)
+    inspect_image(&item.path, &item.root, item.size)
 }
 
 fn inspect_image(
     path: &Path,
     root: &Path,
+    source_size: u64,
 ) -> Result<(u32, u32, [u8; 3], u64, Vec<f32>, Vec<f32>, u64)> {
+    if source_size > DIRECT_DECODE_MAX_FILE_SIZE_BYTES {
+        bail!(
+            "direct image decoder refused oversized source {}; resized preview is mandatory",
+            path.display()
+        );
+    }
     let image = decode_image(path)?;
     let (width, height) = image.dimensions();
 
@@ -1772,7 +1867,103 @@ fn decoded_content_fingerprint(image: &DynamicImage) -> u64 {
     hash
 }
 
+fn persist_descriptor_provenance(
+    conn: &rusqlite::Connection,
+    path: &Path,
+    source_size: u64,
+) -> Result<()> {
+    if source_size > DIRECT_DECODE_MAX_FILE_SIZE_BYTES {
+        db::set_descriptor_provenance(
+            conn,
+            path,
+            db::DescriptorSource::OversizedPreview,
+            Some(oversized_preview::PREVIEW_REVISION as u32),
+            Some(oversized_preview::PREVIEW_EDGE),
+        )
+    } else {
+        db::set_descriptor_provenance(conn, path, db::DescriptorSource::DirectSource, None, None)
+    }
+}
+
+fn safe_descriptor_image(
+    path: &Path,
+    roots: &[PathBuf],
+    indexing_settings: IndexingSettings,
+) -> Result<(DynamicImage, PathBuf, bool)> {
+    let meta = std::fs::metadata(path)
+        .with_context(|| format!("reading source metadata {}", path.display()))?;
+    match indexing_settings.source_policy(meta.len()) {
+        SourcePolicy::SkipConfigured => bail!(
+            "source {} exceeds configured {} MiB indexing limit",
+            path.display(),
+            indexing_settings.max_file_size_mib
+        ),
+        SourcePolicy::DirectSource => Ok((decode_image(path)?, path.to_path_buf(), false)),
+        SourcePolicy::OversizedPreview => {
+            let root = indexed_root_for_path(path, roots).with_context(|| {
+                format!(
+                    "oversized source {} is outside an indexed root; safe-preview processing is unavailable",
+                    path.display()
+                )
+            })?;
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs() as i64)
+                .unwrap_or(0);
+            let asset = oversized_preview::load_or_build(root, path, meta.len(), modified)?;
+            Ok((asset.image, asset.path, true))
+        }
+    }
+}
+
+fn safe_embedding_input_path(
+    path: &Path,
+    roots: &[PathBuf],
+    indexing_settings: IndexingSettings,
+    prefer_thumbnail: bool,
+) -> Result<PathBuf> {
+    let meta = std::fs::metadata(path)
+        .with_context(|| format!("reading source metadata {}", path.display()))?;
+    match indexing_settings.source_policy(meta.len()) {
+        SourcePolicy::SkipConfigured => bail!(
+            "source {} exceeds configured {} MiB indexing limit",
+            path.display(),
+            indexing_settings.max_file_size_mib
+        ),
+        SourcePolicy::OversizedPreview => {
+            let root = indexed_root_for_path(path, roots).with_context(|| {
+                format!(
+                    "oversized indexed source has no registered root: {}",
+                    path.display()
+                )
+            })?;
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs() as i64)
+                .unwrap_or(0);
+            Ok(oversized_preview::load_or_build(root, path, meta.len(), modified)?.path)
+        }
+        SourcePolicy::DirectSource if prefer_thumbnail => Ok(indexed_root_for_path(path, roots)
+            .and_then(|root| thumbnail_cache::valid_cache_path_for_root(root, path))
+            .unwrap_or_else(|| path.to_path_buf())),
+        SourcePolicy::DirectSource => Ok(path.to_path_buf()),
+    }
+}
+
 fn decode_image(path: &Path) -> Result<DynamicImage> {
+    if std::fs::metadata(path)
+        .map(|meta| meta.len() > DIRECT_DECODE_MAX_FILE_SIZE_BYTES)
+        .unwrap_or(false)
+    {
+        bail!(
+            "direct decoder refused source above 256 MiB: {}",
+            path.display()
+        );
+    }
     image::ImageReader::open(path)
         .with_context(|| format!("opening {}", path.display()))?
         .with_guessed_format()?
@@ -1885,6 +2076,20 @@ mod tests {
         control.resume();
         rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
         assert!(!control.is_paused());
+    }
+
+    #[test]
+    fn direct_inspection_refuses_oversized_source_before_open() {
+        let missing = Path::new("definitely-missing-oversized.jpg");
+        let err = inspect_image(
+            missing,
+            Path::new("."),
+            DIRECT_DECODE_MAX_FILE_SIZE_BYTES + 1,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("resized preview is mandatory"));
+        assert!(!err.contains("opening"));
     }
 
     #[test]
