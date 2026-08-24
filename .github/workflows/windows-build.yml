@@ -31,7 +31,8 @@ jobs:
             'scripts/run-v0.2-benchmark-gate-from-folders.ps1',
             'scripts/run-v0.2-benchmark-gate.ps1',
             'scripts/run-v0.3-face-benchmark-gate.ps1',
-            'scripts/run-indexed-sample-benchmark.ps1'
+            'scripts/run-indexed-sample-benchmark.ps1',
+            'scripts/run-oversized-source-validation.ps1'
           )
           foreach ($file in $files) {
             $tokens = $null
@@ -52,7 +53,8 @@ jobs:
           $files = @(
             'scripts/run-v0.2-benchmark-gate.ps1',
             'scripts/run-v0.3-face-benchmark-gate.ps1',
-            'scripts/run-indexed-sample-benchmark.ps1'
+            'scripts/run-indexed-sample-benchmark.ps1',
+            'scripts/run-oversized-source-validation.ps1'
           )
           foreach ($file in $files) {
             $tokens = $null
@@ -67,7 +69,11 @@ jobs:
               exit 1
             }
           }
-          foreach ($file in @('scripts/run-v0.2-benchmark-gate.ps1', 'scripts/run-v0.3-face-benchmark-gate.ps1')) {
+          foreach ($file in @(
+            'scripts/run-v0.2-benchmark-gate.ps1',
+            'scripts/run-v0.3-face-benchmark-gate.ps1',
+            'scripts/run-oversized-source-validation.ps1'
+          )) {
             if (Select-String -Path $file -Pattern '\.ArgumentList' -Quiet) {
               throw "$file uses ProcessStartInfo.ArgumentList, which is unavailable on Windows PowerShell 5.1."
             }
@@ -88,6 +94,7 @@ jobs:
           Copy-Item scripts/run-indexed-sample-benchmark.ps1 artifact/
           Copy-Item scripts/run-v0.2-benchmark-gate.ps1 artifact/
           Copy-Item scripts/run-v0.3-face-benchmark-gate.ps1 artifact/
+          Copy-Item scripts/run-oversized-source-validation.ps1 artifact/
           Copy-Item README.md artifact/
           Copy-Item LICENSE artifact/
           git rev-parse HEAD | Set-Content artifact/COMMIT.txt -Encoding ascii
