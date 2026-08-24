@@ -980,6 +980,10 @@ impl ImageSearchApp {
         if !self.close_confirmation_open {
             return;
         }
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.close_confirmation_open = false;
+            return;
+        }
 
         let mut keep_indexing = false;
         let mut close_anyway = false;

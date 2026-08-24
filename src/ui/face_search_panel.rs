@@ -405,6 +405,10 @@ impl ImageSearchApp {
         if !self.face_search_ui.open {
             return;
         }
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.face_search_ui.open = false;
+            return;
+        }
 
         let mut open = self.face_search_ui.open;
         egui::Window::new("Face Search")
