@@ -586,8 +586,7 @@ impl ImageSearchApp {
                             "people-manager-members",
                             94.0,
                             108.0,
-                        )
-                        .max_height(250.0);
+                        );
                         photo_grid::show(ui, members.len(), member_grid, |ui, index| {
                             let member = &members[index];
                             let key = (member.library_id.clone(), member.face_id.clone());
