@@ -101,7 +101,9 @@ impl ImageSearchApp {
     }
 
     pub(super) fn show_details(&mut self, ui: &mut egui::Ui, visible: &[usize]) {
-        let available = ui.available_width().max(720.0);
+        // Reserve the vertical scrollbar gutter once, then reuse one geometry for the
+        // header and every virtualized row. Row content never gets to resize columns.
+        let available = (ui.available_width() - 18.0).max(720.0);
         let widths = DetailWidths::from_total(available);
         detail_header(ui, widths);
         ui.separator();
@@ -113,10 +115,10 @@ impl ImageSearchApp {
                     let record = self.record_view(visible[row]);
                     let selected = self.selected_paths.contains(&record.path);
                     let fit = self.thumb_fit;
-                    let available = ui.available_width().max(720.0);
-                    let widths = DetailWidths::from_total(available);
 
                     ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+
                         let response = if let Some(texture) = self.thumbnail(&record.path) {
                             let response = thumbnail_widget(
                                 ui,
@@ -139,72 +141,62 @@ impl ImageSearchApp {
                         self.handle_result_response(&response, &record.path);
                         self.attach_collection_drag_source(&response, &record.path);
 
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(widths.name, 56.0),
-                            egui::Layout::top_down(egui::Align::LEFT),
-                            |ui| {
-                                let name = ui.add(
-                                    egui::Label::new(truncate_middle(&record.file_name, 44))
-                                        .sense(egui::Sense::click_and_drag()),
-                                );
-                                self.handle_result_response(&name, &record.path);
-                                self.attach_collection_drag_source(&name, &record.path);
-                                name.on_hover_text(record.path.display().to_string());
-                                ui.small(truncate_middle(&record.root.display().to_string(), 48));
-                            },
+                        let name_text = format!(
+                            "{}\n{}",
+                            truncate_middle(&record.file_name, 44),
+                            truncate_middle(&record.root.display().to_string(), 48)
                         );
+                        let name = ui.add_sized(
+                            [widths.name, 56.0],
+                            egui::Label::new(name_text)
+                                .wrap()
+                                .sense(egui::Sense::click_and_drag()),
+                        );
+                        self.handle_result_response(&name, &record.path);
+                        self.attach_collection_drag_source(&name, &record.path);
+                        name.on_hover_text(record.path.display().to_string());
 
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(widths.info, 56.0),
-                            egui::Layout::top_down(egui::Align::LEFT),
-                            |ui| {
-                                ui.label(format!(
-                                    "{} × {}  {}",
-                                    record.width,
-                                    record.height,
-                                    record.extension.to_ascii_uppercase()
-                                ));
-                                ui.small(format!(
-                                    "{}  {}",
-                                    format_bytes(record.size),
-                                    format_modified(record.modified)
-                                ));
-                            },
+                        ui.add_sized(
+                            [widths.info, 56.0],
+                            egui::Label::new(format!(
+                                "{} × {}  {}\n{}  {}",
+                                record.width,
+                                record.height,
+                                record.extension.to_ascii_uppercase(),
+                                format_bytes(record.size),
+                                format_modified(record.modified)
+                            ))
+                            .wrap(),
                         );
 
                         ui.allocate_ui_with_layout(
                             egui::vec2(widths.color, 56.0),
                             egui::Layout::top_down(egui::Align::Center),
-                            |ui| swatch(ui, record.dominant),
-                        );
-
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(widths.metadata, 56.0),
-                            egui::Layout::top_down(egui::Align::LEFT),
                             |ui| {
-                                let metadata = metadata_text(&record);
-                                ui.add_sized(
-                                    [widths.metadata, 42.0],
-                                    egui::Label::new(truncate_middle(
-                                        &metadata,
-                                        metadata_chars(widths.metadata),
-                                    ))
-                                    .wrap(),
-                                )
-                                .on_hover_text(metadata);
+                                ui.set_min_width(widths.color);
+                                ui.set_max_width(widths.color);
+                                swatch(ui, record.dominant);
                             },
                         );
 
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(widths.score, 56.0),
-                            egui::Layout::top_down(egui::Align::RIGHT),
-                            |ui| {
-                                if let Some(score) = record.score {
-                                    ui.strong(format!("{:.2}%", score * 100.0));
-                                } else {
-                                    ui.label("—");
-                                }
-                            },
+                        let metadata = metadata_text(&record);
+                        ui.add_sized(
+                            [widths.metadata, 56.0],
+                            egui::Label::new(truncate_middle(
+                                &metadata,
+                                metadata_chars(widths.metadata),
+                            ))
+                            .wrap(),
+                        )
+                        .on_hover_text(metadata);
+
+                        let score = record
+                            .score
+                            .map(|score| format!("{:.2}%", score * 100.0))
+                            .unwrap_or_else(|| "—".to_owned());
+                        ui.add_sized(
+                            [widths.score, 56.0],
+                            egui::Label::new(egui::RichText::new(score).strong()),
                         );
                     });
                     ui.separator();
@@ -246,8 +238,7 @@ impl DetailWidths {
         let thumb = 58.0;
         let color = 44.0;
         let score = 92.0;
-        let gaps = 44.0;
-        let usable = (total - thumb - color - score - gaps).max(480.0);
+        let usable = (total - thumb - color - score).max(480.0);
         let name = (usable * 0.28).clamp(170.0, 360.0);
         let info = (usable * 0.22).clamp(145.0, 280.0);
         let metadata = (usable - name - info).max(180.0);
@@ -264,26 +255,27 @@ impl DetailWidths {
 
 fn detail_header(ui: &mut egui::Ui, widths: DetailWidths) {
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
         ui.add_sized([widths.thumb, 22.0], egui::Label::new(""));
         ui.add_sized(
             [widths.name, 22.0],
-            egui::Label::new("Name").selectable(false),
+            egui::Label::new(egui::RichText::new("Name").strong()),
         );
         ui.add_sized(
             [widths.info, 22.0],
-            egui::Label::new("Info").selectable(false),
+            egui::Label::new(egui::RichText::new("Info").strong()),
         );
         ui.add_sized(
             [widths.color, 22.0],
-            egui::Label::new("Color").selectable(false),
+            egui::Label::new(egui::RichText::new("Color").strong()),
         );
         ui.add_sized(
             [widths.metadata, 22.0],
-            egui::Label::new("Metadata").selectable(false),
+            egui::Label::new(egui::RichText::new("Metadata").strong()),
         );
         ui.add_sized(
             [widths.score, 22.0],
-            egui::Label::new("Score").selectable(false),
+            egui::Label::new(egui::RichText::new("Score").strong()),
         );
     });
 }
