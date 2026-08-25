@@ -168,6 +168,17 @@ pub fn refresh_cache_from_portable_roots(conn: &Connection) -> Result<()> {
     write_snapshot_local(conn, &state, &clusters, &members)
 }
 
+/// Refresh the disposable automatic People cache once, then read both the
+/// cluster summaries and members from that same snapshot. Callers that need
+/// both collections should use this instead of `load_clusters` + `load_members`,
+/// which would otherwise rebuild every portable root twice.
+pub fn load_automatic_snapshot(
+    conn: &Connection,
+) -> Result<(Vec<PersonCluster>, Vec<PersonClusterMember>)> {
+    refresh_cache_from_portable_roots(conn)?;
+    Ok((load_clusters_local(conn)?, load_members_local(conn)?))
+}
+
 /// Return the face identities whose source images still belong to at least one
 /// current Collection. `None` means this is not the session DB (unit tests and
 /// root-local callers should not be collection-filtered).
