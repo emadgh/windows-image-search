@@ -2,15 +2,37 @@ use super::photo_grid::{self, PhotoGridSpec, PhotoTileMode};
 use super::ImageSearchApp;
 use crate::face_detection::FaceBox;
 use crate::face_search::{self, IndexedFaceSuggestion};
-use crate::people_effective::{self, EffectivePeopleCatalog, EffectivePersonSource};
+use crate::people_effective::{
+    self, EffectiveMember, EffectivePeopleCatalog, EffectivePersonSource,
+};
 use crate::people_management;
 use eframe::egui;
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::Path;
+use std::sync::{
+    mpsc::{Receiver, Sender},
+    Arc,
+};
 
-#[derive(Default)]
+#[derive(Debug)]
+struct PeopleManagerLoaded {
+    catalog: EffectivePeopleCatalog,
+    members_by_person: HashMap<String, Arc<Vec<EffectiveMember>>>,
+    exceptions: Arc<Vec<EffectiveMember>>,
+    person_index: HashMap<String, usize>,
+}
+
+#[derive(Debug)]
+enum PeopleManagerUiMessage {
+    Catalog(Result<PeopleManagerLoaded, String>),
+}
+
 pub(super) struct PeopleManagerUiState {
     open: bool,
     catalog: EffectivePeopleCatalog,
+    members_by_person: HashMap<String, Arc<Vec<EffectiveMember>>>,
+    exceptions: Arc<Vec<EffectiveMember>>,
+    person_index: HashMap<String, usize>,
     selected_person_id: Option<String>,
     merge_selection: BTreeSet<String>,
     selected_face: Option<(String, String)>,
@@ -20,6 +42,34 @@ pub(super) struct PeopleManagerUiState {
     move_target: Option<String>,
     preview_cache: HashMap<(String, String), Option<IndexedFaceSuggestion>>,
     confirm_delete_person: Option<String>,
+    tx: Sender<PeopleManagerUiMessage>,
+    rx: Receiver<PeopleManagerUiMessage>,
+    loading: bool,
+}
+
+impl Default for PeopleManagerUiState {
+    fn default() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        Self {
+            open: false,
+            catalog: EffectivePeopleCatalog::default(),
+            members_by_person: HashMap::new(),
+            exceptions: Arc::new(Vec::new()),
+            person_index: HashMap::new(),
+            selected_person_id: None,
+            merge_selection: BTreeSet::new(),
+            selected_face: None,
+            rename_text: String::new(),
+            split_name: String::new(),
+            merge_name: String::new(),
+            move_target: None,
+            preview_cache: HashMap::new(),
+            confirm_delete_person: None,
+            tx,
+            rx,
+            loading: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -68,6 +118,41 @@ enum PeopleAction {
     },
 }
 
+fn load_people_manager_data(db_path: &Path) -> anyhow::Result<PeopleManagerLoaded> {
+    let conn = crate::db::open(db_path)?;
+    let catalog = people_effective::load(&conn)?;
+
+    let person_index = catalog
+        .people
+        .iter()
+        .enumerate()
+        .map(|(index, person)| (person.person_id.clone(), index))
+        .collect::<HashMap<_, _>>();
+    let mut members_by_person = HashMap::<String, Vec<EffectiveMember>>::new();
+    let mut exceptions = Vec::new();
+    for member in &catalog.members {
+        if let Some(person_id) = member.person_id.as_ref() {
+            members_by_person
+                .entry(person_id.clone())
+                .or_default()
+                .push(member.clone());
+        } else if member.detached || member.ignored {
+            exceptions.push(member.clone());
+        }
+    }
+    let members_by_person = members_by_person
+        .into_iter()
+        .map(|(person_id, members)| (person_id, Arc::new(members)))
+        .collect();
+
+    Ok(PeopleManagerLoaded {
+        catalog,
+        members_by_person,
+        exceptions: Arc::new(exceptions),
+        person_index,
+    })
+}
+
 impl ImageSearchApp {
     pub(super) fn open_people_manager(&mut self) {
         self.people_manager_ui.open = true;
@@ -75,43 +160,69 @@ impl ImageSearchApp {
     }
 
     fn refresh_people_manager(&mut self) {
-        match crate::db::open(&self.db_path).and_then(|conn| people_effective::load(&conn)) {
-            Ok(catalog) => {
-                self.people_manager_ui.catalog = catalog;
-                self.people_manager_ui.preview_cache.clear();
-                let selected_exists = self
-                    .people_manager_ui
-                    .selected_person_id
-                    .as_ref()
-                    .is_some_and(|id| {
-                        self.people_manager_ui
-                            .catalog
-                            .people
-                            .iter()
-                            .any(|person| &person.person_id == id)
-                    });
-                if !selected_exists {
-                    self.people_manager_ui.selected_person_id = self
-                        .people_manager_ui
-                        .catalog
-                        .people
-                        .first()
-                        .map(|person| person.person_id.clone());
+        if self.people_manager_ui.loading {
+            return;
+        }
+        let db_path = self.db_path.clone();
+        let tx = self.people_manager_ui.tx.clone();
+        self.people_manager_ui.loading = true;
+        self.last_error = None;
+        self.status = "Loading People catalog…".to_owned();
+        std::thread::spawn(move || {
+            let result = load_people_manager_data(&db_path).map_err(|err| format!("{err:#}"));
+            let _ = tx.send(PeopleManagerUiMessage::Catalog(result));
+        });
+    }
+
+    fn process_people_manager_messages(&mut self) {
+        while let Ok(message) = self.people_manager_ui.rx.try_recv() {
+            match message {
+                PeopleManagerUiMessage::Catalog(result) => {
+                    self.people_manager_ui.loading = false;
+                    match result {
+                        Ok(loaded) => {
+                            self.people_manager_ui.catalog = loaded.catalog;
+                            self.people_manager_ui.members_by_person = loaded.members_by_person;
+                            self.people_manager_ui.exceptions = loaded.exceptions;
+                            self.people_manager_ui.person_index = loaded.person_index;
+                            self.people_manager_ui.preview_cache.clear();
+
+                            let selected_exists = self
+                                .people_manager_ui
+                                .selected_person_id
+                                .as_ref()
+                                .is_some_and(|id| {
+                                    self.people_manager_ui.person_index.contains_key(id)
+                                });
+                            if !selected_exists {
+                                self.people_manager_ui.selected_person_id = self
+                                    .people_manager_ui
+                                    .catalog
+                                    .people
+                                    .first()
+                                    .map(|person| person.person_id.clone());
+                            }
+                            let valid_person_ids = self
+                                .people_manager_ui
+                                .person_index
+                                .keys()
+                                .cloned()
+                                .collect::<HashSet<_>>();
+                            self.people_manager_ui
+                                .merge_selection
+                                .retain(|id| valid_person_ids.contains(id));
+                            self.sync_people_editor_fields();
+                            let count = self.people_manager_ui.catalog.people.len();
+                            self.status = format!(
+                                "People catalog ready: {count} group{}",
+                                if count == 1 { "" } else { "s" }
+                            );
+                        }
+                        Err(err) => {
+                            self.last_error = Some(format!("Cannot load People catalog: {err}"));
+                        }
+                    }
                 }
-                let valid_person_ids = self
-                    .people_manager_ui
-                    .catalog
-                    .people
-                    .iter()
-                    .map(|person| person.person_id.clone())
-                    .collect::<HashSet<_>>();
-                self.people_manager_ui
-                    .merge_selection
-                    .retain(|id| valid_person_ids.contains(id));
-                self.sync_people_editor_fields();
-            }
-            Err(err) => {
-                self.last_error = Some(format!("Cannot load People catalog: {err:#}"));
             }
         }
     }
@@ -121,13 +232,8 @@ impl ImageSearchApp {
             .people_manager_ui
             .selected_person_id
             .as_ref()
-            .and_then(|id| {
-                self.people_manager_ui
-                    .catalog
-                    .people
-                    .iter()
-                    .find(|person| &person.person_id == id)
-            });
+            .and_then(|id| self.people_manager_ui.person_index.get(id).copied())
+            .and_then(|index| self.people_manager_ui.catalog.people.get(index));
         self.people_manager_ui.rename_text = selected
             .and_then(|person| person.display_name.clone())
             .unwrap_or_default();
@@ -150,9 +256,14 @@ impl ImageSearchApp {
     }
 
     fn apply_people_action(&mut self, action: PeopleAction) {
+        if matches!(action, PeopleAction::Refresh) {
+            self.refresh_people_manager();
+            return;
+        }
+
         let result = (|| -> anyhow::Result<()> {
             match action {
-                PeopleAction::Refresh => {}
+                PeopleAction::Refresh => unreachable!(),
                 PeopleAction::Rename { person_id, name } => {
                     let conn = crate::db::open(&self.db_path)?;
                     let id = people_management::rename_effective_person(&conn, &person_id, &name)?;
@@ -267,15 +378,13 @@ impl ImageSearchApp {
     fn show_effective_person_images(&mut self, person_id: &str) -> anyhow::Result<()> {
         let members = self
             .people_manager_ui
-            .catalog
-            .members
-            .iter()
-            .filter(|member| member.person_id.as_deref() == Some(person_id))
-            .map(|member| (member.library_id.clone(), member.face_id.clone()))
-            .collect::<Vec<_>>();
+            .members_by_person
+            .get(person_id)
+            .cloned()
+            .unwrap_or_else(|| Arc::new(Vec::new()));
         let mut paths = HashSet::new();
-        for (library_id, face_id) in members {
-            if let Some(preview) = self.people_preview(&library_id, &face_id) {
+        for member in members.iter() {
+            if let Some(preview) = self.people_preview(&member.library_id, &member.face_id) {
                 paths.insert(preview.image_path);
             }
         }
@@ -295,8 +404,12 @@ impl ImageSearchApp {
     }
 
     pub(super) fn show_people_manager_window(&mut self, ctx: &egui::Context) {
+        self.process_people_manager_messages();
         if !self.people_manager_ui.open {
             return;
+        }
+        if self.people_manager_ui.loading {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
         if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
             if self.people_manager_ui.confirm_delete_person.is_some() {
@@ -319,8 +432,18 @@ impl ImageSearchApp {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.heading("People");
-                    if ui.button("⟳ Refresh").clicked() {
+                    if ui
+                        .add_enabled(
+                            !self.people_manager_ui.loading,
+                            egui::Button::new("⟳ Refresh"),
+                        )
+                        .clicked()
+                    {
                         action = Some(PeopleAction::Refresh);
+                    }
+                    if self.people_manager_ui.loading {
+                        ui.spinner();
+                        ui.small("Loading catalog…");
                     }
                     ui.separator();
                     ui.small(format!(
@@ -344,12 +467,19 @@ impl ImageSearchApp {
                             ui.strong("People groups");
                             ui.small("Check multiple groups, then merge them from the editor pane.");
                             ui.add_space(6.0);
+
+                            let people_count = self.people_manager_ui.catalog.people.len();
+                            let exception_count = self.people_manager_ui.exceptions.len();
+                            let reserved_for_exceptions = if exception_count == 0 { 0.0 } else { 220.0 };
+                            let people_list_height =
+                                (ui.available_height() - reserved_for_exceptions).max(180.0);
                             egui::ScrollArea::vertical()
                                 .id_salt("people-manager-list")
                                 .auto_shrink([false, false])
-                                .show(ui, |ui| {
-                                    let people = self.people_manager_ui.catalog.people.clone();
-                                    for person in people {
+                                .max_height(people_list_height)
+                                .show_rows(ui, 64.0, people_count, |ui, row_range| {
+                                    for index in row_range {
+                                        let person = self.people_manager_ui.catalog.people[index].clone();
                                         let selected = self
                                             .people_manager_ui
                                             .selected_person_id
@@ -359,105 +489,129 @@ impl ImageSearchApp {
                                             .people_manager_ui
                                             .merge_selection
                                             .contains(&person.person_id);
-                                        ui.horizontal(|ui| {
-                                            if ui.checkbox(&mut merge_checked, "").changed() {
-                                                if merge_checked {
-                                                    self.people_manager_ui
-                                                        .merge_selection
-                                                        .insert(person.person_id.clone());
-                                                } else {
-                                                    self.people_manager_ui
-                                                        .merge_selection
-                                                        .remove(&person.person_id);
+                                        ui.allocate_ui_with_layout(
+                                            egui::vec2(ui.available_width(), 64.0),
+                                            egui::Layout::left_to_right(egui::Align::Center),
+                                            |ui| {
+                                                if ui.checkbox(&mut merge_checked, "").changed() {
+                                                    if merge_checked {
+                                                        self.people_manager_ui
+                                                            .merge_selection
+                                                            .insert(person.person_id.clone());
+                                                    } else {
+                                                        self.people_manager_ui
+                                                            .merge_selection
+                                                            .remove(&person.person_id);
+                                                    }
                                                 }
-                                            }
-                                            if let Some((library_id, face_id)) = person
-                                                .representative_library_id
-                                                .as_deref()
-                                                .zip(person.representative_face_id.as_deref())
-                                            {
-                                                if let Some(preview) =
-                                                    self.people_preview(library_id, face_id)
+                                                if let Some((library_id, face_id)) = person
+                                                    .representative_library_id
+                                                    .as_deref()
+                                                    .zip(person.representative_face_id.as_deref())
                                                 {
-                                                    if let Some(texture) =
-                                                        self.thumbnail(&preview.image_path)
+                                                    if let Some(preview) =
+                                                        self.people_preview(library_id, face_id)
                                                     {
-                                                        let response = photo_grid::photo_tile(ui, &texture, egui::vec2(58.0, 58.0), PhotoTileMode::Face(preview.bbox), selected, egui::Sense::click());
-                                                        if response.clicked() {
-                                                            self.people_manager_ui
-                                                                .selected_person_id =
-                                                                Some(person.person_id.clone());
-                                                            selection_changed = true;
+                                                        if let Some(texture) =
+                                                            self.thumbnail(&preview.image_path)
+                                                        {
+                                                            let response = photo_grid::photo_tile(
+                                                                ui,
+                                                                &texture,
+                                                                egui::vec2(58.0, 58.0),
+                                                                PhotoTileMode::Face(preview.bbox),
+                                                                selected,
+                                                                egui::Sense::click(),
+                                                            );
+                                                            if response.clicked() {
+                                                                self.people_manager_ui
+                                                                    .selected_person_id = Some(
+                                                                    person.person_id.clone(),
+                                                                );
+                                                                selection_changed = true;
+                                                            }
                                                         }
                                                     }
                                                 }
-                                            }
-                                            let name = person
-                                                .display_name
-                                                .clone()
-                                                .unwrap_or_else(|| "Unnamed person".to_owned());
-                                            let source = match person.source {
-                                                EffectivePersonSource::Automatic => "Auto",
-                                                EffectivePersonSource::Manual => "Manual",
-                                            };
-                                            let response = ui.selectable_label(
-                                                selected,
-                                                format!(
-                                                    "{name}\n{} face{} · {source}",
-                                                    person.member_count,
-                                                    if person.member_count == 1 { "" } else { "s" }
-                                                ),
-                                            );
-                                            if response.clicked() {
-                                                self.people_manager_ui.selected_person_id =
-                                                    Some(person.person_id.clone());
-                                                selection_changed = true;
-                                            }
-                                        });
-                                        ui.add_space(3.0);
+                                                let name = person
+                                                    .display_name
+                                                    .clone()
+                                                    .unwrap_or_else(|| "Unnamed person".to_owned());
+                                                let source = match person.source {
+                                                    EffectivePersonSource::Automatic => "Auto",
+                                                    EffectivePersonSource::Manual => "Manual",
+                                                };
+                                                let response = ui.selectable_label(
+                                                    selected,
+                                                    format!(
+                                                        "{name}\n{} face{} · {source}",
+                                                        person.member_count,
+                                                        if person.member_count == 1 {
+                                                            ""
+                                                        } else {
+                                                            "s"
+                                                        }
+                                                    ),
+                                                );
+                                                if response.clicked() {
+                                                    self.people_manager_ui.selected_person_id =
+                                                        Some(person.person_id.clone());
+                                                    selection_changed = true;
+                                                }
+                                            },
+                                        );
                                     }
                                 });
 
-                            let exceptions = self
-                                .people_manager_ui
-                                .catalog
-                                .members
-                                .iter()
-                                .filter(|member| {
-                                    member.person_id.is_none() && (member.detached || member.ignored)
-                                })
-                                .cloned()
-                                .collect::<Vec<_>>();
-                            if !exceptions.is_empty() {
+                            if exception_count != 0 {
                                 ui.add_space(8.0);
                                 ui.separator();
-                                ui.strong(format!("Manual exceptions ({})", exceptions.len()));
+                                ui.strong(format!("Manual exceptions ({exception_count})"));
                                 ui.small("Detached/ignored faces stay here so every correction can be restored.");
+                                let exceptions = Arc::clone(&self.people_manager_ui.exceptions);
                                 egui::ScrollArea::vertical()
                                     .id_salt("people-manager-exceptions")
                                     .max_height(180.0)
-                                    .show(ui, |ui| {
-                                        for member in exceptions {
-                                            ui.horizontal(|ui| {
-                                                if let Some(preview) = self.people_preview(
-                                                    &member.library_id,
-                                                    &member.face_id,
-                                                ) {
-                                                    if let Some(texture) = self.thumbnail(&preview.image_path) {
-                                                        let _ = photo_grid::photo_tile(ui, &texture, egui::vec2(42.0, 42.0), PhotoTileMode::Face(preview.bbox), false, egui::Sense::click());
+                                    .show_rows(ui, 50.0, exceptions.len(), |ui, row_range| {
+                                        for index in row_range {
+                                            let member = exceptions[index].clone();
+                                            ui.allocate_ui_with_layout(
+                                                egui::vec2(ui.available_width(), 50.0),
+                                                egui::Layout::left_to_right(egui::Align::Center),
+                                                |ui| {
+                                                    if let Some(preview) = self.people_preview(
+                                                        &member.library_id,
+                                                        &member.face_id,
+                                                    ) {
+                                                        if let Some(texture) =
+                                                            self.thumbnail(&preview.image_path)
+                                                        {
+                                                            let _ = photo_grid::photo_tile(
+                                                                ui,
+                                                                &texture,
+                                                                egui::vec2(42.0, 42.0),
+                                                                PhotoTileMode::Face(preview.bbox),
+                                                                false,
+                                                                egui::Sense::click(),
+                                                            );
+                                                        }
                                                     }
-                                                }
-                                                ui.vertical(|ui| {
-                                                    ui.small(if member.ignored { "Ignored face" } else { "Detached face" });
-                                                    ui.small(&member.face_id);
-                                                });
-                                                if ui.small_button("Restore").clicked() {
-                                                    action = Some(PeopleAction::Restore {
-                                                        library_id: member.library_id.clone(),
-                                                        face_id: member.face_id.clone(),
+                                                    ui.vertical(|ui| {
+                                                        ui.small(if member.ignored {
+                                                            "Ignored face"
+                                                        } else {
+                                                            "Detached face"
+                                                        });
+                                                        ui.small(&member.face_id);
                                                     });
-                                                }
-                                            });
+                                                    if ui.small_button("Restore").clicked() {
+                                                        action = Some(PeopleAction::Restore {
+                                                            library_id: member.library_id.clone(),
+                                                            face_id: member.face_id.clone(),
+                                                        });
+                                                    }
+                                                },
+                                            );
                                         }
                                     });
                             }
@@ -469,54 +623,40 @@ impl ImageSearchApp {
                         let selected_person = self
                             .people_manager_ui
                             .selected_person_id
-                            .clone()
-                            .and_then(|id| {
-                                self.people_manager_ui
-                                    .catalog
-                                    .people
-                                    .iter()
-                                    .find(|person| person.person_id == id)
-                                    .cloned()
-                            });
+                            .as_ref()
+                            .and_then(|id| self.people_manager_ui.person_index.get(id).copied())
+                            .and_then(|index| self.people_manager_ui.catalog.people.get(index))
+                            .cloned();
                         let Some(person) = selected_person else {
-                            ui.heading("Select a Person");
-                            ui.label("Choose a People group from the list to edit it.");
+                            if self.people_manager_ui.loading {
+                                ui.heading("Loading People…");
+                                ui.label("The catalog is being prepared in the background.");
+                            } else {
+                                ui.heading("Select a Person");
+                                ui.label("Choose a People group from the list to edit it.");
+                            }
                             return;
                         };
 
                         let members = self
                             .people_manager_ui
-                            .catalog
-                            .members
-                            .iter()
-                            .filter(|member| {
-                                member.person_id.as_deref() == Some(&person.person_id)
-                            })
+                            .members_by_person
+                            .get(&person.person_id)
                             .cloned()
-                            .collect::<Vec<_>>();
-                        let mut parent_images = HashSet::new();
-                        for member in &members {
-                            if let Some(preview) =
-                                self.people_preview(&member.library_id, &member.face_id)
-                            {
-                                parent_images.insert(preview.image_path);
-                            }
-                        }
+                            .unwrap_or_else(|| Arc::new(Vec::new()));
                         let title = person
                             .display_name
                             .clone()
                             .unwrap_or_else(|| "Unnamed person".to_owned());
                         ui.heading(title);
                         ui.small(format!(
-                            "{} · {} face{} · {} image{}",
+                            "{} · {} face{}",
                             match person.source {
                                 EffectivePersonSource::Automatic => "Automatic group",
                                 EffectivePersonSource::Manual => "Manual identity",
                             },
                             person.member_count,
                             if person.member_count == 1 { "" } else { "s" },
-                            parent_images.len(),
-                            if parent_images.len() == 1 { "" } else { "s" }
                         ));
 
                         ui.add_space(8.0);
@@ -590,11 +730,8 @@ impl ImageSearchApp {
                         ui.separator();
                         ui.strong("Faces in this Person");
                         let selected_face = self.people_manager_ui.selected_face.clone();
-                        let member_grid = PhotoGridSpec::new(
-                            "people-manager-members",
-                            94.0,
-                            108.0,
-                        );
+                        let member_grid =
+                            PhotoGridSpec::new("people-manager-members", 94.0, 108.0);
                         photo_grid::show(ui, members.len(), member_grid, |ui, index| {
                             let member = &members[index];
                             let key = (member.library_id.clone(), member.face_id.clone());
@@ -634,7 +771,6 @@ impl ImageSearchApp {
                                 ui.small(flags.join(" · "));
                             }
                         });
-
 
                         if let Some((library_id, face_id)) =
                             self.people_manager_ui.selected_face.clone()
