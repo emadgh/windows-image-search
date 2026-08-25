@@ -42,8 +42,8 @@ pub fn load(conn: &Connection) -> Result<EffectivePeopleCatalog> {
     people_management::refresh_manual_cache_from_portable_roots(conn)?;
 
     let active_faces = people_store::active_collection_face_keys(conn)?;
-    let auto_clusters = people_store::load_clusters(conn)?;
-    let auto_members = people_store::load_members(conn)?
+    let (auto_clusters, auto_members) = people_store::load_automatic_snapshot(conn)?;
+    let auto_members = auto_members
         .into_iter()
         .filter(|member| face_is_active(&active_faces, &member.library_id, &member.face_id))
         .collect::<Vec<_>>();
