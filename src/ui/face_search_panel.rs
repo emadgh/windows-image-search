@@ -11,7 +11,6 @@ use crate::face_search::{
 use crate::face_settings::FaceEmbeddingSettings;
 use crate::face_sface_production::SFaceProductionEmbedder;
 use crate::face_similarity::{FaceEmbeddingRevision, FaceSimilarityQuery};
-use crate::people_effective;
 use anyhow::{bail, Context, Result};
 use eframe::egui;
 use std::collections::HashMap;
@@ -31,7 +30,7 @@ struct ExternalFaceChoice {
 
 #[derive(Debug)]
 enum FaceSearchUiMessage {
-    Suggestions(Result<Vec<IndexedFaceSuggestion>, String>),
+    Suggestions(Result<(Vec<IndexedFaceSuggestion>, HashMap<String, String>), String>),
     ExternalPrepared {
         path: PathBuf,
         result: Result<Vec<ExternalFaceChoice>, String>,
@@ -122,10 +121,10 @@ impl ImageSearchApp {
                 FaceSearchUiMessage::Suggestions(result) => {
                     self.face_search_ui.loading = false;
                     match result {
-                        Ok(suggestions) => {
+                        Ok((suggestions, names)) => {
                             let suggestion_count = suggestions.len();
                             self.face_search_ui.suggestions = suggestions;
-                            self.refresh_face_suggestion_names();
+                            self.face_search_ui.suggestion_names = names;
                             let selected_exists = self
                                 .face_search_ui
                                 .selected_face_id
@@ -213,38 +212,6 @@ impl ImageSearchApp {
         }
     }
 
-    fn refresh_face_suggestion_names(&mut self) {
-        self.face_search_ui.suggestion_names.clear();
-        let Ok(conn) = crate::db::open(&self.db_path) else {
-            return;
-        };
-        let Ok(catalog) = people_effective::load(&conn) else {
-            return;
-        };
-        let names = catalog
-            .people
-            .iter()
-            .filter_map(|person| {
-                let name = person.display_name.as_deref()?.trim();
-                (!name.is_empty()).then(|| (person.person_id.as_str(), name.to_owned()))
-            })
-            .collect::<HashMap<_, _>>();
-        for member in &catalog.members {
-            if member.ignored || member.detached {
-                continue;
-            }
-            let Some(person_id) = member.person_id.as_deref() else {
-                continue;
-            };
-            let Some(name) = names.get(person_id) else {
-                continue;
-            };
-            self.face_search_ui
-                .suggestion_names
-                .insert(member.face_id.clone(), name.clone());
-        }
-    }
-
     pub(super) fn refresh_face_suggestions(&mut self) {
         if self.face_search_ui.loading {
             return;
@@ -256,16 +223,17 @@ impl ImageSearchApp {
         self.last_error = None;
         self.status = "Loading People / searchable face suggestions…".to_owned();
         std::thread::spawn(move || {
-            let result = face_search::list_people_representatives(
+            let result = face_search::list_effective_people_representatives(
                 &session_db_path,
                 &roots,
                 DEFAULT_SUGGESTION_LIMIT,
             )
-            .and_then(|people| {
+            .and_then(|(people, names)| {
                 if people.is_empty() {
                     face_search::list_searchable_faces(&roots, DEFAULT_SUGGESTION_LIMIT)
+                        .map(|faces| (faces, HashMap::new()))
                 } else {
-                    Ok(people)
+                    Ok((people, names))
                 }
             })
             .map_err(|err| format!("{err:#}"));
@@ -452,7 +420,7 @@ impl ImageSearchApp {
                     "Choose a detected face already stored in the database, or load any image and choose one of its detected faces.",
                 );
                 ui.small(
-                    "Database suggestions prefer one representative per automatic Person group. Before a People snapshot exists, they fall back to individual face instances.",
+                    "Database suggestions prefer one representative per effective Person group. Before a People snapshot exists, they fall back to individual face instances.",
                 );
 
                 ui.add_space(8.0);

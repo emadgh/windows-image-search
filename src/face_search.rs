@@ -1,6 +1,6 @@
 use crate::face_detection::{FaceBox, FaceLandmark};
 use crate::face_similarity::{self, FaceSimilarityOptions, FaceSimilarityQuery};
-use crate::{db, people_store, portable};
+use crate::{db, people_effective, portable};
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::collections::HashMap;
@@ -74,17 +74,28 @@ pub fn list_people_representatives(
     roots: &[PathBuf],
     limit: usize,
 ) -> Result<Vec<IndexedFaceSuggestion>> {
+    Ok(list_effective_people_representatives(session_db_path, roots, limit)?.0)
+}
+
+/// Load the effective People catalog once and return the representative face
+/// suggestions together with any manual display names needed by Face Search.
+/// This avoids rebuilding the full People catalog again on the UI thread just
+/// to decorate the already-loaded representatives with names.
+pub fn list_effective_people_representatives(
+    session_db_path: &Path,
+    roots: &[PathBuf],
+    limit: usize,
+) -> Result<(Vec<IndexedFaceSuggestion>, HashMap<String, String>)> {
     let limit = limit.clamp(1, 2_000);
     if roots.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), HashMap::new()));
     }
 
     let conn = db::open(session_db_path)
         .with_context(|| format!("opening People catalog {}", session_db_path.display()))?;
-    people_store::ensure_schema(&conn)?;
-    let clusters = people_store::load_clusters(&conn)?;
-    if clusters.is_empty() {
-        return Ok(Vec::new());
+    let catalog = people_effective::load(&conn)?;
+    if catalog.people.is_empty() {
+        return Ok((Vec::new(), HashMap::new()));
     }
 
     let mut roots_by_library: HashMap<String, PathBuf> = HashMap::new();
@@ -101,25 +112,39 @@ pub fn list_people_representatives(
     }
 
     let mut suggestions = Vec::new();
-    for cluster in clusters {
+    let mut names = HashMap::new();
+    for person in catalog.people {
         if suggestions.len() >= limit {
             break;
         }
-        let Some(root) = roots_by_library.get(&cluster.representative_library_id) else {
+        let Some((library_id, face_id)) = person
+            .representative_library_id
+            .as_deref()
+            .zip(person.representative_face_id.as_deref())
+        else {
+            continue;
+        };
+        let Some(root) = roots_by_library.get(library_id) else {
             continue;
         };
         let Ok(root_conn) = open_read_only(root) else {
             continue;
         };
-        let Some(mut suggestion) =
-            load_searchable_face_by_id(&root_conn, root, &cluster.representative_face_id)?
-        else {
+        let Some(mut suggestion) = load_searchable_face_by_id(&root_conn, root, face_id)? else {
             continue;
         };
-        suggestion.group_size = Some(cluster.member_count);
+        suggestion.group_size = Some(person.member_count);
+        if let Some(name) = person
+            .display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            names.insert(suggestion.face_id.clone(), name.to_owned());
+        }
         suggestions.push(suggestion);
     }
-    Ok(suggestions)
+    Ok((suggestions, names))
 }
 
 pub fn resolve_searchable_face(

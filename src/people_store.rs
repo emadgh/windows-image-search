@@ -1,7 +1,7 @@
 use crate::{db, portable};
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub const ALGORITHM_REVISION: i64 = 3;
@@ -107,7 +107,8 @@ pub fn replace_automatic_snapshot(
 ) -> Result<()> {
     validate_snapshot(state, clusters, members)?;
     write_snapshot_local(conn, state, clusters, members)?;
-    mirror_snapshot_to_portable_roots(conn, state, clusters, members)
+    mirror_snapshot_to_portable_roots(conn, state, clusters, members)?;
+    record_cache_roots(conn)
 }
 
 /// Rebuild the disposable session People snapshot from currently attached and
@@ -160,12 +161,27 @@ pub fn refresh_cache_from_portable_roots(conn: &Connection) -> Result<()> {
 
     let Some(state) = state else {
         clear_snapshot_local(conn)?;
+        record_cache_roots(conn)?;
         return Ok(());
     };
 
     let members = members_by_key.into_values().collect::<Vec<_>>();
     let clusters = rebuild_clusters(&members, &cluster_candidates);
-    write_snapshot_local(conn, &state, &clusters, &members)
+    write_snapshot_local(conn, &state, &clusters, &members)?;
+    record_cache_roots(conn)
+}
+
+/// Read the disposable automatic People snapshot. A full portable-root rebuild
+/// is only required when the currently attached/available root set differs from
+/// the root set that produced the session cache. This keeps normal People reads
+/// O(session rows) instead of rewriting every portable shard on every window open.
+pub fn load_automatic_snapshot(
+    conn: &Connection,
+) -> Result<(Vec<PersonCluster>, Vec<PersonClusterMember>)> {
+    if !cache_roots_match(conn)? {
+        refresh_cache_from_portable_roots(conn)?;
+    }
+    Ok((load_clusters_local(conn)?, load_members_local(conn)?))
 }
 
 /// Return the face identities whose source images still belong to at least one
@@ -291,6 +307,53 @@ fn mirror_snapshot_to_portable_roots(
         let root_conn = db::open(&db_path)
             .with_context(|| format!("opening portable People shard {}", db_path.display()))?;
         write_snapshot_local(&root_conn, state, &local_clusters, &local_members)?;
+    }
+    Ok(())
+}
+
+fn cache_roots_match(conn: &Connection) -> Result<bool> {
+    if !is_session_connection(conn)? {
+        return Ok(true);
+    }
+    if !table_exists(conn, "people_cache_roots")? {
+        return Ok(false);
+    }
+
+    let current = attached_portable_roots(conn)?
+        .into_iter()
+        .map(|(library_id, root)| (library_id, root.to_string_lossy().to_string()))
+        .collect::<BTreeSet<_>>();
+    let mut stmt = conn.prepare(
+        "SELECT library_id, root_path FROM people_cache_roots ORDER BY library_id, root_path",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let cached = rows
+        .collect::<std::result::Result<BTreeSet<_>, _>>()
+        .context("loading cached People root set")?;
+    Ok(current == cached)
+}
+
+fn record_cache_roots(conn: &Connection) -> Result<()> {
+    if !is_session_connection(conn)? {
+        return Ok(());
+    }
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS people_cache_roots (
+            library_id TEXT NOT NULL,
+            root_path TEXT NOT NULL,
+            PRIMARY KEY(library_id, root_path)
+        );
+        DELETE FROM people_cache_roots;
+        "#,
+    )?;
+    for (library_id, root) in attached_portable_roots(conn)? {
+        conn.execute(
+            "INSERT INTO people_cache_roots(library_id, root_path) VALUES(?1, ?2)",
+            params![library_id, root.to_string_lossy().to_string()],
+        )?;
     }
     Ok(())
 }
