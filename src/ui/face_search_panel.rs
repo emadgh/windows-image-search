@@ -518,7 +518,7 @@ impl ImageSearchApp {
                                 {
                                     photo_grid::photo_tile(ui, &texture, egui::vec2(104.0, 104.0), PhotoTileMode::Face(face.bbox), is_selected, egui::Sense::click())
                                 } else {
-                                    ui.add_sized([104.0, 104.0], egui::Button::new("Loading…"))
+                                    photo_grid::loading_tile(ui, egui::vec2(104.0, 104.0), is_selected, egui::Sense::click())
                                 };
                                 if response.clicked() {
                                     self.face_search_ui.selected_external_ordinal = Some(face.ordinal);
@@ -590,16 +590,12 @@ impl ImageSearchApp {
                             egui::Sense::click(),
                         )
                     } else {
-                        let response = ui.add_sized([96.0, 96.0], egui::Button::new("Loading…"));
-                        if is_selected {
-                            ui.painter().rect_stroke(
-                                response.rect,
-                                5.0,
-                                egui::Stroke::new(3.0, ui.visuals().selection.stroke.color),
-                                egui::StrokeKind::Inside,
-                            );
-                        }
-                        response
+                        photo_grid::loading_tile(
+                            ui,
+                            egui::vec2(96.0, 96.0),
+                            is_selected,
+                            egui::Sense::click(),
+                        )
                     };
                     if response.clicked() {
                         self.face_search_ui.selected_face_id = Some(face.face_id.clone());

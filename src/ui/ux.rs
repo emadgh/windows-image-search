@@ -3,6 +3,33 @@ use eframe::egui;
 use std::path::PathBuf;
 
 impl ImageSearchApp {
+    pub(super) fn handle_result_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.wants_keyboard_input() || self.settings_open || self.close_confirmation_open {
+            return;
+        }
+
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.selected_paths.clear();
+        }
+
+        if ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::A)) {
+            let source = self.source();
+            let paths = self
+                .visible_indices()
+                .into_iter()
+                .filter_map(|index| source.get(index).map(|record| record.path.clone()))
+                .collect::<Vec<_>>();
+            self.selected_paths.clear();
+            self.selected_paths.extend(paths);
+        }
+
+        if ctx.input(|input| input.key_pressed(egui::Key::Enter)) {
+            if let Some(path) = self.selected_path() {
+                let _ = open::that(path);
+            }
+        }
+    }
+
     pub(super) fn show_error_banner(&mut self, ctx: &egui::Context) {
         let Some(error) = self.last_error.clone() else {
             return;

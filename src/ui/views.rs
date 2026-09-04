@@ -64,19 +64,12 @@ impl ImageSearchApp {
                 }
                 response
             } else {
-                let response = ui.add_sized(
-                    [self.thumb_size, self.thumb_size],
-                    egui::Button::new("Loading thumbnail…").sense(egui::Sense::click_and_drag()),
-                );
-                if selected {
-                    ui.painter().rect_stroke(
-                        response.rect,
-                        5.0,
-                        egui::Stroke::new(3.0, ui.visuals().selection.stroke.color),
-                        egui::StrokeKind::Inside,
-                    );
-                }
-                response
+                photo_grid::loading_tile(
+                    ui,
+                    egui::vec2(self.thumb_size, self.thumb_size),
+                    selected,
+                    egui::Sense::click_and_drag(),
+                )
             };
 
             self.handle_result_response(&response, &record.path);
@@ -133,9 +126,11 @@ impl ImageSearchApp {
                             }
                             response
                         } else {
-                            ui.add_sized(
-                                [widths.thumb, 54.0],
-                                egui::Button::new("…").sense(egui::Sense::click_and_drag()),
+                            photo_grid::loading_tile(
+                                ui,
+                                egui::vec2(widths.thumb, 54.0),
+                                selected,
+                                egui::Sense::click_and_drag(),
                             )
                         };
                         self.handle_result_response(&response, &record.path);

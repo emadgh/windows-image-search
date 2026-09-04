@@ -43,6 +43,27 @@ pub(super) enum ThumbnailFit {
     Cover,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SortMode {
+    Relevance,
+    Name,
+    Modified,
+    Size,
+    Resolution,
+}
+
+impl SortMode {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Relevance => "Relevance",
+            Self::Name => "Name",
+            Self::Modified => "Modified",
+            Self::Size => "File size",
+            Self::Resolution => "Resolution",
+        }
+    }
+}
+
 enum StartupMessage {
     Stage {
         status: String,
@@ -93,6 +114,7 @@ pub struct ImageSearchApp {
     pub(super) view_mode: ViewMode,
     pub(super) thumb_size: f32,
     pub(super) thumb_fit: ThumbnailFit,
+    pub(super) sort_mode: SortMode,
     pub(super) textures: HashMap<PathBuf, TextureHandle>,
     texture_lru: TextureLru,
     pub(super) selected_paths: HashSet<PathBuf>,
@@ -219,6 +241,7 @@ impl ImageSearchApp {
             view_mode: ViewMode::Grid,
             thumb_size: 168.0,
             thumb_fit: ThumbnailFit::Contain,
+            sort_mode: SortMode::Relevance,
             textures: HashMap::new(),
             texture_lru: TextureLru::new(DEFAULT_GPU_TEXTURE_CAPACITY),
             selected_paths: HashSet::new(),
@@ -697,7 +720,8 @@ impl ImageSearchApp {
 
     pub(super) fn visible_indices(&self) -> Vec<usize> {
         let text_filter_active = !self.search_text.trim().is_empty();
-        self.source()
+        let source = self.source();
+        let mut visible = source
             .iter()
             .enumerate()
             .filter(|(_, record)| {
@@ -720,7 +744,27 @@ impl ImageSearchApp {
                         <= self.color_tolerance
             })
             .map(|(index, _)| index)
-            .collect()
+            .collect::<Vec<_>>();
+
+        match self.sort_mode {
+            SortMode::Relevance => {}
+            SortMode::Name => visible.sort_by(|a, b| {
+                source[*a]
+                    .file_name
+                    .to_lowercase()
+                    .cmp(&source[*b].file_name.to_lowercase())
+            }),
+            SortMode::Modified => {
+                visible.sort_by(|a, b| source[*b].modified.cmp(&source[*a].modified))
+            }
+            SortMode::Size => visible.sort_by(|a, b| source[*b].size.cmp(&source[*a].size)),
+            SortMode::Resolution => visible.sort_by(|a, b| {
+                let a_pixels = source[*a].width as u64 * source[*a].height as u64;
+                let b_pixels = source[*b].width as u64 * source[*b].height as u64;
+                b_pixels.cmp(&a_pixels)
+            }),
+        }
+        visible
     }
 
     fn observe_text_search_input(&mut self) {
@@ -872,6 +916,7 @@ impl eframe::App for ImageSearchApp {
         self.observe_text_search_input();
         self.dispatch_text_search_if_due();
         self.process_text_search_results();
+        self.handle_result_shortcuts(ctx);
 
         if self.text_search_pending
             || self.text_search_due.is_some()
@@ -897,11 +942,11 @@ impl eframe::App for ImageSearchApp {
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.strong("Windows Image Search");
-                if ui.button("⚙ Settings").clicked() {
+                if ui.button("Settings").clicked() {
                     self.settings_open = true;
                 }
                 if ui
-                    .add_enabled(!self.busy, egui::Button::new("👥 People"))
+                    .add_enabled(!self.busy, egui::Button::new("People"))
                     .clicked()
                 {
                     self.open_people_manager();
@@ -909,7 +954,7 @@ impl eframe::App for ImageSearchApp {
                 if ui
                     .add_enabled(
                         !self.busy && !self.roots.is_empty(),
-                        egui::Button::new("⟳ Rescan"),
+                        egui::Button::new("Rescan"),
                     )
                     .clicked()
                 {
@@ -985,20 +1030,37 @@ impl eframe::App for ImageSearchApp {
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let view_label = match self.view_mode {
-                        ViewMode::Grid => "▦ Grid",
-                        ViewMode::Details => "☷ Details",
-                    };
-                    if ui.button(view_label).clicked() {
-                        self.view_mode = match self.view_mode {
-                            ViewMode::Grid => ViewMode::Details,
-                            ViewMode::Details => ViewMode::Grid,
-                        };
-                    }
+                    egui::ComboBox::from_id_salt("result-sort")
+                        .selected_text(self.sort_mode.label())
+                        .width(112.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.sort_mode,
+                                SortMode::Relevance,
+                                "Relevance",
+                            );
+                            ui.selectable_value(&mut self.sort_mode, SortMode::Name, "Name");
+                            ui.selectable_value(
+                                &mut self.sort_mode,
+                                SortMode::Modified,
+                                "Modified",
+                            );
+                            ui.selectable_value(&mut self.sort_mode, SortMode::Size, "File size");
+                            ui.selectable_value(
+                                &mut self.sort_mode,
+                                SortMode::Resolution,
+                                "Resolution",
+                            );
+                        });
+                    ui.small("Sort");
+                    ui.separator();
+                    ui.selectable_value(&mut self.view_mode, ViewMode::Details, "Details");
+                    ui.selectable_value(&mut self.view_mode, ViewMode::Grid, "Grid");
+                    ui.separator();
 
                     let fit_label = match self.thumb_fit {
-                        ThumbnailFit::Contain => "Contain",
-                        ThumbnailFit::Cover => "Cover",
+                        ThumbnailFit::Contain => "Fit: Contain",
+                        ThumbnailFit::Cover => "Fit: Cover",
                     };
                     if ui.button(fit_label).clicked() {
                         self.thumb_fit = match self.thumb_fit {
@@ -1009,7 +1071,7 @@ impl eframe::App for ImageSearchApp {
 
                     ui.add(
                         egui::Slider::new(&mut self.thumb_size, 96.0..=512.0)
-                            .text("Thumbnail")
+                            .text("Size")
                             .suffix(" px"),
                     );
                 });
