@@ -1,0 +1,43 @@
+name: Normalize updater dependency lock
+
+on:
+  push:
+    branches:
+      - feat/automatic-github-updates
+
+permissions:
+  contents: write
+
+jobs:
+  normalize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/automatic-github-updates
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Restore lock and resolve updater only
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('Cargo.toml')
+          text = path.read_text()
+          old = 'update-via-github = { git = "https://github.com/emadgh/update-via-github.git", rev = "122a89ba8b9b00baf002453a10d829095b59b8a3" }'
+          new = 'update-via-github = { git = "https://github.com/emadgh/update-via-github.git" }'
+          if old not in text:
+              raise SystemExit('temporary updater revision not found')
+          path.write_text(text.replace(old, new, 1))
+          PY
+          git show origin/main:Cargo.lock > Cargo.lock
+          cargo metadata --format-version 1 > /dev/null
+      - name: Commit normalized dependency graph
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "build: normalize shared updater dependency"
+          git push origin HEAD:feat/automatic-github-updates
