@@ -44,7 +44,8 @@ impl ImageSearchApp {
                 };
 
                 if let Some(texture) = self.thumbnail(&record.path) {
-                    super::views::show_query_preview(ui, &texture, ui.available_width().min(300.0));
+                    let preview_width = ui.available_width().min(300.0);
+                    super::views::show_query_preview(ui, &texture, preview_width);
                 } else {
                     ui.vertical_centered(|ui| {
                         ui.spinner();
