@@ -161,6 +161,18 @@ impl ImageSearchApp {
         self.people_filter_ui.resolved.matches(path)
     }
 
+    pub(super) fn people_filter_selected_count(&self) -> usize {
+        self.people_filter_ui.selected_person_ids.len()
+    }
+
+    pub(super) fn clear_people_filter(&mut self) {
+        if self.people_filter_ui.selected_person_ids.is_empty() {
+            return;
+        }
+        self.people_filter_ui.selected_person_ids.clear();
+        self.request_people_filter_resolution();
+    }
+
     pub(super) fn people_filter_work_pending(&self) -> bool {
         self.people_filter_ui.catalog_loading || self.people_filter_ui.resolving
     }

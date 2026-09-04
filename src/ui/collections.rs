@@ -175,6 +175,49 @@ impl ImageSearchApp {
         self.collections.filter_matches(path)
     }
 
+    pub(super) fn collection_filter_chip(&self) -> Option<String> {
+        let id = self.collections.active_filter?;
+        self.collections
+            .items
+            .iter()
+            .find(|item| item.id == id)
+            .map(|item| format!("Collection: {}", item.name))
+    }
+
+    pub(super) fn clear_collection_filter(&mut self) {
+        self.collections.active_filter = None;
+    }
+
+    pub(super) fn prompt_add_library_folder(&mut self) {
+        if self.busy {
+            return;
+        }
+        let Some(folder) = rfd::FileDialog::new().pick_folder() else {
+            return;
+        };
+
+        let collection_id = if let Some(id) = self.collections.selected_manage {
+            id
+        } else if let Some(item) = self.collections.items.first() {
+            item.id
+        } else {
+            match db::create_collection(&self.db_path, "Library") {
+                Ok(created) => {
+                    self.collections.selected_manage = Some(created.id);
+                    created.id
+                }
+                Err(err) => {
+                    self.last_error = Some(format!(
+                        "Cannot create the default Library collection: {err:#}"
+                    ));
+                    return;
+                }
+            }
+        };
+
+        self.apply_collection_action(CollectionAction::Drop(collection_id, vec![folder]));
+    }
+
     pub(super) fn attach_collection_drag_source(&self, response: &egui::Response, path: &Path) {
         let paths = if self.selected_paths.contains(path) && self.selected_paths.len() > 1 {
             self.selected_paths.iter().cloned().collect()

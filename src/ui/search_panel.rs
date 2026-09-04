@@ -64,10 +64,7 @@ impl ImageSearchApp {
                             if let Some(texture) = self.thumbnail(&query) {
                                 super::views::show_query_preview(ui, &texture, 220.0);
                             } else {
-                                ui.add_sized(
-                                    [220.0, 140.0],
-                                    egui::Label::new("Loading preview…"),
-                                );
+                                ui.add_sized([220.0, 140.0], egui::Label::new("Loading preview…"));
                             }
                             ui.small(super::views::truncate_middle(
                                 &query.display().to_string(),

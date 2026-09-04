@@ -453,7 +453,7 @@ pub(super) fn color_distance(a: [u8; 3], b: [u8; 3]) -> f32 {
     (distance / 765.0).clamp(0.0, 1.0)
 }
 
-fn format_bytes(bytes: u64) -> String {
+pub(super) fn format_bytes(bytes: u64) -> String {
     let value = bytes as f64;
     if value >= 1024.0 * 1024.0 * 1024.0 {
         format!("{:.1} GB", value / 1024.0 / 1024.0 / 1024.0)

@@ -1,12 +1,15 @@
 mod collections;
 mod face_runtime;
 mod face_search_panel;
+mod inspector;
 mod people_filter;
 mod people_manager;
 mod photo_grid;
+mod search_panel;
 mod settings_window;
 mod texture_lru;
 mod thumbnails;
+mod ux;
 mod views;
 
 use crate::db::{self, ImageSummary};
@@ -815,167 +818,6 @@ impl ImageSearchApp {
         settings_window::show(self, ctx);
     }
 
-    fn show_search_sidebar(&mut self, ctx: &egui::Context) {
-        egui::SidePanel::left("search_sidebar")
-            .resizable(true)
-            .default_width(330.0)
-            .min_width(280.0)
-            .max_width(470.0)
-            .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.heading("Search");
-                    self.show_collection_filter(ui);
-                    self.show_people_filter(ui);
-                    ui.add_space(6.0);
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.search_text)
-                            .hint_text("filename, path, description, keywords…")
-                            .desired_width(f32::INFINITY),
-                    );
-                    if self.text_search_pending {
-                        ui.small("Searching indexed text…");
-                    }
-
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add_enabled(
-                                self.can_run_similarity_search(),
-                                egui::Button::new("◉ Search by image"),
-                            )
-                            .clicked()
-                        {
-                            self.choose_similarity_image();
-                        }
-                        if self.similarity_results.is_some()
-                            && ui.button("Clear image search").clicked()
-                        {
-                            self.similarity_results = None;
-                            self.query_image = None;
-                            self.selected_paths.clear();
-                            self.clear_face_search_result_state();
-                        }
-                        if ui
-                            .add_enabled(!self.busy, egui::Button::new("👤 Face Search"))
-                            .clicked()
-                        {
-                            self.open_face_search();
-                        }
-                    });
-                    if self.indexing && !self.index_paused {
-                        ui.small("Pause indexing to search the already committed images.");
-                    } else if self.indexing && self.index_paused {
-                        ui.small("Indexing is paused; image search uses committed data only.");
-                    }
-
-                    if let Some(query) = self.query_image.clone() {
-                        ui.add_space(8.0);
-                        ui.strong("Similarity query");
-                        if let Some(texture) = self.thumbnail(&query) {
-                            views::show_query_preview(ui, &texture, 220.0);
-                        } else {
-                            ui.add_sized([220.0, 150.0], egui::Label::new("Loading preview…"));
-                        }
-                        ui.small(views::truncate_middle(&query.display().to_string(), 46))
-                            .on_hover_text(query.display().to_string());
-                    }
-
-                    ui.add_space(10.0);
-                    ui.separator();
-                    ui.strong("Color filter");
-                    ui.checkbox(&mut self.color_enabled, "Enable explicit color filter");
-                    if self.color_enabled {
-                        ui.horizontal(|ui| {
-                            ui.color_edit_button_srgb(&mut self.target_color);
-                            ui.add(
-                                egui::Slider::new(&mut self.color_tolerance, 0.03..=0.70)
-                                    .text("Tolerance"),
-                            );
-                        });
-                    }
-
-                    ui.add_space(10.0);
-                    ui.separator();
-                    ui.strong("Similarity weights");
-                    ui.small("Relative weights are normalized automatically.");
-                    ui.add(
-                        egui::Slider::new(
-                            &mut self.similarity_settings.color_distribution_weight,
-                            0.0..=100.0,
-                        )
-                        .text("Color distribution")
-                        .suffix("%"),
-                    );
-                    ui.add(
-                        egui::Slider::new(
-                            &mut self.similarity_settings.texture_weight,
-                            0.0..=100.0,
-                        )
-                        .text("Texture / pattern")
-                        .suffix("%"),
-                    );
-                    ui.add(
-                        egui::Slider::new(&mut self.similarity_settings.clip_weight, 0.0..=100.0)
-                            .text("CLIP semantic")
-                            .suffix("%"),
-                    );
-                    ui.add(
-                        egui::Slider::new(
-                            &mut self.similarity_settings.dominant_color_weight,
-                            0.0..=100.0,
-                        )
-                        .text("Dominant color")
-                        .suffix("%"),
-                    );
-                    ui.checkbox(
-                        &mut self.similarity_settings.strict_color_rejection,
-                        "Reject color mismatches",
-                    );
-                    if self.similarity_settings.strict_color_rejection {
-                        ui.add(
-                            egui::Slider::new(
-                                &mut self.similarity_settings.min_color_distribution_match,
-                                0.0..=100.0,
-                            )
-                            .text("Min color-distribution match")
-                            .suffix("%"),
-                        );
-                        ui.add(
-                            egui::Slider::new(
-                                &mut self.similarity_settings.max_dominant_color_difference,
-                                5.0..=100.0,
-                            )
-                            .text("Max dominant-color difference")
-                            .suffix("%"),
-                        );
-                    }
-                    ui.horizontal(|ui| {
-                        if ui.button("Reset 44 / 31 / 20 / 5").clicked() {
-                            self.similarity_settings = indexer::SimilaritySettings::default();
-                        }
-                        if ui
-                            .add_enabled(
-                                self.query_image.is_some() && self.can_run_similarity_search(),
-                                egui::Button::new("Apply / re-run"),
-                            )
-                            .clicked()
-                        {
-                            self.rerun_similarity_search();
-                        }
-                    });
-
-                    if !self.selected_paths.is_empty() {
-                        ui.add_space(8.0);
-                        ui.small(format!("{} selected", self.selected_paths.len()));
-                    }
-                    if let Some(error) = &self.last_error {
-                        ui.add_space(8.0);
-                        ui.colored_label(egui::Color32::LIGHT_RED, error);
-                    }
-                });
-            });
-    }
-
     fn show_close_confirmation(&mut self, ctx: &egui::Context) {
         if !self.close_confirmation_open {
             return;
@@ -1046,6 +888,7 @@ impl eframe::App for ImageSearchApp {
             self.close_confirmation_open = true;
         }
         self.show_close_confirmation(ctx);
+        self.show_error_banner(ctx);
 
         if self.busy || self.face_model_download_running() {
             ctx.request_repaint_after(Duration::from_millis(50));
@@ -1081,6 +924,7 @@ impl eframe::App for ImageSearchApp {
         });
 
         self.show_search_sidebar(ctx);
+        self.show_inspector(ctx);
         self.show_settings_window(ctx);
         self.show_face_search_window(ctx);
         self.show_people_manager_window(ctx);
@@ -1171,14 +1015,10 @@ impl eframe::App for ImageSearchApp {
                 });
             });
             ui.separator();
+            self.show_active_filter_chips(ui);
+            self.show_selection_bar(ui);
             if visible.is_empty() {
-                ui.centered_and_justified(|ui| {
-                    ui.label(if self.images.is_empty() {
-                        "No indexed images yet. Open Settings to add a folder, then Rescan."
-                    } else {
-                        "No images match the current filters."
-                    });
-                });
+                self.show_empty_state(ui);
             } else if self.view_mode == ViewMode::Grid {
                 self.show_grid(ui, &visible);
             } else {

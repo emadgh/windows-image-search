@@ -32,7 +32,12 @@ impl ImageSearchApp {
                     .iter()
                     .find(|record| record.path == path)
                     .cloned()
-                    .or_else(|| self.images.iter().find(|record| record.path == path).cloned());
+                    .or_else(|| {
+                        self.images
+                            .iter()
+                            .find(|record| record.path == path)
+                            .cloned()
+                    });
                 let Some(record) = record else {
                     ui.label("The selected image is no longer available in the active catalog.");
                     return;
@@ -73,7 +78,8 @@ impl ImageSearchApp {
                 ui.horizontal(|ui| {
                     let [r, g, b] = record.dominant;
                     let color = egui::Color32::from_rgb(r, g, b);
-                    let (rect, _) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
                     ui.painter().rect_filled(rect, 4.0, color);
                     ui.label(format!("Dominant #{r:02X}{g:02X}{b:02X}"));
                 });
