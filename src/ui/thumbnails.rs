@@ -158,15 +158,16 @@ impl SchedulerState {
 }
 
 pub struct ThumbnailPool {
-    fallback_cache_dir: PathBuf,
+    // Kept only long enough to migrate caches created by older builds. New
+    // thumbnails must never be persisted here.
+    legacy_cache_dir: PathBuf,
     roots: Arc<RwLock<Vec<PathBuf>>>,
     scheduler: Arc<(Mutex<SchedulerState>, Condvar)>,
     result_rx: Receiver<ThumbnailResult>,
 }
 
 impl ThumbnailPool {
-    pub fn new(fallback_cache_dir: PathBuf, roots: Vec<PathBuf>) -> Self {
-        let _ = std::fs::create_dir_all(&fallback_cache_dir);
+    pub fn new(legacy_cache_dir: PathBuf, roots: Vec<PathBuf>) -> Self {
         let (result_tx, result_rx) = mpsc::channel::<ThumbnailResult>();
         let scheduler = Arc::new((Mutex::new(SchedulerState::default()), Condvar::new()));
         let roots = Arc::new(RwLock::new(roots));
@@ -180,7 +181,6 @@ impl ThumbnailPool {
             let scheduler = Arc::clone(&scheduler);
             let roots = Arc::clone(&roots);
             let tx = result_tx.clone();
-            let fallback_cache = fallback_cache_dir.clone();
             std::thread::spawn(move || loop {
                 let job = {
                     let (lock, wake) = &*scheduler;
@@ -199,7 +199,7 @@ impl ThumbnailPool {
                     }
                 };
 
-                let result = match load_or_build(&fallback_cache, &roots, &job.path) {
+                let result = match load_or_build(&roots, &job.path) {
                     Some((width, height, rgba)) => ThumbnailResult::Ready {
                         path: job.path.clone(),
                         width,
@@ -222,7 +222,7 @@ impl ThumbnailPool {
         }
 
         Self {
-            fallback_cache_dir,
+            legacy_cache_dir,
             roots,
             scheduler,
             result_rx,
@@ -258,8 +258,9 @@ impl ThumbnailPool {
     }
 
     pub fn clear_cache(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.fallback_cache_dir);
-        let _ = std::fs::create_dir_all(&self.fallback_cache_dir);
+        // A legacy AppData cache may still exist after upgrading. Remove it, but
+        // never recreate it: all persistent thumbnails now belong to a root.
+        let _ = std::fs::remove_dir_all(&self.legacy_cache_dir);
         if let Ok(roots) = self.roots.read() {
             for root in roots.iter() {
                 let cache = portable::thumbnail_dir(root);
@@ -274,16 +275,28 @@ impl ThumbnailPool {
         }
     }
 
-    pub fn cache_dir(&self) -> &Path {
-        &self.fallback_cache_dir
+    /// Delete the old AppData thumbnail cache after portable-root migration has
+    /// completed. This is intentionally separate from construction because
+    /// startup may still need the old cache as a migration source.
+    pub fn retire_legacy_cache(&self) {
+        let _ = std::fs::remove_dir_all(&self.legacy_cache_dir);
+    }
+
+    pub fn cache_dirs(&self) -> Vec<PathBuf> {
+        self.roots
+            .read()
+            .map(|roots| {
+                roots
+                    .iter()
+                    .filter(|root| portable::is_indexed_root(root))
+                    .map(|root| portable::thumbnail_dir(root))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
 
-fn load_or_build(
-    fallback_cache: &Path,
-    roots: &RwLock<Vec<PathBuf>>,
-    source: &Path,
-) -> Option<(usize, usize, Vec<u8>)> {
+fn load_or_build(roots: &RwLock<Vec<PathBuf>>, source: &Path) -> Option<(usize, usize, Vec<u8>)> {
     let root = roots
         .read()
         .ok()
@@ -300,9 +313,24 @@ fn load_or_build(
                 thumbnail_cache::load_or_build_for_root(&root, source)
             }
         }
-        _ => thumbnail_cache::load_or_build(fallback_cache, source),
+        // Query/reference images outside attached indexed roots are transient.
+        // Decode a small in-memory preview, but do not leave a cache on C:/AppData.
+        _ => load_transient(source),
     }?;
     Some(to_rgba(image))
+}
+
+fn load_transient(source: &Path) -> Option<DynamicImage> {
+    if std::fs::metadata(source).ok()?.len() > settings::DIRECT_DECODE_MAX_FILE_SIZE_BYTES {
+        return None;
+    }
+    let image = image::ImageReader::open(source)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .decode()
+        .ok()?;
+    Some(image.thumbnail(thumbnail_cache::CACHE_EDGE, thumbnail_cache::CACHE_EDGE))
 }
 
 fn to_rgba(image: DynamicImage) -> (usize, usize, Vec<u8>) {
@@ -317,6 +345,54 @@ fn to_rgba(image: DynamicImage) -> (usize, usize, Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "wis-thumbnail-pool-{label}-{}-{nonce}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn constructor_does_not_create_legacy_appdata_cache() {
+        let legacy = temp_dir("legacy-not-created");
+        assert!(!legacy.exists());
+        let pool = ThumbnailPool::new(legacy.clone(), Vec::new());
+        assert!(!legacy.exists());
+        drop(pool);
+    }
+
+    #[test]
+    fn transient_thumbnail_does_not_write_legacy_cache() {
+        use image::{ImageBuffer, Rgb};
+        let dir = temp_dir("transient");
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("query.png");
+        image::DynamicImage::ImageRgb8(ImageBuffer::from_pixel(900, 700, Rgb([4, 5, 6])))
+            .save(&source)
+            .unwrap();
+        let legacy = dir.join("legacy-cache");
+        let roots = RwLock::new(Vec::new());
+        let (width, height, _) = load_or_build(&roots, &source).unwrap();
+        assert!(width <= thumbnail_cache::CACHE_EDGE as usize);
+        assert!(height <= thumbnail_cache::CACHE_EDGE as usize);
+        assert!(!legacy.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn retire_legacy_cache_removes_upgrade_leftovers() {
+        let legacy = temp_dir("legacy-retire");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("old.jpg"), b"old").unwrap();
+        let pool = ThumbnailPool::new(legacy.clone(), Vec::new());
+        pool.retire_legacy_cache();
+        assert!(!legacy.exists());
+    }
 
     #[test]
     fn newest_viewport_request_is_popped_first() {

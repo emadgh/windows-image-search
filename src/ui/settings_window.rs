@@ -635,7 +635,7 @@ fn settings_storage(app: &mut ImageSearchApp, ui: &mut egui::Ui, effects: &mut E
     section_title(
         ui,
         "Storage",
-        "Inspect local application state and manage disposable thumbnail cache data.",
+        "Inspect application state and manage portable per-library thumbnail caches.",
     );
 
     ui.strong("Face model attribution");
@@ -649,13 +649,19 @@ fn settings_storage(app: &mut ImageSearchApp, ui: &mut egui::Ui, effects: &mut E
 
     ui.add_space(12.0);
     ui.strong("Thumbnail cache");
-    ui.label(format!(
-        "Location: {}",
-        app.thumb_pool.cache_dir().display()
-    ));
+    ui.label("Persistent thumbnails are stored with each indexed folder under `.imagesearch/thumbnails`.");
+    let thumbnail_dirs = app.thumb_pool.cache_dirs();
+    if thumbnail_dirs.is_empty() {
+        ui.small("No portable thumbnail cache is attached yet.");
+    } else {
+        for cache in thumbnail_dirs {
+            ui.small(cache.display().to_string());
+        }
+    }
+    ui.small("Images outside indexed roots are decoded transiently for preview and are not cached to AppData/C:.");
     ui.label("Cached previews are generated at up to 512 px on background worker threads.");
     ui.small(format!(
-        "GPU/UI thumbnail textures: {} / {} active (LRU bounded; disk cache survives eviction).",
+        "GPU/UI thumbnail textures: {} / {} active (LRU bounded; portable disk cache survives eviction).",
         app.textures.len(),
         app.texture_lru.capacity()
     ));

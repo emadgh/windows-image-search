@@ -232,7 +232,9 @@ impl ImageSearchApp {
         let (tx, rx) = std::sync::mpsc::channel();
         let (startup_tx, startup_rx) = std::sync::mpsc::channel();
         let app_data_dir = db_path.parent().unwrap_or_else(|| Path::new("."));
-        let thumbnail_cache = thumbnail_cache::cache_dir_for_db(&db_path);
+        // This path is retained only so older AppData thumbnail caches can be
+        // migrated into each root's portable `.imagesearch/thumbnails` folder.
+        let legacy_thumbnail_cache = thumbnail_cache::cache_dir_for_db(&db_path);
         let settings_path = app_data_dir.join("performance-settings.ini");
         let indexing_settings = settings::load(&settings_path);
         let update_settings_path = app_data_dir.join("update-settings.ini");
@@ -261,7 +263,7 @@ impl ImageSearchApp {
         let embedding_service = EmbeddingService::new(model_cache);
         let text_search_service = TextSearchService::new(db_path.clone());
         let fs_watch_service = FsWatchService::new(Vec::new());
-        let thumb_pool = ThumbnailPool::new(thumbnail_cache, Vec::new());
+        let thumb_pool = ThumbnailPool::new(legacy_thumbnail_cache, Vec::new());
 
         let startup_db = db_path.clone();
         std::thread::spawn(move || {
@@ -401,6 +403,10 @@ impl ImageSearchApp {
                     self.collections = collections;
                     self.root_counts = root_counts;
                     self.thumb_pool.set_roots(self.roots.clone());
+                    // `prepare_registered_roots` has already copied any legacy
+                    // AppData thumbnails into portable roots. The local cache can
+                    // now be retired and must not be recreated.
+                    self.thumb_pool.retire_legacy_cache();
                     self.fs_watch_service.set_roots(self.roots.clone());
                     self.busy = false;
                     self.progress = None;
