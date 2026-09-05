@@ -1,4 +1,4 @@
-use super::ImageSearchApp;
+use super::{AppearanceMode, ImageSearchApp};
 use crate::face_settings;
 use crate::face_sface_adapter::SFaceExecutionProvider;
 use crate::portable;
@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SettingsCategory {
-    Collections,
+    Appearance,
     SearchClip,
     FacesPeople,
     Performance,
@@ -17,7 +17,7 @@ enum SettingsCategory {
 
 impl SettingsCategory {
     const ALL: [Self; 5] = [
-        Self::Collections,
+        Self::Appearance,
         Self::SearchClip,
         Self::FacesPeople,
         Self::Performance,
@@ -26,7 +26,7 @@ impl SettingsCategory {
 
     fn label(self) -> &'static str {
         match self {
-            Self::Collections => "Collections",
+            Self::Appearance => "Appearance",
             Self::SearchClip => "Search / CLIP",
             Self::FacesPeople => "Faces / People",
             Self::Performance => "Performance",
@@ -36,7 +36,7 @@ impl SettingsCategory {
 
     fn index(self) -> u8 {
         match self {
-            Self::Collections => 0,
+            Self::Appearance => 0,
             Self::SearchClip => 1,
             Self::FacesPeople => 2,
             Self::Performance => 3,
@@ -50,7 +50,7 @@ impl SettingsCategory {
             2 => Self::FacesPeople,
             3 => Self::Performance,
             4 => Self::Storage,
-            _ => Self::Collections,
+            _ => Self::Appearance,
         }
     }
 }
@@ -141,7 +141,7 @@ pub(super) fn show(app: &mut ImageSearchApp, ctx: &egui::Context) {
                                 .id_salt("preferences-category-content")
                                 .auto_shrink([false, false])
                                 .show(ui, |ui| match category {
-                                    SettingsCategory::Collections => settings_collections(app, ui),
+                                    SettingsCategory::Appearance => settings_appearance(app, ui),
                                     SettingsCategory::SearchClip => {
                                         settings_search_clip(app, ui, &mut effects)
                                     }
@@ -185,7 +185,7 @@ fn settings_library_indexing(app: &mut ImageSearchApp, ui: &mut egui::Ui, effect
 
     ui.horizontal(|ui| {
         if ui
-            .add_enabled(!app.busy, egui::Button::new("＋ Add folder"))
+            .add_enabled(!app.busy, egui::Button::new("Add folder"))
             .clicked()
         {
             effects.add_folder = true;
@@ -193,7 +193,7 @@ fn settings_library_indexing(app: &mut ImageSearchApp, ui: &mut egui::Ui, effect
         if ui
             .add_enabled(
                 !app.busy && !app.roots.is_empty(),
-                egui::Button::new("⟳ Rescan changed"),
+                egui::Button::new("Rescan changed"),
             )
             .clicked()
         {
@@ -202,7 +202,7 @@ fn settings_library_indexing(app: &mut ImageSearchApp, ui: &mut egui::Ui, effect
         if ui
             .add_enabled(
                 !app.busy && !app.roots.is_empty(),
-                egui::Button::new("⟳ Force rescan all"),
+                egui::Button::new("Force rescan all"),
             )
             .on_hover_text(
                 "Rebuild all visual/CLIP descriptors; valid cached thumbnails are used instead of large originals when safe.",
@@ -259,13 +259,29 @@ fn settings_library_indexing(app: &mut ImageSearchApp, ui: &mut egui::Ui, effect
     }
 }
 
-fn settings_collections(app: &mut ImageSearchApp, ui: &mut egui::Ui) {
+fn settings_appearance(app: &mut ImageSearchApp, ui: &mut egui::Ui) {
     section_title(
         ui,
-        "Collections / Indexing",
-        "Collections are the library. Add folders here to attach/index them; source files and portable .imagesearch data are never deleted by collection edits.",
+        "Appearance",
+        "Choose a compact application theme. System follows the appearance captured when the app starts.",
     );
-    app.show_collections_settings(ui);
+
+    ui.horizontal_wrapped(|ui| {
+        for mode in [
+            AppearanceMode::System,
+            AppearanceMode::Light,
+            AppearanceMode::Dark,
+        ] {
+            if ui
+                .selectable_label(app.appearance_mode == mode, mode.label())
+                .clicked()
+            {
+                app.appearance_mode = mode;
+            }
+        }
+    });
+    ui.add_space(8.0);
+    ui.small("The same spacing, typography, selection treatment and control geometry are used in both light and dark themes.");
 }
 
 fn settings_search_clip(app: &mut ImageSearchApp, ui: &mut egui::Ui, effects: &mut Effects) {
@@ -521,11 +537,7 @@ fn show_worker_activity(app: &mut ImageSearchApp, ui: &mut egui::Ui) {
                 ui.strong("Image search");
             }
             if app.indexing && app.index_control.is_some() {
-                let label = if app.index_paused {
-                    "▶ Resume"
-                } else {
-                    "⏸ Pause"
-                };
+                let label = if app.index_paused { "Resume" } else { "Pause" };
                 if ui
                     .add_enabled(!app.searching, egui::Button::new(label).small())
                     .clicked()

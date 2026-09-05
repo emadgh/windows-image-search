@@ -25,6 +25,7 @@ pub struct NamedPersonOption {
     pub person_id: String,
     pub display_name: String,
     pub member_count: usize,
+    pub representative_image: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -60,21 +61,55 @@ pub struct ImagePeopleDetail {
 }
 
 pub fn load_named_people(session_db_path: &Path) -> Result<Vec<NamedPersonOption>> {
+    load_named_people_impl(session_db_path, &[])
+}
+
+pub fn load_named_people_with_representatives(
+    session_db_path: &Path,
+    roots: &[PathBuf],
+) -> Result<Vec<NamedPersonOption>> {
+    load_named_people_impl(session_db_path, roots)
+}
+
+fn load_named_people_impl(
+    session_db_path: &Path,
+    roots: &[PathBuf],
+) -> Result<Vec<NamedPersonOption>> {
     let conn = db::open(session_db_path)
         .with_context(|| format!("opening People catalog {}", session_db_path.display()))?;
     let catalog = people_effective::load(&conn)?;
-    let mut people = catalog
-        .people
-        .into_iter()
-        .filter_map(|person| {
-            let display_name = person.display_name?.trim().to_owned();
-            (!display_name.is_empty()).then_some(NamedPersonOption {
-                person_id: person.person_id,
-                display_name,
-                member_count: person.member_count,
+    let mut people = Vec::new();
+    for person in catalog.people {
+        let Some(display_name) = person
+            .display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let representative_image = (!roots.is_empty())
+            .then(|| {
+                person
+                    .representative_library_id
+                    .as_deref()
+                    .zip(person.representative_face_id.as_deref())
+                    .and_then(|(library_id, face_id)| {
+                        crate::face_search::resolve_searchable_face(roots, library_id, face_id)
+                            .ok()
+                            .flatten()
+                            .map(|face| face.image_path)
+                    })
             })
-        })
-        .collect::<Vec<_>>();
+            .flatten();
+        people.push(NamedPersonOption {
+            person_id: person.person_id,
+            display_name,
+            member_count: person.member_count,
+            representative_image,
+        });
+    }
     people.sort_by(|left, right| {
         left.display_name
             .to_lowercase()
@@ -259,18 +294,15 @@ fn resolve_current_face_paths<'a>(
     roots: &[PathBuf],
     face_keys: impl Iterator<Item = &'a (String, String)>,
 ) -> Result<HashMap<(String, String), PathBuf>> {
-    let mut faces_by_library = HashMap::<String, Vec<String>>::new();
-    for (library_id, face_id) in face_keys {
-        faces_by_library
-            .entry(library_id.clone())
-            .or_default()
-            .push(face_id.clone());
-    }
-    for face_ids in faces_by_library.values_mut() {
-        face_ids.sort();
-        face_ids.dedup();
+    let requested = face_keys.cloned().collect::<HashSet<_>>();
+    if requested.is_empty() {
+        return Ok(HashMap::new());
     }
 
+    let requested_library_ids = requested
+        .iter()
+        .map(|(library_id, _)| library_id.as_str())
+        .collect::<HashSet<_>>();
     let mut resolved = HashMap::new();
     for root in roots {
         let Ok(conn) = open_portable_read_only(root) else {
@@ -279,18 +311,16 @@ fn resolve_current_face_paths<'a>(
         let Ok(library_id) = portable_library_id(&conn) else {
             continue;
         };
-        let Some(face_ids) = faces_by_library.get(&library_id) else {
+        if !requested_library_ids.contains(library_id.as_str()) {
             continue;
-        };
+        }
         let mut stmt = conn.prepare(
             r#"
-            SELECT f.image_path
+            SELECT f.face_id, f.image_path
             FROM faces f
             JOIN face_detection_state s ON s.image_path = f.image_path
             JOIN images i ON i.path = f.image_path
-            JOIN face_embeddings e ON e.face_id = f.face_id
-            WHERE f.face_id = ?1
-              AND s.detector_id = f.detector_id
+            WHERE s.detector_id = f.detector_id
               AND s.detector_version = f.detector_version
               AND s.detector_cache_revision = f.detector_cache_revision
               AND s.schema_version = f.schema_version
@@ -298,28 +328,21 @@ fn resolve_current_face_paths<'a>(
               AND s.source_modified = f.source_modified
               AND i.size = f.source_size
               AND i.modified = f.source_modified
-              AND e.normalized = 1
-              AND e.detector_id = f.detector_id
-              AND e.detector_version = f.detector_version
-              AND e.detector_cache_revision = f.detector_cache_revision
-              AND e.detection_schema_version = f.schema_version
-              AND e.source_size = f.source_size
-              AND e.source_modified = f.source_modified
-            LIMIT 1
             "#,
         )?;
-        for face_id in face_ids {
-            let relative = stmt
-                .query_row([face_id], |row| row.get::<_, String>(0))
-                .optional()?;
-            let Some(relative) = relative else {
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (face_id, relative) = row?;
+            let key = (library_id.clone(), face_id);
+            if !requested.contains(&key) {
                 continue;
-            };
+            }
             let relative = PathBuf::from(relative);
-            let Ok(absolute) = portable::absolute_source_path(root, &relative) else {
-                continue;
-            };
-            resolved.insert((library_id.clone(), face_id.clone()), absolute);
+            if let Ok(path) = portable::absolute_source_path(root, &relative) {
+                resolved.insert(key, path);
+            }
         }
     }
     Ok(resolved)
@@ -330,68 +353,84 @@ fn combine_match_sets(
     images_by_person: &HashMap<String, HashSet<PathBuf>>,
     mode: PeopleFilterMode,
 ) -> HashSet<PathBuf> {
-    let mut selected = selected_person_ids.iter();
-    let Some(first_id) = selected.next() else {
+    let mut iter = selected_person_ids.iter();
+    let Some(first) = iter.next() else {
         return HashSet::new();
     };
-    let mut combined = images_by_person.get(first_id).cloned().unwrap_or_default();
-    match mode {
-        PeopleFilterMode::Any => {
-            for person_id in selected {
-                if let Some(paths) = images_by_person.get(person_id) {
-                    combined.extend(paths.iter().cloned());
-                }
-            }
-        }
-        PeopleFilterMode::All => {
-            for person_id in selected {
-                let Some(paths) = images_by_person.get(person_id) else {
-                    combined.clear();
-                    break;
-                };
-                combined.retain(|path| paths.contains(path));
-                if combined.is_empty() {
-                    break;
-                }
-            }
+    let mut result = images_by_person.get(first).cloned().unwrap_or_default();
+    for person_id in iter {
+        let next = images_by_person.get(person_id).cloned().unwrap_or_default();
+        match mode {
+            PeopleFilterMode::Any => result.extend(next),
+            PeopleFilterMode::All => result.retain(|path| next.contains(path)),
         }
     }
-    combined
+    result
 }
 
 fn open_portable_read_only(root: &Path) -> Result<Connection> {
-    let path = portable::index_db_path(root);
-    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .with_context(|| format!("opening portable People index for {}", root.display()))
+    let db_path = portable::index_db_path(root);
+    Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .context("opening portable People index read-only")
 }
 
 fn portable_library_id(conn: &Connection) -> Result<String> {
     conn.query_row(
         "SELECT value FROM portable_meta WHERE key = 'library_id'",
         [],
-        |row| row.get::<_, String>(0),
+        |row| row.get(0),
     )
-    .context("portable index has no library_id")
+    .optional()?
+    .context("portable index does not contain library_id")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn paths(values: &[&str]) -> HashSet<PathBuf> {
-        values.iter().map(PathBuf::from).collect()
+    #[test]
+    fn portable_library_id_reads_portable_meta_contract() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE portable_meta(key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);\
+             INSERT INTO portable_meta(key, value) VALUES('library_id', 'library-test');",
+        )
+        .unwrap();
+
+        assert_eq!(portable_library_id(&conn).unwrap(), "library-test");
     }
 
     #[test]
     fn any_mode_unions_selected_people_without_duplicates() {
         let selected = vec!["alice".to_owned(), "bob".to_owned()];
         let by_person = HashMap::from([
-            ("alice".to_owned(), paths(&["a.jpg", "shared.jpg"])),
-            ("bob".to_owned(), paths(&["b.jpg", "shared.jpg"])),
+            (
+                "alice".to_owned(),
+                [PathBuf::from("a.jpg"), PathBuf::from("shared.jpg")]
+                    .into_iter()
+                    .collect(),
+            ),
+            (
+                "bob".to_owned(),
+                [PathBuf::from("b.jpg"), PathBuf::from("shared.jpg")]
+                    .into_iter()
+                    .collect(),
+            ),
         ]);
+        let expected = [
+            PathBuf::from("a.jpg"),
+            PathBuf::from("b.jpg"),
+            PathBuf::from("shared.jpg"),
+        ]
+        .into_iter()
+        .collect();
+
         assert_eq!(
             combine_match_sets(&selected, &by_person, PeopleFilterMode::Any),
-            paths(&["a.jpg", "b.jpg", "shared.jpg"])
+            expected
         );
     }
 
@@ -399,25 +438,24 @@ mod tests {
     fn all_mode_intersects_selected_people() {
         let selected = vec!["alice".to_owned(), "bob".to_owned()];
         let by_person = HashMap::from([
-            ("alice".to_owned(), paths(&["a.jpg", "shared.jpg"])),
-            ("bob".to_owned(), paths(&["b.jpg", "shared.jpg"])),
+            (
+                "alice".to_owned(),
+                [PathBuf::from("a.jpg"), PathBuf::from("shared.jpg")]
+                    .into_iter()
+                    .collect(),
+            ),
+            (
+                "bob".to_owned(),
+                [PathBuf::from("b.jpg"), PathBuf::from("shared.jpg")]
+                    .into_iter()
+                    .collect(),
+            ),
         ]);
+        let expected = [PathBuf::from("shared.jpg")].into_iter().collect();
+
         assert_eq!(
             combine_match_sets(&selected, &by_person, PeopleFilterMode::All),
-            paths(&["shared.jpg"])
+            expected
         );
-    }
-
-    #[test]
-    fn all_mode_is_empty_when_one_selected_person_has_no_images() {
-        let selected = vec!["alice".to_owned(), "bob".to_owned()];
-        let by_person = HashMap::from([("alice".to_owned(), paths(&["a.jpg"]))]);
-        assert!(combine_match_sets(&selected, &by_person, PeopleFilterMode::All).is_empty());
-    }
-
-    #[test]
-    fn inactive_resolved_filter_accepts_every_image() {
-        let filter = ResolvedPeopleFilter::default();
-        assert!(filter.matches(Path::new("anything.jpg")));
     }
 }

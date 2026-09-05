@@ -1,5 +1,5 @@
 use super::photo_grid::{self, PhotoGridSpec, PhotoTileMode};
-use super::ImageSearchApp;
+use super::{ImageSearchApp, SearchMode};
 use crate::face_detection::{
     self, yunet_production::YuNetProductionDetector, yunet_settings::FaceDetectorSettings, FaceBox,
     FaceDetector,
@@ -46,7 +46,6 @@ enum FaceSearchUiMessage {
 }
 
 pub(super) struct FaceSearchUiState {
-    open: bool,
     suggestions: Vec<IndexedFaceSuggestion>,
     suggestion_names: HashMap<String, String>,
     filter_text: String,
@@ -70,7 +69,6 @@ impl Default for FaceSearchUiState {
     fn default() -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         Self {
-            open: false,
             suggestions: Vec::new(),
             suggestion_names: HashMap::new(),
             filter_text: String::new(),
@@ -94,7 +92,14 @@ impl Default for FaceSearchUiState {
 
 impl ImageSearchApp {
     pub(super) fn open_face_search(&mut self) {
-        self.face_search_ui.open = true;
+        if self.search_mode != SearchMode::Face {
+            self.search_text.clear();
+            self.similarity_results = None;
+            self.query_image = None;
+            self.clear_face_search_result_state();
+            self.selected_paths.clear();
+        }
+        self.search_mode = SearchMode::Face;
         if self.face_search_ui.suggestions.is_empty() && !self.face_search_ui.loading {
             self.refresh_face_suggestions();
         }
@@ -353,6 +358,7 @@ impl ImageSearchApp {
             results.push(image);
         }
 
+        self.search_mode = SearchMode::Face;
         self.face_search_ui.active = true;
         self.face_search_ui.active_query = active_query;
         self.face_search_ui.match_boxes = match_boxes;
@@ -369,70 +375,50 @@ impl ImageSearchApp {
         );
     }
 
-    pub(super) fn show_face_search_window(&mut self, ctx: &egui::Context) {
-        if !self.face_search_ui.open {
-            return;
+    pub(super) fn show_face_search_sidebar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(
+                    !self.face_search_ui.loading && !self.busy,
+                    egui::Button::new("Refresh faces"),
+                )
+                .clicked()
+            {
+                self.refresh_face_suggestions();
+            }
+            if ui
+                .add_enabled(
+                    !self.face_search_ui.external_loading && !self.busy,
+                    egui::Button::new("Face from file…"),
+                )
+                .clicked()
+            {
+                self.choose_external_face_file();
+            }
+        });
+
+        if self.face_search_ui.loading {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.small("Reading indexed People / faces…");
+            });
         }
-        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
-            self.face_search_ui.open = false;
-            return;
+        if self.face_search_ui.external_loading {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.small("Detecting faces in query image…");
+            });
         }
 
-        let mut open = self.face_search_ui.open;
-        egui::Window::new("Face Search")
-            .open(&mut open)
-            .resizable(true)
-            .default_width(930.0)
-            .default_height(720.0)
-            .min_width(620.0)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.heading("Search by face");
-                    if ui
-                        .add_enabled(
-                            !self.face_search_ui.loading && !self.busy,
-                            egui::Button::new("⟳ Refresh people/faces"),
-                        )
-                        .clicked()
-                    {
-                        self.refresh_face_suggestions();
-                    }
-                    if ui
-                        .add_enabled(
-                            !self.face_search_ui.external_loading && !self.busy,
-                            egui::Button::new("Face from file…"),
-                        )
-                        .clicked()
-                    {
-                        self.choose_external_face_file();
-                    }
-                    if self.face_search_ui.loading {
-                        ui.spinner();
-                        ui.small("Reading face index…");
-                    }
-                    if self.face_search_ui.external_loading {
-                        ui.spinner();
-                        ui.small("Detecting + embedding query faces…");
-                    }
-                });
-
-                ui.label(
-                    "Choose a detected face already stored in the database, or load any image and choose one of its detected faces.",
-                );
-                ui.small(
-                    "Database suggestions prefer one representative per effective Person group. Before a People snapshot exists, they fall back to individual face instances.",
-                );
-
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.label("Minimum similarity");
-                    ui.add(
-                        egui::Slider::new(
-                            &mut self.face_search_ui.options.min_similarity,
-                            0.0..=1.0,
-                        )
+        egui::CollapsingHeader::new("Advanced face search")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.label("Minimum similarity");
+                ui.add(
+                    egui::Slider::new(&mut self.face_search_ui.options.min_similarity, 0.0..=1.0)
                         .fixed_decimals(2),
-                    );
+                );
+                ui.horizontal(|ui| {
                     ui.label("Top-K");
                     ui.add(
                         egui::DragValue::new(&mut self.face_search_ui.options.limit)
@@ -441,194 +427,215 @@ impl ImageSearchApp {
                     );
                 });
                 self.face_search_ui.options = self.face_search_ui.options.sanitized();
+            });
 
-                let selected = self
-                    .face_search_ui
-                    .selected_face_id
-                    .as_ref()
-                    .and_then(|id| {
-                        self.face_search_ui
-                            .suggestions
-                            .iter()
-                            .find(|face| &face.face_id == id)
-                    })
-                    .cloned();
-                let selected_external = self
-                    .face_search_ui
-                    .selected_external_ordinal
-                    .and_then(|ordinal| {
-                        self.face_search_ui
-                            .external_faces
-                            .iter()
-                            .find(|face| face.ordinal == ordinal)
-                    })
-                    .cloned();
-
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(
-                            selected.is_some() && !self.busy,
-                            egui::Button::new("Search selected person/face"),
-                        )
-                        .clicked()
-                    {
-                        if let Some(query) = selected.clone() {
-                            self.start_indexed_face_search(query);
+        if !self.face_search_ui.external_faces.is_empty() {
+            ui.add_space(6.0);
+            ui.strong("Faces from file");
+            if let Some(path) = &self.face_search_ui.external_source {
+                ui.small(super::views::truncate_middle(
+                    &path.display().to_string(),
+                    38,
+                ))
+                .on_hover_text(path.display().to_string());
+            }
+            let faces = self.face_search_ui.external_faces.clone();
+            ui.horizontal_wrapped(|ui| {
+                for face in faces {
+                    let selected = self
+                        .face_search_ui
+                        .selected_external_ordinal
+                        .is_some_and(|ordinal| ordinal == face.ordinal);
+                    ui.vertical(|ui| {
+                        let response = if let Some(texture) = self.thumbnail(&face.image_path) {
+                            photo_grid::photo_tile(
+                                ui,
+                                &texture,
+                                egui::vec2(70.0, 70.0),
+                                PhotoTileMode::Face(face.bbox),
+                                selected,
+                                egui::Sense::click(),
+                            )
+                        } else {
+                            photo_grid::loading_tile(
+                                ui,
+                                egui::vec2(70.0, 70.0),
+                                selected,
+                                egui::Sense::click(),
+                            )
+                        };
+                        if response.clicked() {
+                            self.face_search_ui.selected_external_ordinal = Some(face.ordinal);
                         }
-                    }
-                    if ui
-                        .add_enabled(
-                            selected_external.is_some() && !self.busy,
-                            egui::Button::new("Search selected file face"),
-                        )
-                        .clicked()
-                    {
-                        if let Some(query) = selected_external.clone() {
-                            self.start_external_face_search(query);
+                        if response.double_clicked() && !self.busy {
+                            self.start_external_face_search(face.clone());
                         }
-                    }
-                    if self.face_search_ui.searching {
-                        ui.spinner();
-                        ui.small("Comparing face embeddings…");
-                    }
-                    if self.face_search_ui.active {
-                        ui.separator();
-                        ui.small(format!(
-                            "{} compatible embeddings inspected in last search",
-                            self.face_search_ui.last_rows_considered
-                        ));
-                    }
-                });
-
-                if !self.face_search_ui.external_faces.is_empty() {
-                    ui.separator();
-                    ui.strong("Faces from selected file");
-                    if let Some(path) = &self.face_search_ui.external_source {
-                        ui.small(path.display().to_string());
-                    }
-                    let faces = self.face_search_ui.external_faces.clone();
-                    ui.horizontal_wrapped(|ui| {
-                        for face in faces {
-                            let is_selected = self
-                                .face_search_ui
-                                .selected_external_ordinal
-                                .is_some_and(|ordinal| ordinal == face.ordinal);
-                            ui.vertical(|ui| {
-                                let response = if let Some(texture) = self.thumbnail(&face.image_path)
-                                {
-                                    photo_grid::photo_tile(ui, &texture, egui::vec2(104.0, 104.0), PhotoTileMode::Face(face.bbox), is_selected, egui::Sense::click())
-                                } else {
-                                    ui.add_sized([104.0, 104.0], egui::Button::new("Loading…"))
-                                };
-                                if response.clicked() {
-                                    self.face_search_ui.selected_external_ordinal = Some(face.ordinal);
-                                }
-                                if response.double_clicked() && !self.busy {
-                                    self.start_external_face_search(face.clone());
-                                }
-                                ui.small(format!(
-                                    "Face {} · {:.0}%",
-                                    face.ordinal + 1,
-                                    face.confidence * 100.0
-                                ));
-                            });
-                        }
+                        ui.small(format!("Face {}", face.ordinal + 1));
                     });
                 }
-
-                ui.separator();
-                ui.strong("People / searchable faces in database");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.face_search_ui.filter_text)
-                        .hint_text("Filter named people…")
-                        .desired_width(ui.available_width().min(360.0)),
-                );
-                if self.face_search_ui.suggestions.is_empty() && !self.face_search_ui.loading {
-                    ui.vertical_centered(|ui| {
-                        ui.add_space(28.0);
-                        ui.heading("No searchable database faces yet");
-                        ui.label(
-                            "Enable Detect faces for a collection, configure YuNet + SFace in Settings, then run the face pipeline.",
-                        );
-                    });
-                    return;
+            });
+            let selected_external = self
+                .face_search_ui
+                .selected_external_ordinal
+                .and_then(|ordinal| {
+                    self.face_search_ui
+                        .external_faces
+                        .iter()
+                        .find(|face| face.ordinal == ordinal)
+                })
+                .cloned();
+            if ui
+                .add_enabled(
+                    selected_external.is_some() && !self.busy,
+                    egui::Button::new("Search selected file face"),
+                )
+                .clicked()
+            {
+                if let Some(query) = selected_external {
+                    self.start_external_face_search(query);
                 }
+            }
+            ui.separator();
+        }
 
-                let filter = self.face_search_ui.filter_text.trim().to_lowercase();
-                let suggestions = self
-                    .face_search_ui
-                    .suggestions
-                    .iter()
-                    .filter(|face| {
-                        filter.is_empty()
-                            || self
-                                .face_search_ui
-                                .suggestion_names
-                                .get(&face.face_id)
-                                .is_some_and(|name| name.to_lowercase().contains(&filter))
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if !filter.is_empty() {
-                    ui.small(format!("{} matching named People", suggestions.len()));
-                }
-                let spec = PhotoGridSpec::new("face-search-database-photo-grid", 108.0, 142.0);
-                photo_grid::show(ui, suggestions.len(), spec, |ui, index| {
-                    let face = &suggestions[index];
-                    let is_selected = self
+        ui.strong("People / indexed faces");
+        ui.add(
+            egui::TextEdit::singleline(&mut self.face_search_ui.filter_text)
+                .hint_text("Filter named people…")
+                .desired_width(f32::INFINITY),
+        );
+
+        if self.face_search_ui.suggestions.is_empty() && !self.face_search_ui.loading {
+            ui.small(
+                "No searchable faces yet. Enable face detection for a Collection and configure YuNet + SFace in Settings.",
+            );
+            return;
+        }
+
+        let filter = self.face_search_ui.filter_text.trim().to_lowercase();
+        let suggestions = self
+            .face_search_ui
+            .suggestions
+            .iter()
+            .filter(|face| {
+                filter.is_empty()
+                    || self
+                        .face_search_ui
+                        .suggestion_names
+                        .get(&face.face_id)
+                        .is_some_and(|name| name.to_lowercase().contains(&filter))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        egui::ScrollArea::vertical()
+            .id_salt("inline-face-search-suggestions")
+            .max_height(260.0)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for face in suggestions {
+                    let selected = self
                         .face_search_ui
                         .selected_face_id
                         .as_ref()
                         .is_some_and(|id| id == &face.face_id);
-                    let response = if let Some(texture) = self.thumbnail(&face.image_path) {
-                        photo_grid::photo_tile(
-                            ui,
-                            &texture,
-                            egui::vec2(96.0, 96.0),
-                            PhotoTileMode::Face(face.bbox),
-                            is_selected,
-                            egui::Sense::click(),
-                        )
-                    } else {
-                        let response = ui.add_sized([96.0, 96.0], egui::Button::new("Loading…"));
-                        if is_selected {
-                            ui.painter().rect_stroke(
-                                response.rect,
-                                5.0,
-                                egui::Stroke::new(3.0, ui.visuals().selection.stroke.color),
-                                egui::StrokeKind::Inside,
-                            );
-                        }
-                        response
-                    };
-                    if response.clicked() {
+                    let mut clicked = false;
+                    let mut double_clicked = false;
+                    ui.horizontal(|ui| {
+                        let response = if let Some(texture) = self.thumbnail(&face.image_path) {
+                            photo_grid::photo_tile(
+                                ui,
+                                &texture,
+                                egui::vec2(48.0, 48.0),
+                                PhotoTileMode::Face(face.bbox),
+                                selected,
+                                egui::Sense::click(),
+                            )
+                        } else {
+                            photo_grid::loading_tile(
+                                ui,
+                                egui::vec2(48.0, 48.0),
+                                selected,
+                                egui::Sense::click(),
+                            )
+                        };
+                        clicked |= response.clicked();
+                        double_clicked |= response.double_clicked();
+
+                        ui.vertical(|ui| {
+                            let title = self
+                                .face_search_ui
+                                .suggestion_names
+                                .get(&face.face_id)
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    face.image_path
+                                        .file_name()
+                                        .and_then(|name| name.to_str())
+                                        .unwrap_or("Indexed face")
+                                        .to_owned()
+                                });
+                            let response = ui.selectable_label(selected, truncate(&title, 24));
+                            clicked |= response.clicked();
+                            double_clicked |= response.double_clicked();
+                            if let Some(group_size) = face.group_size {
+                                ui.small(format!(
+                                    "{group_size} indexed face{}",
+                                    if group_size == 1 { "" } else { "s" }
+                                ));
+                            } else {
+                                ui.small(format!("Confidence {:.0}%", face.confidence * 100.0));
+                            }
+                        });
+                    });
+                    if clicked {
                         self.face_search_ui.selected_face_id = Some(face.face_id.clone());
                     }
-                    if response.double_clicked() && !self.busy {
+                    if double_clicked && !self.busy {
                         self.start_indexed_face_search(face.clone());
                     }
-                    if let Some(name) = self.face_search_ui.suggestion_names.get(&face.face_id) {
-                        ui.strong(truncate(name, 16));
-                    }
-                    if let Some(group_size) = face.group_size {
-                        ui.small(format!(
-                            "Person · {group_size} face{}",
-                            if group_size == 1 { "" } else { "s" }
-                        ));
-                    } else {
-                        ui.small(format!("{:.0}%", face.confidence * 100.0));
-                    }
-                    ui.small(
-                        face.image_path
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .map(|name| truncate(name, 16))
-                            .unwrap_or_else(|| "image".to_owned()),
-                    )
-                    .on_hover_text(face.image_path.display().to_string());
-                });
+                }
             });
-        self.face_search_ui.open = open;
+
+        let selected = self
+            .face_search_ui
+            .selected_face_id
+            .as_ref()
+            .and_then(|id| {
+                self.face_search_ui
+                    .suggestions
+                    .iter()
+                    .find(|face| &face.face_id == id)
+            })
+            .cloned();
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(
+                    selected.is_some() && !self.busy,
+                    egui::Button::new("Search selected person / face"),
+                )
+                .clicked()
+            {
+                if let Some(query) = selected {
+                    self.start_indexed_face_search(query);
+                }
+            }
+            if self.face_search_ui.searching {
+                ui.spinner();
+                ui.small("Comparing face embeddings…");
+            }
+        });
+        if self.face_search_ui.active {
+            ui.small(format!(
+                "{} compatible face embedding{} inspected in the last search",
+                self.face_search_ui.last_rows_considered,
+                if self.face_search_ui.last_rows_considered == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            ));
+        }
     }
 }
 

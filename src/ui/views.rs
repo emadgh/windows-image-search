@@ -1,5 +1,5 @@
 use super::photo_grid::{self, PhotoGridSpec, PhotoTileMode};
-use super::{ImageSearchApp, ThumbnailFit};
+use super::{ImageSearchApp, SortMode, ThumbnailFit};
 use crate::face_detection::FaceBox;
 use chrono::{Local, TimeZone};
 use eframe::egui;
@@ -45,6 +45,11 @@ impl ImageSearchApp {
         let row_height = self.thumb_size + 62.0;
         let fit = self.thumb_fit;
         let spec = PhotoGridSpec::new("main-result-photo-grid", cell_width, row_height);
+        self.result_grid_columns = photo_grid::columns_for_width(
+            ui.available_width(),
+            cell_width,
+            ui.spacing().item_spacing.x,
+        );
 
         photo_grid::show(ui, visible.len(), spec, |ui, pos| {
             let record = self.record_view(visible[pos]);
@@ -64,19 +69,12 @@ impl ImageSearchApp {
                 }
                 response
             } else {
-                let response = ui.add_sized(
-                    [self.thumb_size, self.thumb_size],
-                    egui::Button::new("Loading thumbnail…").sense(egui::Sense::click_and_drag()),
-                );
-                if selected {
-                    ui.painter().rect_stroke(
-                        response.rect,
-                        5.0,
-                        egui::Stroke::new(3.0, ui.visuals().selection.stroke.color),
-                        egui::StrokeKind::Inside,
-                    );
-                }
-                response
+                photo_grid::loading_tile(
+                    ui,
+                    egui::vec2(self.thumb_size, self.thumb_size),
+                    selected,
+                    egui::Sense::click_and_drag(),
+                )
             };
 
             self.handle_result_response(&response, &record.path);
@@ -101,11 +99,14 @@ impl ImageSearchApp {
     }
 
     pub(super) fn show_details(&mut self, ui: &mut egui::Ui, visible: &[usize]) {
+        self.result_grid_columns = 1;
         // Reserve the vertical scrollbar gutter once, then reuse one geometry for the
         // header and every virtualized row. Row content never gets to resize columns.
         let available = (ui.available_width() - 18.0).max(720.0);
         let widths = DetailWidths::from_total(available);
-        detail_header(ui, widths);
+        if let Some(sort_mode) = detail_header(ui, widths, self.sort_mode) {
+            self.sort_mode = sort_mode;
+        }
         ui.separator();
 
         egui::ScrollArea::vertical()
@@ -133,9 +134,11 @@ impl ImageSearchApp {
                             }
                             response
                         } else {
-                            ui.add_sized(
-                                [widths.thumb, 54.0],
-                                egui::Button::new("…").sense(egui::Sense::click_and_drag()),
+                            photo_grid::loading_tile(
+                                ui,
+                                egui::vec2(widths.thumb, 54.0),
+                                selected,
+                                egui::Sense::click_and_drag(),
                             )
                         };
                         self.handle_result_response(&response, &record.path);
@@ -212,10 +215,9 @@ impl ImageSearchApp {
             crate::windows_shell::show_context_menu(path.to_path_buf());
         }
         if response.clicked() {
-            let additive = response
-                .ctx
-                .input(|input| input.modifiers.ctrl || input.modifiers.command);
-            self.select_path(path, additive);
+            let modifiers = response.ctx.input(|input| input.modifiers);
+            let additive = modifiers.ctrl || modifiers.command;
+            self.select_path_with_modifiers(path, additive, modifiers.shift);
         }
         if response.double_clicked() {
             let _ = open::that(path);
@@ -253,18 +255,64 @@ impl DetailWidths {
     }
 }
 
-fn detail_header(ui: &mut egui::Ui, widths: DetailWidths) {
+fn detail_header(
+    ui: &mut egui::Ui,
+    widths: DetailWidths,
+    current_sort: SortMode,
+) -> Option<SortMode> {
+    let mut requested_sort = None;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         ui.add_sized([widths.thumb, 22.0], egui::Label::new(""));
-        ui.add_sized(
-            [widths.name, 22.0],
-            egui::Label::new(egui::RichText::new("Name").strong()),
+
+        let name_label = if current_sort == SortMode::Name {
+            "Name ▲"
+        } else {
+            "Name"
+        };
+        if ui
+            .add_sized(
+                [widths.name, 22.0],
+                egui::Button::new(name_label).frame(false),
+            )
+            .on_hover_text("Sort by filename")
+            .clicked()
+        {
+            requested_sort = Some(SortMode::Name);
+        }
+
+        ui.allocate_ui_with_layout(
+            egui::vec2(widths.info, 22.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_min_width(widths.info);
+                ui.set_max_width(widths.info);
+                ui.menu_button("Info sort ▾", |ui| {
+                    if ui
+                        .selectable_label(current_sort == SortMode::Resolution, "Resolution")
+                        .clicked()
+                    {
+                        requested_sort = Some(SortMode::Resolution);
+                        ui.close();
+                    }
+                    if ui
+                        .selectable_label(current_sort == SortMode::Modified, "Modified date")
+                        .clicked()
+                    {
+                        requested_sort = Some(SortMode::Modified);
+                        ui.close();
+                    }
+                    if ui
+                        .selectable_label(current_sort == SortMode::Size, "File size")
+                        .clicked()
+                    {
+                        requested_sort = Some(SortMode::Size);
+                        ui.close();
+                    }
+                });
+            },
         );
-        ui.add_sized(
-            [widths.info, 22.0],
-            egui::Label::new(egui::RichText::new("Info").strong()),
-        );
+
         ui.add_sized(
             [widths.color, 22.0],
             egui::Label::new(egui::RichText::new("Color").strong()),
@@ -273,11 +321,24 @@ fn detail_header(ui: &mut egui::Ui, widths: DetailWidths) {
             [widths.metadata, 22.0],
             egui::Label::new(egui::RichText::new("Metadata").strong()),
         );
-        ui.add_sized(
-            [widths.score, 22.0],
-            egui::Label::new(egui::RichText::new("Score").strong()),
-        );
+
+        let score_label = if current_sort == SortMode::Relevance {
+            "Score ▼"
+        } else {
+            "Score"
+        };
+        if ui
+            .add_sized(
+                [widths.score, 22.0],
+                egui::Button::new(score_label).frame(false),
+            )
+            .on_hover_text("Restore relevance / similarity order")
+            .clicked()
+        {
+            requested_sort = Some(SortMode::Relevance);
+        }
     });
+    requested_sort
 }
 
 fn metadata_text(record: &RecordView) -> String {
@@ -310,7 +371,7 @@ pub(super) fn show_query_preview(ui: &mut egui::Ui, texture: &egui::TextureHandl
     );
 }
 
-fn thumbnail_widget(
+pub(super) fn thumbnail_widget(
     ui: &mut egui::Ui,
     texture: &egui::TextureHandle,
     desired: egui::Vec2,
@@ -453,7 +514,7 @@ pub(super) fn color_distance(a: [u8; 3], b: [u8; 3]) -> f32 {
     (distance / 765.0).clamp(0.0, 1.0)
 }
 
-fn format_bytes(bytes: u64) -> String {
+pub(super) fn format_bytes(bytes: u64) -> String {
     let value = bytes as f64;
     if value >= 1024.0 * 1024.0 * 1024.0 {
         format!("{:.1} GB", value / 1024.0 / 1024.0 / 1024.0)

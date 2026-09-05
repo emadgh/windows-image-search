@@ -1,5 +1,25 @@
 use std::path::PathBuf;
 
+pub fn show_in_explorer(path: PathBuf) {
+    #[cfg(target_os = "windows")]
+    {
+        let argument = format!("/select,{}", path.display());
+        if let Err(err) = std::process::Command::new("explorer.exe")
+            .arg(argument)
+            .spawn()
+        {
+            eprintln!("Cannot show {} in Explorer: {err}", path.display());
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Some(parent) = path.parent() {
+            let _ = open::that(parent);
+        }
+    }
+}
+
 pub fn show_context_menu(path: PathBuf) {
     #[cfg(target_os = "windows")]
     {

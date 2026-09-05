@@ -175,6 +175,81 @@ impl ImageSearchApp {
         self.collections.filter_matches(path)
     }
 
+    pub(super) fn collection_filter_chip(&self) -> Option<String> {
+        let id = self.collections.active_filter?;
+        self.collections
+            .items
+            .iter()
+            .find(|item| item.id == id)
+            .map(|item| format!("Collection: {}", item.name))
+    }
+
+    pub(super) fn clear_collection_filter(&mut self) {
+        self.collections.active_filter = None;
+    }
+
+    pub(super) fn collection_count(&self) -> usize {
+        self.collections.items.len()
+    }
+
+    pub(super) fn show_add_to_collection_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        label: &str,
+        paths: &[PathBuf],
+    ) {
+        let items = self
+            .collections
+            .items
+            .iter()
+            .map(|item| (item.id, item.name.clone(), self.collections.count(item.id)))
+            .collect::<Vec<_>>();
+        let mut target = None;
+        ui.add_enabled_ui(!self.busy && !items.is_empty() && !paths.is_empty(), |ui| {
+            ui.menu_button(label, |ui| {
+                for (id, name, count) in &items {
+                    if ui.button(format!("{name} ({count})")).clicked() {
+                        target = Some(*id);
+                        ui.close();
+                    }
+                }
+            });
+        });
+        if let Some(id) = target {
+            self.apply_collection_action(CollectionAction::Drop(id, paths.to_vec()));
+        }
+    }
+
+    pub(super) fn prompt_add_library_folder(&mut self) {
+        if self.busy {
+            return;
+        }
+        let Some(folder) = rfd::FileDialog::new().pick_folder() else {
+            return;
+        };
+
+        let collection_id = if let Some(id) = self.collections.selected_manage {
+            id
+        } else if let Some(item) = self.collections.items.first() {
+            item.id
+        } else {
+            match db::create_collection(&self.db_path, "Library") {
+                Ok(created) => {
+                    self.collections.selected_manage = Some(created.id);
+                    created.id
+                }
+                Err(err) => {
+                    self.last_error = Some(format!(
+                        "Cannot create the default Library collection: {err:#}"
+                    ));
+                    return;
+                }
+            }
+        };
+
+        self.apply_collection_action(CollectionAction::Drop(collection_id, vec![folder]));
+    }
+
     pub(super) fn attach_collection_drag_source(&self, response: &egui::Response, path: &Path) {
         let paths = if self.selected_paths.contains(path) && self.selected_paths.len() > 1 {
             self.selected_paths.iter().cloned().collect()
@@ -217,7 +292,7 @@ impl ImageSearchApp {
             if ui
                 .add_enabled(
                     !self.busy && !self.roots.is_empty(),
-                    egui::Button::new("⟳ Rescan changed"),
+                    egui::Button::new("Rescan changed"),
                 )
                 .clicked()
             {
@@ -226,7 +301,7 @@ impl ImageSearchApp {
             if ui
                 .add_enabled(
                     !self.busy && !self.roots.is_empty(),
-                    egui::Button::new("⟳ Force rescan all"),
+                    egui::Button::new("Force rescan all"),
                 )
                 .on_hover_text("Rebuild all descriptors for folders referenced by Collections.")
                 .clicked()
@@ -234,11 +309,7 @@ impl ImageSearchApp {
                 self.start_force_rescan();
             }
             if self.indexing && self.index_control.is_some() {
-                let label = if self.index_paused {
-                    "▶ Resume"
-                } else {
-                    "⏸ Pause"
-                };
+                let label = if self.index_paused { "Resume" } else { "Pause" };
                 if ui
                     .add_enabled(!self.searching, egui::Button::new(label))
                     .clicked()
@@ -422,7 +493,7 @@ impl ImageSearchApp {
         ui.horizontal(|ui| {
             ui.strong("Indexed folders");
             if ui
-                .add_enabled(!self.busy, egui::Button::new("＋ Add folder").small())
+                .add_enabled(!self.busy, egui::Button::new("Add folder").small())
                 .clicked()
             {
                 action = Some(CollectionAction::AddFolderDialog(id));
@@ -462,7 +533,7 @@ impl ImageSearchApp {
         ui.horizontal(|ui| {
             ui.strong("Manually added indexed files");
             if ui
-                .add_enabled(!self.busy, egui::Button::new("＋ Add files").small())
+                .add_enabled(!self.busy, egui::Button::new("Add files").small())
                 .clicked()
             {
                 action = Some(CollectionAction::AddFilesDialog(id));

@@ -1,0 +1,330 @@
+use super::ImageSearchApp;
+use eframe::egui;
+use std::path::PathBuf;
+
+impl ImageSearchApp {
+    pub(super) fn handle_result_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.wants_keyboard_input()
+            || self.settings_open
+            || self.collections_open
+            || self.task_center_open
+            || self.people_manager_ui.open
+            || self.close_confirmation_open
+        {
+            return;
+        }
+
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.selected_paths.clear();
+            self.selection_anchor = None;
+            self.focused_result = None;
+            return;
+        }
+
+        if ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::A)) {
+            let paths = self.visible_result_paths();
+            self.selected_paths.clear();
+            self.selected_paths.extend(paths.iter().cloned());
+            self.selection_anchor = paths.first().cloned();
+            self.focused_result = paths.last().cloned();
+            return;
+        }
+
+        if ctx.input(|input| input.key_pressed(egui::Key::Enter)) {
+            if let Some(path) = self.selected_path() {
+                let _ = open::that(path);
+            }
+            return;
+        }
+
+        if ctx.input(|input| input.key_pressed(egui::Key::Space)) {
+            if !self.selected_paths.is_empty() {
+                self.inspector_open = !self.inspector_open;
+            }
+            return;
+        }
+
+        let navigation = ctx.input(|input| {
+            let delta = if input.key_pressed(egui::Key::ArrowLeft) {
+                Some(-1_isize)
+            } else if input.key_pressed(egui::Key::ArrowRight) {
+                Some(1_isize)
+            } else if input.key_pressed(egui::Key::ArrowUp) {
+                Some(-(self.result_grid_columns.max(1) as isize))
+            } else if input.key_pressed(egui::Key::ArrowDown) {
+                Some(self.result_grid_columns.max(1) as isize)
+            } else {
+                None
+            };
+            delta.map(|delta| (delta, input.modifiers.shift))
+        });
+        let Some((delta, extend_range)) = navigation else {
+            return;
+        };
+
+        let visible = self.visible_result_paths();
+        if visible.is_empty() {
+            return;
+        }
+        let current =
+            self.focused_result
+                .as_ref()
+                .and_then(|path| visible.iter().position(|candidate| candidate == path))
+                .or_else(|| {
+                    (self.selected_paths.len() == 1)
+                        .then(|| {
+                            self.selected_paths.iter().next().and_then(|path| {
+                                visible.iter().position(|candidate| candidate == path)
+                            })
+                        })
+                        .flatten()
+                });
+        let Some(target) = navigation_target(current, delta, visible.len()) else {
+            return;
+        };
+        let target_path = visible[target].clone();
+        self.select_path_with_modifiers(&target_path, false, extend_range);
+    }
+
+    pub(super) fn show_error_banner(&mut self, ctx: &egui::Context) {
+        let Some(error) = self.last_error.clone() else {
+            return;
+        };
+        let mut dismiss = false;
+        let mut open_tasks = false;
+        egui::Area::new(egui::Id::new("global-error-toast"))
+            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 50.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                ui.set_max_width(460.0);
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.strong("Needs attention");
+                    ui.label(super::views::truncate_middle(&error, 180))
+                        .on_hover_text(&error);
+                    ui.horizontal(|ui| {
+                        if ui.small_button("Task Center").clicked() {
+                            open_tasks = true;
+                        }
+                        if ui.small_button("Dismiss").clicked() {
+                            dismiss = true;
+                        }
+                    });
+                });
+            });
+        if open_tasks {
+            self.task_center_open = true;
+        }
+        if dismiss {
+            self.last_error = None;
+        }
+    }
+
+    pub(super) fn show_active_filter_chips(&mut self, ui: &mut egui::Ui) {
+        let collection = self.collection_filter_chip();
+        let people_count = self.people_filter_selected_count();
+        let text = self.search_text.trim().to_owned();
+        let color_active = self.color_enabled;
+        let query = self.query_image.as_ref().map(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("query image")
+                .to_owned()
+        });
+        let face_active = self.face_search_active();
+        let any_active = collection.is_some()
+            || people_count > 0
+            || !text.is_empty()
+            || color_active
+            || query.is_some();
+        if !any_active {
+            return;
+        }
+
+        ui.horizontal_wrapped(|ui| {
+            ui.small("Active:");
+            if let Some(label) = collection {
+                if ui.small_button(format!("{label}  ×")).clicked() {
+                    self.clear_collection_filter();
+                }
+            }
+            if people_count > 0
+                && ui
+                    .small_button(format!("People: {people_count}  ×"))
+                    .clicked()
+            {
+                self.clear_people_filter();
+            }
+            if !text.is_empty()
+                && ui
+                    .small_button(format!(
+                        "Text: {}  ×",
+                        super::views::truncate_middle(&text, 28)
+                    ))
+                    .clicked()
+            {
+                self.search_text.clear();
+            }
+            if color_active {
+                let [r, g, b] = self.target_color;
+                if ui
+                    .small_button(format!("Color #{r:02X}{g:02X}{b:02X}  ×"))
+                    .clicked()
+                {
+                    self.color_enabled = false;
+                }
+            }
+            if let Some(query) = query {
+                let prefix = if face_active { "Face" } else { "Similar" };
+                if ui
+                    .small_button(format!(
+                        "{prefix}: {}  ×",
+                        super::views::truncate_middle(&query, 24)
+                    ))
+                    .clicked()
+                {
+                    self.similarity_results = None;
+                    self.query_image = None;
+                    self.clear_face_search_result_state();
+                }
+            }
+            ui.separator();
+            if ui.small_button("Clear all").clicked() {
+                self.clear_all_search_constraints();
+            }
+        });
+        ui.add_space(4.0);
+    }
+
+    pub(super) fn show_selection_bar(&mut self, ui: &mut egui::Ui) {
+        if self.selected_paths.is_empty() {
+            return;
+        }
+        let count = self.selected_paths.len();
+        let single = (count == 1)
+            .then(|| self.selected_paths.iter().next().cloned())
+            .flatten();
+        let selected_paths = self.selected_paths.iter().cloned().collect::<Vec<_>>();
+        let all_paths = selected_paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>();
+
+        ui.group(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.strong(format!(
+                    "{count} selected{}",
+                    if count == 1 { "" } else { " images" }
+                ));
+                if ui
+                    .add_enabled(single.is_some(), egui::Button::new("Open"))
+                    .clicked()
+                {
+                    if let Some(path) = &single {
+                        let _ = open::that(path);
+                    }
+                }
+                if ui
+                    .add_enabled(single.is_some(), egui::Button::new("Show in Explorer"))
+                    .clicked()
+                {
+                    if let Some(path) = &single {
+                        crate::windows_shell::show_in_explorer(path.clone());
+                    }
+                }
+                if ui.button("Copy path(s)").clicked() {
+                    ui.ctx().copy_text(all_paths.join("\n"));
+                }
+                self.show_add_to_collection_menu(ui, "Add to Collection", &selected_paths);
+                if ui.button("Clear selection").clicked() {
+                    self.selected_paths.clear();
+                }
+            });
+        });
+        ui.add_space(5.0);
+    }
+
+    pub(super) fn show_empty_state(&mut self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.add_space((ui.available_height() * 0.14).min(90.0));
+            if self.images.is_empty() {
+                ui.heading("Build your image library");
+                ui.add_space(4.0);
+                ui.label(
+                    "Add a folder to create or reuse its portable local image index. Your source files stay where they are.",
+                );
+                ui.add_space(12.0);
+                if ui
+                    .add_enabled(!self.busy, egui::Button::new("Add folder"))
+                    .clicked()
+                {
+                    self.prompt_add_library_folder();
+                }
+                if !self.roots.is_empty()
+                    && ui
+                        .add_enabled(!self.busy, egui::Button::new("Rescan library"))
+                        .clicked()
+                {
+                    self.start_rescan();
+                }
+                ui.add_space(8.0);
+                ui.small("Existing .imagesearch indexes are attached and reused automatically.");
+            } else {
+                ui.heading("No matching images");
+                ui.add_space(4.0);
+                ui.label("Try removing one or more active filters or search constraints.");
+                ui.add_space(10.0);
+                if ui.button("Clear all filters").clicked() {
+                    self.clear_all_search_constraints();
+                }
+            }
+        });
+    }
+
+    fn clear_all_search_constraints(&mut self) {
+        self.clear_collection_filter();
+        self.clear_people_filter();
+        self.search_text.clear();
+        self.color_enabled = false;
+        self.similarity_results = None;
+        self.query_image = None;
+        self.clear_face_search_result_state();
+        self.selected_paths.clear();
+    }
+
+    pub(super) fn selected_path(&self) -> Option<PathBuf> {
+        (self.selected_paths.len() == 1)
+            .then(|| self.selected_paths.iter().next().cloned())
+            .flatten()
+    }
+}
+
+fn navigation_target(current: Option<usize>, delta: isize, len: usize) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    let Some(current) = current else {
+        return Some(0);
+    };
+    Some((current as isize + delta).clamp(0, len as isize - 1) as usize)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::navigation_target;
+
+    #[test]
+    fn first_arrow_focuses_first_result() {
+        assert_eq!(navigation_target(None, 1, 8), Some(0));
+        assert_eq!(navigation_target(None, 4, 8), Some(0));
+        assert_eq!(navigation_target(None, -1, 8), Some(0));
+    }
+
+    #[test]
+    fn navigation_clamps_at_result_boundaries() {
+        assert_eq!(navigation_target(Some(0), -1, 8), Some(0));
+        assert_eq!(navigation_target(Some(7), 1, 8), Some(7));
+        assert_eq!(navigation_target(Some(3), 4, 8), Some(7));
+        assert_eq!(navigation_target(Some(3), -4, 8), Some(0));
+        assert_eq!(navigation_target(Some(0), 1, 0), None);
+    }
+}

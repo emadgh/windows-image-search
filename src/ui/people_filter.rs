@@ -1,4 +1,4 @@
-use super::ImageSearchApp;
+use super::{ImageSearchApp, ThumbnailFit};
 use crate::people_filter::{self, NamedPersonOption, PeopleFilterMode, ResolvedPeopleFilter};
 use eframe::egui;
 use std::collections::{BTreeSet, HashSet};
@@ -112,10 +112,11 @@ impl ImageSearchApp {
         let generation = self.people_filter_ui.catalog_generation;
         self.people_filter_ui.catalog_loading = true;
         let db_path = self.db_path.clone();
+        let roots = self.roots.clone();
         let tx = self.people_filter_ui.tx.clone();
         std::thread::spawn(move || {
-            let result =
-                people_filter::load_named_people(&db_path).map_err(|err| format!("{err:#}"));
+            let result = people_filter::load_named_people_with_representatives(&db_path, &roots)
+                .map_err(|err| format!("{err:#}"));
             let _ = tx.send(PeopleFilterMessage::Catalog { generation, result });
         });
     }
@@ -161,6 +162,18 @@ impl ImageSearchApp {
         self.people_filter_ui.resolved.matches(path)
     }
 
+    pub(super) fn people_filter_selected_count(&self) -> usize {
+        self.people_filter_ui.selected_person_ids.len()
+    }
+
+    pub(super) fn clear_people_filter(&mut self) {
+        if self.people_filter_ui.selected_person_ids.is_empty() {
+            return;
+        }
+        self.people_filter_ui.selected_person_ids.clear();
+        self.request_people_filter_resolution();
+    }
+
     pub(super) fn people_filter_work_pending(&self) -> bool {
         self.people_filter_ui.catalog_loading || self.people_filter_ui.resolving
     }
@@ -190,7 +203,11 @@ impl ImageSearchApp {
                     self.people_filter_ui.selected_person_ids.clear();
                     self.request_people_filter_resolution();
                 }
-                if ui.small_button("⟳").on_hover_text("Refresh named People").clicked() {
+                if ui
+                    .small_button("⟳")
+                    .on_hover_text("Refresh named People")
+                    .clicked()
+                {
                     self.refresh_people_filter_catalog();
                 }
             });
@@ -223,32 +240,97 @@ impl ImageSearchApp {
                     })
                     .cloned()
                     .collect::<Vec<_>>();
+                let selected_people = self
+                    .people_filter_ui
+                    .options
+                    .iter()
+                    .filter(|person| {
+                        self.people_filter_ui
+                            .selected_person_ids
+                            .contains(&person.person_id)
+                    })
+                    .map(|person| (person.person_id.clone(), person.display_name.clone()))
+                    .collect::<Vec<_>>();
                 let mut selection_changed = false;
+                if !selected_people.is_empty() {
+                    ui.horizontal_wrapped(|ui| {
+                        for (person_id, display_name) in selected_people {
+                            if ui.small_button(format!("{display_name}  ×")).clicked() {
+                                self.people_filter_ui.selected_person_ids.remove(&person_id);
+                                selection_changed = true;
+                            }
+                        }
+                    });
+                    ui.add_space(4.0);
+                }
                 egui::ScrollArea::vertical()
                     .id_salt("people-filter-options")
-                    .max_height(180.0)
+                    .max_height(230.0)
                     .show(ui, |ui| {
                         for person in options {
-                            let mut selected = self
+                            let selected = self
                                 .people_filter_ui
                                 .selected_person_ids
                                 .contains(&person.person_id);
-                            let label = format!(
-                                "{}  ·  {} face{}",
-                                person.display_name,
-                                person.member_count,
-                                if person.member_count == 1 { "" } else { "s" }
-                            );
-                            if ui.checkbox(&mut selected, label).changed() {
+                            let mut clicked = false;
+                            ui.horizontal(|ui| {
+                                let avatar_size = egui::vec2(36.0, 36.0);
+                                if let Some(image_path) = person.representative_image.as_ref() {
+                                    if let Some(texture) = self.thumbnail(image_path) {
+                                        let response = super::views::thumbnail_widget(
+                                            ui,
+                                            &texture,
+                                            avatar_size,
+                                            ThumbnailFit::Cover,
+                                            selected,
+                                            egui::Sense::click(),
+                                        );
+                                        clicked |= response.clicked();
+                                    } else {
+                                        ui.add_sized(avatar_size, egui::Spinner::new());
+                                    }
+                                } else {
+                                    let initial = person
+                                        .display_name
+                                        .chars()
+                                        .next()
+                                        .map(|value| value.to_uppercase().to_string())
+                                        .unwrap_or_else(|| "?".to_owned());
+                                    let (rect, response) =
+                                        ui.allocate_exact_size(avatar_size, egui::Sense::click());
+                                    ui.painter().circle_filled(
+                                        rect.center(),
+                                        18.0,
+                                        ui.visuals().widgets.inactive.bg_fill,
+                                    );
+                                    ui.painter().text(
+                                        rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        initial,
+                                        egui::FontId::proportional(14.0),
+                                        ui.visuals().text_color(),
+                                    );
+                                    clicked |= response.clicked();
+                                }
+
+                                let label = format!(
+                                    "{}  ·  {} face{}",
+                                    person.display_name,
+                                    person.member_count,
+                                    if person.member_count == 1 { "" } else { "s" }
+                                );
+                                clicked |= ui.selectable_label(selected, label).clicked();
+                            });
+                            if clicked {
                                 selection_changed = true;
                                 if selected {
                                     self.people_filter_ui
                                         .selected_person_ids
-                                        .insert(person.person_id);
+                                        .remove(&person.person_id);
                                 } else {
                                     self.people_filter_ui
                                         .selected_person_ids
-                                        .remove(&person.person_id);
+                                        .insert(person.person_id);
                                 }
                             }
                         }

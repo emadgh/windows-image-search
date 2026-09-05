@@ -71,6 +71,33 @@ pub(super) fn show(
     });
 }
 
+pub(super) fn loading_tile(
+    ui: &mut egui::Ui,
+    desired: egui::Vec2,
+    selected: bool,
+    sense: egui::Sense,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(desired, sense);
+    ui.painter()
+        .rect_filled(rect, 5.0, ui.visuals().extreme_bg_color);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "Loading…",
+        egui::FontId::proportional(12.0),
+        ui.visuals().weak_text_color(),
+    );
+    if selected {
+        ui.painter().rect_stroke(
+            rect,
+            5.0,
+            egui::Stroke::new(3.0, ui.visuals().selection.stroke.color),
+            egui::StrokeKind::Inside,
+        );
+    }
+    response
+}
+
 pub(super) fn photo_tile(
     ui: &mut egui::Ui,
     texture: &egui::TextureHandle,

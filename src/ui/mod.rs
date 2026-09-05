@@ -1,12 +1,18 @@
 mod collections;
+mod collections_window;
 mod face_runtime;
 mod face_search_panel;
+mod inspector;
 mod people_filter;
 mod people_manager;
 mod photo_grid;
+mod search_panel;
 mod settings_window;
+mod task_center;
 mod texture_lru;
+mod theme;
 mod thumbnails;
+mod ux;
 mod views;
 
 use crate::db::{self, ImageSummary};
@@ -28,6 +34,30 @@ use std::time::{Duration, Instant};
 use texture_lru::{TextureLru, DEFAULT_GPU_TEXTURE_CAPACITY};
 use thumbnails::{ThumbnailPool, ThumbnailResult};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AppearanceMode {
+    System,
+    Light,
+    Dark,
+}
+
+impl AppearanceMode {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::System => "System",
+            Self::Light => "Light",
+            Self::Dark => "Dark",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SearchMode {
+    Text,
+    SimilarImage,
+    Face,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum ViewMode {
     Grid,
@@ -38,6 +68,27 @@ pub(super) enum ViewMode {
 pub(super) enum ThumbnailFit {
     Contain,
     Cover,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SortMode {
+    Relevance,
+    Name,
+    Modified,
+    Size,
+    Resolution,
+}
+
+impl SortMode {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Relevance => "Relevance",
+            Self::Name => "Name",
+            Self::Modified => "Modified",
+            Self::Size => "File size",
+            Self::Resolution => "Resolution",
+        }
+    }
 }
 
 enum StartupMessage {
@@ -77,6 +128,8 @@ pub struct ImageSearchApp {
     people_filter_ui: people_filter::PeopleFilterUiState,
     people_manager_ui: people_manager::PeopleManagerUiState,
     collections: collections::CollectionsState,
+    pub(super) collections_open: bool,
+    pub(super) search_mode: SearchMode,
     pub(super) search_text: String,
     text_search_service: TextSearchService,
     text_search_matches: Option<HashSet<PathBuf>>,
@@ -90,9 +143,17 @@ pub struct ImageSearchApp {
     pub(super) view_mode: ViewMode,
     pub(super) thumb_size: f32,
     pub(super) thumb_fit: ThumbnailFit,
+    pub(super) sort_mode: SortMode,
+    pub(super) inspector_open: bool,
+    pub(super) appearance_mode: AppearanceMode,
+    pub(super) system_dark_mode: Option<bool>,
+    pub(super) task_center_open: bool,
     pub(super) textures: HashMap<PathBuf, TextureHandle>,
     texture_lru: TextureLru,
     pub(super) selected_paths: HashSet<PathBuf>,
+    pub(super) selection_anchor: Option<PathBuf>,
+    pub(super) focused_result: Option<PathBuf>,
+    pub(super) result_grid_columns: usize,
     thumb_pool: ThumbnailPool,
     pub(super) tx: Sender<WorkerMessage>,
     pub(super) rx: Receiver<WorkerMessage>,
@@ -203,6 +264,8 @@ impl ImageSearchApp {
             people_filter_ui,
             people_manager_ui,
             collections: collections::CollectionsState::default(),
+            collections_open: false,
+            search_mode: SearchMode::Text,
             search_text: String::new(),
             text_search_service,
             text_search_matches: None,
@@ -216,9 +279,17 @@ impl ImageSearchApp {
             view_mode: ViewMode::Grid,
             thumb_size: 168.0,
             thumb_fit: ThumbnailFit::Contain,
+            sort_mode: SortMode::Relevance,
+            inspector_open: true,
+            appearance_mode: AppearanceMode::System,
+            system_dark_mode: None,
+            task_center_open: false,
             textures: HashMap::new(),
             texture_lru: TextureLru::new(DEFAULT_GPU_TEXTURE_CAPACITY),
             selected_paths: HashSet::new(),
+            selection_anchor: None,
+            focused_result: None,
+            result_grid_columns: 1,
             thumb_pool,
             tx,
             rx,
@@ -671,6 +742,8 @@ impl ImageSearchApp {
         }
         let allow_descriptor_backfill = !self.indexing;
         self.clear_face_search_result_state();
+        self.search_mode = SearchMode::SimilarImage;
+        self.search_text.clear();
         self.searching = true;
         self.busy = true;
         self.last_error = None;
@@ -694,7 +767,8 @@ impl ImageSearchApp {
 
     pub(super) fn visible_indices(&self) -> Vec<usize> {
         let text_filter_active = !self.search_text.trim().is_empty();
-        self.source()
+        let source = self.source();
+        let mut visible = source
             .iter()
             .enumerate()
             .filter(|(_, record)| {
@@ -717,7 +791,27 @@ impl ImageSearchApp {
                         <= self.color_tolerance
             })
             .map(|(index, _)| index)
-            .collect()
+            .collect::<Vec<_>>();
+
+        match self.sort_mode {
+            SortMode::Relevance => {}
+            SortMode::Name => visible.sort_by(|a, b| {
+                source[*a]
+                    .file_name
+                    .to_lowercase()
+                    .cmp(&source[*b].file_name.to_lowercase())
+            }),
+            SortMode::Modified => {
+                visible.sort_by(|a, b| source[*b].modified.cmp(&source[*a].modified))
+            }
+            SortMode::Size => visible.sort_by(|a, b| source[*b].size.cmp(&source[*a].size)),
+            SortMode::Resolution => visible.sort_by(|a, b| {
+                let a_pixels = source[*a].width as u64 * source[*a].height as u64;
+                let b_pixels = source[*b].width as u64 * source[*b].height as u64;
+                b_pixels.cmp(&a_pixels)
+            }),
+        }
+        visible
     }
 
     fn observe_text_search_input(&mut self) {
@@ -793,6 +887,15 @@ impl ImageSearchApp {
         None
     }
 
+    pub(super) fn visible_result_paths(&self) -> Vec<PathBuf> {
+        let indices = self.visible_indices();
+        let source = self.source();
+        indices
+            .into_iter()
+            .filter_map(|index| source.get(index).map(|record| record.path.clone()))
+            .collect()
+    }
+
     pub(super) fn select_path(&mut self, path: &Path, additive: bool) {
         if additive {
             if !self.selected_paths.insert(path.to_path_buf()) {
@@ -802,6 +905,36 @@ impl ImageSearchApp {
             self.selected_paths.clear();
             self.selected_paths.insert(path.to_path_buf());
         }
+        self.selection_anchor = Some(path.to_path_buf());
+        self.focused_result = Some(path.to_path_buf());
+    }
+
+    pub(super) fn select_path_with_modifiers(&mut self, path: &Path, additive: bool, range: bool) {
+        if !range {
+            self.select_path(path, additive);
+            return;
+        }
+
+        let visible = self.visible_result_paths();
+        let anchor = self
+            .selection_anchor
+            .as_ref()
+            .or(self.focused_result.as_ref())
+            .and_then(|anchor| visible.iter().position(|candidate| candidate == anchor));
+        let target = visible.iter().position(|candidate| candidate == path);
+        let (Some(anchor), Some(target)) = (anchor, target) else {
+            self.select_path(path, additive);
+            return;
+        };
+
+        if !additive {
+            self.selected_paths.clear();
+        }
+        let start = anchor.min(target);
+        let end = anchor.max(target);
+        self.selected_paths
+            .extend(visible[start..=end].iter().cloned());
+        self.focused_result = Some(path.to_path_buf());
     }
 
     fn clear_thumbnail_cache(&mut self) {
@@ -813,167 +946,6 @@ impl ImageSearchApp {
 
     fn show_settings_window(&mut self, ctx: &egui::Context) {
         settings_window::show(self, ctx);
-    }
-
-    fn show_search_sidebar(&mut self, ctx: &egui::Context) {
-        egui::SidePanel::left("search_sidebar")
-            .resizable(true)
-            .default_width(330.0)
-            .min_width(280.0)
-            .max_width(470.0)
-            .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.heading("Search");
-                    self.show_collection_filter(ui);
-                    self.show_people_filter(ui);
-                    ui.add_space(6.0);
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.search_text)
-                            .hint_text("filename, path, description, keywords…")
-                            .desired_width(f32::INFINITY),
-                    );
-                    if self.text_search_pending {
-                        ui.small("Searching indexed text…");
-                    }
-
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add_enabled(
-                                self.can_run_similarity_search(),
-                                egui::Button::new("◉ Search by image"),
-                            )
-                            .clicked()
-                        {
-                            self.choose_similarity_image();
-                        }
-                        if self.similarity_results.is_some()
-                            && ui.button("Clear image search").clicked()
-                        {
-                            self.similarity_results = None;
-                            self.query_image = None;
-                            self.selected_paths.clear();
-                            self.clear_face_search_result_state();
-                        }
-                        if ui
-                            .add_enabled(!self.busy, egui::Button::new("👤 Face Search"))
-                            .clicked()
-                        {
-                            self.open_face_search();
-                        }
-                    });
-                    if self.indexing && !self.index_paused {
-                        ui.small("Pause indexing to search the already committed images.");
-                    } else if self.indexing && self.index_paused {
-                        ui.small("Indexing is paused; image search uses committed data only.");
-                    }
-
-                    if let Some(query) = self.query_image.clone() {
-                        ui.add_space(8.0);
-                        ui.strong("Similarity query");
-                        if let Some(texture) = self.thumbnail(&query) {
-                            views::show_query_preview(ui, &texture, 220.0);
-                        } else {
-                            ui.add_sized([220.0, 150.0], egui::Label::new("Loading preview…"));
-                        }
-                        ui.small(views::truncate_middle(&query.display().to_string(), 46))
-                            .on_hover_text(query.display().to_string());
-                    }
-
-                    ui.add_space(10.0);
-                    ui.separator();
-                    ui.strong("Color filter");
-                    ui.checkbox(&mut self.color_enabled, "Enable explicit color filter");
-                    if self.color_enabled {
-                        ui.horizontal(|ui| {
-                            ui.color_edit_button_srgb(&mut self.target_color);
-                            ui.add(
-                                egui::Slider::new(&mut self.color_tolerance, 0.03..=0.70)
-                                    .text("Tolerance"),
-                            );
-                        });
-                    }
-
-                    ui.add_space(10.0);
-                    ui.separator();
-                    ui.strong("Similarity weights");
-                    ui.small("Relative weights are normalized automatically.");
-                    ui.add(
-                        egui::Slider::new(
-                            &mut self.similarity_settings.color_distribution_weight,
-                            0.0..=100.0,
-                        )
-                        .text("Color distribution")
-                        .suffix("%"),
-                    );
-                    ui.add(
-                        egui::Slider::new(
-                            &mut self.similarity_settings.texture_weight,
-                            0.0..=100.0,
-                        )
-                        .text("Texture / pattern")
-                        .suffix("%"),
-                    );
-                    ui.add(
-                        egui::Slider::new(&mut self.similarity_settings.clip_weight, 0.0..=100.0)
-                            .text("CLIP semantic")
-                            .suffix("%"),
-                    );
-                    ui.add(
-                        egui::Slider::new(
-                            &mut self.similarity_settings.dominant_color_weight,
-                            0.0..=100.0,
-                        )
-                        .text("Dominant color")
-                        .suffix("%"),
-                    );
-                    ui.checkbox(
-                        &mut self.similarity_settings.strict_color_rejection,
-                        "Reject color mismatches",
-                    );
-                    if self.similarity_settings.strict_color_rejection {
-                        ui.add(
-                            egui::Slider::new(
-                                &mut self.similarity_settings.min_color_distribution_match,
-                                0.0..=100.0,
-                            )
-                            .text("Min color-distribution match")
-                            .suffix("%"),
-                        );
-                        ui.add(
-                            egui::Slider::new(
-                                &mut self.similarity_settings.max_dominant_color_difference,
-                                5.0..=100.0,
-                            )
-                            .text("Max dominant-color difference")
-                            .suffix("%"),
-                        );
-                    }
-                    ui.horizontal(|ui| {
-                        if ui.button("Reset 44 / 31 / 20 / 5").clicked() {
-                            self.similarity_settings = indexer::SimilaritySettings::default();
-                        }
-                        if ui
-                            .add_enabled(
-                                self.query_image.is_some() && self.can_run_similarity_search(),
-                                egui::Button::new("Apply / re-run"),
-                            )
-                            .clicked()
-                        {
-                            self.rerun_similarity_search();
-                        }
-                    });
-
-                    if !self.selected_paths.is_empty() {
-                        ui.add_space(8.0);
-                        ui.small(format!("{} selected", self.selected_paths.len()));
-                    }
-                    if let Some(error) = &self.last_error {
-                        ui.add_space(8.0);
-                        ui.colored_label(egui::Color32::LIGHT_RED, error);
-                    }
-                });
-            });
     }
 
     fn show_close_confirmation(&mut self, ctx: &egui::Context) {
@@ -1020,6 +992,7 @@ impl ImageSearchApp {
 
 impl eframe::App for ImageSearchApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.apply_design_system(ctx);
         self.process_startup_messages();
         self.process_worker_messages();
         self.process_face_runtime_messages();
@@ -1030,6 +1003,7 @@ impl eframe::App for ImageSearchApp {
         self.observe_text_search_input();
         self.dispatch_text_search_if_due();
         self.process_text_search_results();
+        self.handle_result_shortcuts(ctx);
 
         if self.text_search_pending
             || self.text_search_due.is_some()
@@ -1046,31 +1020,48 @@ impl eframe::App for ImageSearchApp {
             self.close_confirmation_open = true;
         }
         self.show_close_confirmation(ctx);
+        self.show_error_banner(ctx);
+        self.show_task_center(ctx);
 
         if self.busy || self.face_model_download_running() {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
 
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
+            ui.set_min_height(theme::TOP_BAR_HEIGHT);
             ui.horizontal(|ui| {
                 ui.strong("Windows Image Search");
-                if ui.button("⚙ Settings").clicked() {
-                    self.settings_open = true;
+                ui.separator();
+                if ui
+                    .selectable_label(self.collection_filter_chip().is_none(), "All Photos")
+                    .clicked()
+                {
+                    self.clear_collection_filter();
                 }
                 if ui
-                    .add_enabled(!self.busy, egui::Button::new("👥 People"))
+                    .button(format!("Collections ({})", self.collection_count()))
+                    .clicked()
+                {
+                    self.collections_open = true;
+                }
+                if ui
+                    .add_enabled(!self.busy, egui::Button::new("People"))
                     .clicked()
                 {
                     self.open_people_manager();
                 }
+                ui.separator();
                 if ui
                     .add_enabled(
                         !self.busy && !self.roots.is_empty(),
-                        egui::Button::new("⟳ Rescan"),
+                        egui::Button::new("Rescan"),
                     )
                     .clicked()
                 {
                     self.start_rescan();
+                }
+                if ui.button("Settings").clicked() {
+                    self.settings_open = true;
                 }
                 ui.separator();
                 ui.small(format!("{} indexed images", self.images.len()));
@@ -1081,11 +1072,13 @@ impl eframe::App for ImageSearchApp {
         });
 
         self.show_search_sidebar(ctx);
+        self.show_inspector(ctx);
+        self.show_collections_workspace(ctx);
         self.show_settings_window(ctx);
-        self.show_face_search_window(ctx);
         self.show_people_manager_window(ctx);
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+            ui.set_min_height(theme::STATUS_BAR_HEIGHT);
             ui.horizontal(|ui| {
                 if self.busy || self.face_model_download_running() {
                     ui.spinner();
@@ -1097,12 +1090,10 @@ impl eframe::App for ImageSearchApp {
                     ui.small(file_name);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    self.show_task_status_button(ui);
+                    ui.separator();
                     if self.indexing && self.index_control.is_some() {
-                        let label = if self.index_paused {
-                            "▶ Resume"
-                        } else {
-                            "⏸ Pause"
-                        };
+                        let label = if self.index_paused { "Resume" } else { "Pause" };
                         if ui
                             .add_enabled(!self.searching, egui::Button::new(label))
                             .on_hover_text(if self.searching {
@@ -1141,44 +1132,61 @@ impl eframe::App for ImageSearchApp {
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let view_label = match self.view_mode {
-                        ViewMode::Grid => "▦ Grid",
-                        ViewMode::Details => "☷ Details",
-                    };
-                    if ui.button(view_label).clicked() {
-                        self.view_mode = match self.view_mode {
-                            ViewMode::Grid => ViewMode::Details,
-                            ViewMode::Details => ViewMode::Grid,
-                        };
-                    }
+                    ui.toggle_value(&mut self.inspector_open, "Inspector");
+                    ui.separator();
+                    egui::ComboBox::from_id_salt("result-sort")
+                        .selected_text(self.sort_mode.label())
+                        .width(112.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.sort_mode,
+                                SortMode::Relevance,
+                                "Relevance",
+                            );
+                            ui.selectable_value(&mut self.sort_mode, SortMode::Name, "Name");
+                            ui.selectable_value(
+                                &mut self.sort_mode,
+                                SortMode::Modified,
+                                "Modified",
+                            );
+                            ui.selectable_value(&mut self.sort_mode, SortMode::Size, "File size");
+                            ui.selectable_value(
+                                &mut self.sort_mode,
+                                SortMode::Resolution,
+                                "Resolution",
+                            );
+                        });
+                    ui.small("Sort");
+                    ui.separator();
+                    ui.selectable_value(&mut self.view_mode, ViewMode::Details, "Details");
+                    ui.selectable_value(&mut self.view_mode, ViewMode::Grid, "Grid");
+                    ui.separator();
+                    ui.menu_button("Display", |ui| {
+                        ui.strong("Thumbnail fit");
+                        ui.selectable_value(
+                            &mut self.thumb_fit,
+                            ThumbnailFit::Contain,
+                            "Contain whole image",
+                        );
+                        ui.selectable_value(&mut self.thumb_fit, ThumbnailFit::Cover, "Cover tile");
+                        ui.separator();
+                        ui.checkbox(&mut self.inspector_open, "Show Inspector");
+                    });
 
-                    let fit_label = match self.thumb_fit {
-                        ThumbnailFit::Contain => "Contain",
-                        ThumbnailFit::Cover => "Cover",
-                    };
-                    if ui.button(fit_label).clicked() {
-                        self.thumb_fit = match self.thumb_fit {
-                            ThumbnailFit::Contain => ThumbnailFit::Cover,
-                            ThumbnailFit::Cover => ThumbnailFit::Contain,
-                        };
-                    }
-
-                    ui.add(
+                    ui.add_sized(
+                        [150.0, 20.0],
                         egui::Slider::new(&mut self.thumb_size, 96.0..=512.0)
-                            .text("Thumbnail")
-                            .suffix(" px"),
+                            .text("Size")
+                            .suffix(" px")
+                            .integer(),
                     );
                 });
             });
             ui.separator();
+            self.show_active_filter_chips(ui);
+            self.show_selection_bar(ui);
             if visible.is_empty() {
-                ui.centered_and_justified(|ui| {
-                    ui.label(if self.images.is_empty() {
-                        "No indexed images yet. Open Settings to add a folder, then Rescan."
-                    } else {
-                        "No images match the current filters."
-                    });
-                });
+                self.show_empty_state(ui);
             } else if self.view_mode == ViewMode::Grid {
                 self.show_grid(ui, &visible);
             } else {
