@@ -18,5 +18,38 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Smoke test
-        run: echo "vendor workflow is valid"
+
+      - name: Install rustfmt
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Vendor models and patch runtime
+        run: python3 scripts/vendor-face-models.py
+
+      - name: Format Rust changes
+        run: cargo fmt --all
+
+      - name: Verify vendored model hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ebafce4e3c118d6554634be5c27ab333b4c047a9a8c3faf1d7cf93101c22f0f0  models/faces/face_detection_yunet_2026may.onnx" | sha256sum -c -
+          echo "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79  models/faces/face_recognition_sface_2021dec.onnx" | sha256sum -c -
+          test "$(stat -c%s models/faces/face_detection_yunet_2026may.onnx)" = "229738"
+          test "$(stat -c%s models/faces/face_recognition_sface_2021dec.onnx)" = "38696353"
+          git diff --check
+
+      - name: Commit models and automatic bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add models/faces src/face_model_manager.rs src/ui/face_runtime.rs src/ui/task_center.rs
+          if git diff --cached --quiet; then
+            echo "Face models and runtime bootstrap are already up to date."
+            exit 0
+          fi
+          git commit -m "Vendor face models and auto-download before face scan"
+          git push origin HEAD:main
