@@ -1,0 +1,45 @@
+name: Apply YuNet batch benchmark sweep
+
+on:
+  push:
+    branches: [perf/yunet-batch-benchmark-sweep]
+    paths:
+      - '.github/workflows/apply-yunet-batch-benchmark.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/yunet-batch-benchmark-sweep
+          fetch-depth: 0
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply benchmark patch
+        run: python scripts/apply-yunet-batch-benchmark.py
+      - name: Format Rust
+        run: cargo fmt --all
+      - name: Commit benchmark source
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/face_detection/yunet_adapter.rs src/face_yunet_benchmark.rs docs/face-benchmark-gate.md
+          git commit -m 'perf(face): benchmark YuNet batch sizes'
+          git push origin HEAD:perf/yunet-batch-benchmark-sweep
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Cargo check
+        run: cargo check --all-targets
+      - name: Tests
+        run: cargo test --all-targets
+      - name: Release build
+        run: cargo build --release
