@@ -30,7 +30,7 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/ui/mod.rs
+          git add src/ui/mod.rs src/ui/face_search_panel.rs
           git commit -m 'fix(ui): invalidate cached order for new similarity results'
           git push origin HEAD:perf/cache-visible-result-order
       - name: Cache Rust build
