@@ -20,6 +20,7 @@ pub(super) struct CollectionsState {
     effective: HashMap<i64, HashSet<PathBuf>>,
     discovered_counts: HashMap<i64, usize>,
     face_detection: HashMap<i64, bool>,
+    filter_revision: u64,
     new_name: String,
     rename_name: String,
 }
@@ -101,6 +102,7 @@ impl CollectionsState {
     }
 
     pub(super) fn rebuild_effective(&mut self, images: &[ImageSummary]) {
+        self.filter_revision = self.filter_revision.wrapping_add(1);
         self.effective.clear();
         for item in &self.items {
             let Some(membership) = self.memberships.get(&item.id) else {
@@ -173,6 +175,13 @@ impl ImageSearchApp {
 
     pub(super) fn collection_filter_matches(&self, path: &Path) -> bool {
         self.collections.filter_matches(path)
+    }
+
+    pub(super) fn collection_filter_cache_token(&self) -> (Option<i64>, u64) {
+        (
+            self.collections.active_filter,
+            self.collections.filter_revision,
+        )
     }
 
     pub(super) fn collection_filter_chip(&self) -> Option<String> {
