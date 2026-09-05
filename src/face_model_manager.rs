@@ -35,7 +35,7 @@ pub struct FaceModelManifest {
 pub const YUNET: FaceModelManifest = FaceModelManifest {
     kind: FaceModelKind::YuNet,
     file_name: "face_detection_yunet_2026may.onnx",
-    source_url: "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2026may.onnx",
+    source_url: "https://raw.githubusercontent.com/emadgh/windows-image-search/main/models/faces/face_detection_yunet_2026may.onnx",
     expected_size: 229_738,
     sha256_hex: "ebafce4e3c118d6554634be5c27ab333b4c047a9a8c3faf1d7cf93101c22f0f0",
     license: "MIT",
@@ -45,7 +45,7 @@ pub const YUNET: FaceModelManifest = FaceModelManifest {
 pub const SFACE: FaceModelManifest = FaceModelManifest {
     kind: FaceModelKind::SFace,
     file_name: "face_recognition_sface_2021dec.onnx",
-    source_url: "https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx",
+    source_url: "https://raw.githubusercontent.com/emadgh/windows-image-search/main/models/faces/face_recognition_sface_2021dec.onnx",
     expected_size: 38_696_353,
     sha256_hex: "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79",
     license: "Apache-2.0",

@@ -7,6 +7,7 @@ use crate::face_embedding_pipeline::{
 };
 use crate::face_model_manager::{self, FaceModelKind, ManagedModelState, SFACE, YUNET};
 use crate::face_pipeline::{FacePipelineEvent, FacePipelineOptions, FacePipelineSummary};
+use crate::face_scope;
 use crate::face_sface_production;
 use crate::people_clustering::{self, PeopleClusteringOptions, PeopleClusteringSummary};
 use crate::people_settings::{self, PeopleSettings};
@@ -104,7 +105,11 @@ impl ImageSearchApp {
     }
 
     pub(super) fn schedule_face_pipeline_after_base_index(&mut self) {
-        if self.face_runtime.configured_and_available() {
+        let face_needed = self
+            .roots
+            .iter()
+            .any(|root| face_scope::count_eligible_paths(&self.db_path, root).unwrap_or(0) > 0);
+        if face_needed {
             self.face_runtime.run_after_base_index = true;
         }
     }
@@ -266,6 +271,20 @@ impl ImageSearchApp {
         self.face_runtime.model_download_running
     }
 
+    pub(super) fn face_model_download_progress(&self) -> Option<(&'static str, u64, u64)> {
+        if !self.face_runtime.model_download_running {
+            return None;
+        }
+        Some((
+            self.face_runtime
+                .model_download_kind
+                .map(|kind| kind.label())
+                .unwrap_or("Face models"),
+            self.face_runtime.model_downloaded,
+            self.face_runtime.model_download_total,
+        ))
+    }
+
     fn model_path_is_custom(&self, kind: FaceModelKind) -> bool {
         let path = match kind {
             FaceModelKind::YuNet => &self.face_runtime.settings.model_path,
@@ -279,6 +298,20 @@ impl ImageSearchApp {
             FaceModelKind::SFace => SFACE,
         };
         !face_model_manager::is_managed_path(path, &self.face_runtime.model_cache_dir, manifest)
+    }
+
+    fn managed_default_models_needed(&self) -> bool {
+        let yunet_needed = !self.model_path_is_custom(FaceModelKind::YuNet)
+            && !matches!(
+                face_model_manager::inspect(&self.face_runtime.model_cache_dir, YUNET),
+                ManagedModelState::Ready
+            );
+        let sface_needed = !self.model_path_is_custom(FaceModelKind::SFace)
+            && !matches!(
+                face_model_manager::inspect(&self.face_runtime.model_cache_dir, SFACE),
+                ManagedModelState::Ready
+            );
+        yunet_needed || sface_needed
     }
 
     fn start_default_face_model_download(&mut self, force: bool, run_face_after: bool) {
@@ -438,14 +471,17 @@ impl ImageSearchApp {
                 }
             });
         }
-        ui.small("Defaults are downloaded from OpenCV Zoo, verified by exact size + SHA-256, validated as ONNX, then atomically installed. Browse paths below remain advanced custom overrides.");
+        ui.small("Defaults are downloaded from this project's GitHub repository, verified by exact size + SHA-256, validated as ONNX, then atomically installed. Browse paths below remain advanced custom overrides.");
     }
 
     fn start_face_pipeline(&mut self) {
         if self.face_runtime.running || self.busy {
             return;
         }
-        if !self.face_runtime.settings.configured() || !self.face_embedding_settings.configured() {
+        if self.managed_default_models_needed()
+            || !self.face_runtime.settings.configured()
+            || !self.face_embedding_settings.configured()
+        {
             self.start_default_face_model_download(false, true);
             return;
         }

@@ -56,7 +56,30 @@ impl ImageSearchApp {
                         ui.label(super::views::truncate_middle(&self.status, 120))
                             .on_hover_text(&self.status);
 
-                        if let Some((done, total)) = self.progress.filter(|(_, total)| *total > 0) {
+                        if let Some((label, downloaded, total)) = self.face_model_download_progress() {
+                            let fraction = if total == 0 {
+                                0.0
+                            } else {
+                                downloaded as f32 / total as f32
+                            };
+                            let detail = if total == 0 {
+                                format!("Preparing {label} download…")
+                            } else {
+                                format!(
+                                    "{label}: {:.1}% · {:.1}/{:.1} MB",
+                                    fraction * 100.0,
+                                    downloaded as f64 / 1_048_576.0,
+                                    total as f64 / 1_048_576.0
+                                )
+                            };
+                            ui.add(
+                                egui::ProgressBar::new(fraction.clamp(0.0, 1.0))
+                                    .desired_width(ui.available_width().min(440.0))
+                                    .text(detail),
+                            );
+                        } else if let Some((done, total)) =
+                            self.progress.filter(|(_, total)| *total > 0)
+                        {
                             ui.add(
                                 egui::ProgressBar::new(done as f32 / total as f32)
                                     .desired_width(ui.available_width().min(440.0))
