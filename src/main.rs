@@ -47,6 +47,7 @@ mod text_search;
 mod texture_benchmark;
 mod thumbnail_cache;
 mod ui;
+mod update;
 mod windows_shell;
 
 use anyhow::{Context, Result};

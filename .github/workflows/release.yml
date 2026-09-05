@@ -1,0 +1,36 @@
+name: Windows release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test --all-targets
+      - name: Build release
+        run: cargo build --release
+      - name: Prepare updater assets
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/windows-image-search.exe dist/windows-image-search.exe
+          $hash = (Get-FileHash -Algorithm SHA256 dist/windows-image-search.exe).Hash.ToLowerInvariant()
+          "$hash  windows-image-search.exe" | Set-Content -Encoding ascii -NoNewline dist/windows-image-search.exe.sha256
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            dist/windows-image-search.exe
+            dist/windows-image-search.exe.sha256

@@ -5411,6 +5411,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
+name = "update-via-github"
+version = "0.1.0"
+source = "git+https://github.com/emadgh/update-via-github.git#720f3d4c80c7d65e1427640b9ae9aea7946dc9d5"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "ureq"
 version = "2.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6135,6 +6146,7 @@ dependencies = [
  "rfd",
  "rusqlite",
  "sha2",
+ "update-via-github",
  "ureq 2.12.1",
  "walkdir",
  "windows 0.61.3",
