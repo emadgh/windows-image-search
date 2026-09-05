@@ -6,6 +6,7 @@ on:
       - feat/ui-ux-overhaul-phase-1
     paths:
       - scripts/apply_ui_ux_batch8.py
+      - .github/workflows/apply-ui-ux-batch8.yml
 
 permissions:
   contents: write
