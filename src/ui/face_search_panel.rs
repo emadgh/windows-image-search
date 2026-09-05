@@ -376,10 +376,6 @@ impl ImageSearchApp {
     }
 
     pub(super) fn show_face_search_sidebar(&mut self, ui: &mut egui::Ui) {
-        if self.face_search_ui.suggestions.is_empty() && !self.face_search_ui.loading {
-            self.refresh_face_suggestions();
-        }
-
         ui.horizontal_wrapped(|ui| {
             if ui
                 .add_enabled(
