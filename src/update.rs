@@ -95,3 +95,45 @@ impl UpdateManager {
         self.inner.apply_ready()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_settings_path() -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "windows-image-search-update-settings-{}-{nonce}.ini",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn update_settings_default_to_background_check_and_download() {
+        assert_eq!(
+            UpdateSettings::default(),
+            UpdateSettings {
+                auto_check: true,
+                auto_download: true,
+            }
+        );
+    }
+
+    #[test]
+    fn update_settings_round_trip() {
+        let path = temp_settings_path();
+        let expected = UpdateSettings {
+            auto_check: false,
+            auto_download: true,
+        };
+
+        save_settings(&path, expected).expect("save update settings");
+        assert_eq!(load_settings(&path), expected);
+
+        let _ = std::fs::remove_file(path);
+    }
+}
