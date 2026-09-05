@@ -73,6 +73,12 @@ struct Effects {
     download_update: bool,
 }
 
+pub(super) fn open_updates(app: &mut ImageSearchApp, ctx: &egui::Context) {
+    app.settings_open = true;
+    let category_id = egui::Id::new("preferences-category");
+    ctx.data_mut(|data| data.insert_temp(category_id, SettingsCategory::Updates.index()));
+}
+
 pub(super) fn show(app: &mut ImageSearchApp, ctx: &egui::Context) {
     if !app.settings_open {
         return;
@@ -612,13 +618,13 @@ fn settings_updates(app: &mut ImageSearchApp, ui: &mut egui::Ui, effects: &mut E
             effects.download_update = true;
         }
         if matches!(&status, UpdateStatus::Ready(_, _)) {
-            let can_install = !app.busy && !app.face_model_download_running();
+            let can_install = !super::update_ui::install_blocked(app);
             if ui
                 .add_enabled(can_install, egui::Button::new("Restart & install"))
                 .on_hover_text(if can_install {
                     "Close the application, replace the executable, then restart"
                 } else {
-                    "Finish active indexing/search/model work before installing"
+                    "Finish active indexing/search/model/People work before installing"
                 })
                 .clicked()
             {
