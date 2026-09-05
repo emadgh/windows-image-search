@@ -115,7 +115,7 @@ impl ImageSearchApp {
         let roots = self.roots.clone();
         let tx = self.people_filter_ui.tx.clone();
         std::thread::spawn(move || {
-            let result = people_filter::load_named_people(&db_path, &roots)
+            let result = people_filter::load_named_people_with_representatives(&db_path, &roots)
                 .map_err(|err| format!("{err:#}"));
             let _ = tx.send(PeopleFilterMessage::Catalog { generation, result });
         });
@@ -203,7 +203,11 @@ impl ImageSearchApp {
                     self.people_filter_ui.selected_person_ids.clear();
                     self.request_people_filter_resolution();
                 }
-                if ui.small_button("⟳").on_hover_text("Refresh named People").clicked() {
+                if ui
+                    .small_button("⟳")
+                    .on_hover_text("Refresh named People")
+                    .clicked()
+                {
                     self.refresh_people_filter_catalog();
                 }
             });
