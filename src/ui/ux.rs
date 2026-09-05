@@ -4,7 +4,11 @@ use std::path::PathBuf;
 
 impl ImageSearchApp {
     pub(super) fn handle_result_shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.wants_keyboard_input() || self.settings_open || self.close_confirmation_open {
+        if ctx.wants_keyboard_input()
+            || self.settings_open
+            || self.collections_open
+            || self.close_confirmation_open
+        {
             return;
         }
 

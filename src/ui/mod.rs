@@ -33,6 +33,13 @@ use texture_lru::{TextureLru, DEFAULT_GPU_TEXTURE_CAPACITY};
 use thumbnails::{ThumbnailPool, ThumbnailResult};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SearchMode {
+    Text,
+    SimilarImage,
+    Face,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum ViewMode {
     Grid,
     Details,
@@ -103,6 +110,7 @@ pub struct ImageSearchApp {
     people_manager_ui: people_manager::PeopleManagerUiState,
     collections: collections::CollectionsState,
     pub(super) collections_open: bool,
+    pub(super) search_mode: SearchMode,
     pub(super) search_text: String,
     text_search_service: TextSearchService,
     text_search_matches: Option<HashSet<PathBuf>>,
@@ -235,6 +243,7 @@ impl ImageSearchApp {
             people_manager_ui,
             collections: collections::CollectionsState::default(),
             collections_open: false,
+            search_mode: SearchMode::Text,
             search_text: String::new(),
             text_search_service,
             text_search_matches: None,
@@ -708,6 +717,8 @@ impl ImageSearchApp {
         }
         let allow_descriptor_backfill = !self.indexing;
         self.clear_face_search_result_state();
+        self.search_mode = SearchMode::SimilarImage;
+        self.search_text.clear();
         self.searching = true;
         self.busy = true;
         self.last_error = None;
@@ -1036,7 +1047,6 @@ impl eframe::App for ImageSearchApp {
         self.show_inspector(ctx);
         self.show_collections_workspace(ctx);
         self.show_settings_window(ctx);
-        self.show_face_search_window(ctx);
         self.show_people_manager_window(ctx);
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
