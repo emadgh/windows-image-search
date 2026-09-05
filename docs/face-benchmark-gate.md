@@ -51,15 +51,16 @@ Each run creates `benchmark-results/v0.3-face-benchmark-gate-<timestamp>/` plus 
 
 - YuNet CPU and DirectML stdout/stderr/reports
 - SFace CPU and DirectML stdout/stderr/reports
+- the current populated-index `--benchmark-face-ann 32` report for face-storage and exact-vs-ANN crossover evidence
 - `manifest.json` with exact commands, exit codes, wall time, process RAM/private-memory peaks, sampled GPU dedicated/shared memory and source manifest paths
 - `system-info.json` with Windows, CPU, RAM, GPU and driver information
 - `summary.txt` for a compact CPU-vs-DirectML comparison
 - `version.txt` for the exact application build under test
 
-The adapter reports retain the shared #92 evaluator metrics. YuNet reports IoU-based precision/recall/F1, no-face false positives and face-size recall buckets. SFace reports Recall@1/5/10, MRR, same/different-person distance distributions and threshold-sweep results. Both adapters also report model initialization time and persistent-session inference throughput.
+The adapter reports retain the shared #92 evaluator metrics. YuNet reports IoU-based precision/recall/F1, no-face false positives and face-size recall buckets. SFace reports Recall@1/5/10, MRR, same/different-person distance distributions and threshold-sweep results. Both adapters also report model initialization time and persistent-session inference throughput. YuNet additionally performs a benchmark-only batch-size sweep for 1/2/4/8/16 copies of the first oriented benchmark image at its native padded input geometry, recording support/failure, warm-up latency, mean/P50 batch latency, throughput, output-shape validation, and geometry stability for each size. This detector sweep isolates ONNX session batch behavior and does not replace the normal per-image detector quality evaluation. SFace performs the corresponding benchmark-only 1/2/4/8/16 aligned-face sweep on the same persistent ONNX session. Batch failures are retained as evidence and do not change production detector or embedding behavior.
 
 ## Interpretation
 
 Do not select thresholds or execution-provider defaults from synthetic/unit-test data. Run the gate on representative small, angled, occluded, multi-face and low-resolution detector examples plus identity examples spanning pose, lighting, age/time, crop and compression changes. Attach or summarize the generated ZIP in #62 before changing production defaults.
 
-This gate covers model quality, initialization/inference timing and process/GPU memory. The remaining #62 evidence items—large-scale face-index storage and exact-vs-ANN crossover—should be measured separately against a populated representative face index.
+The gate covers model quality, initialization/inference timing, CPU/DirectML execution, batch-size behavior, process/GPU memory, and—through its built-in `--benchmark-face-ann 32` step—face-index storage plus exact-vs-ANN crossover. The storage/crossover result is only production evidence when the current index contains a representative number and distribution of face embeddings; a small or unrepresentative index should be recorded as insufficient evidence rather than used to select an ANN default.
