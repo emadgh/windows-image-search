@@ -25,7 +25,14 @@ jobs:
           components: rustfmt
 
       - name: Vendor models and patch runtime
-        run: python3 scripts/vendor-face-models.py
+        shell: bash
+        run: |
+          set -euo pipefail
+          # OpenCV Zoo stores these ONNX files in Git LFS. The normal raw URL
+          # returns only the pointer, while media.githubusercontent.com serves
+          # the actual LFS object bytes.
+          sed -i 's#https://raw.githubusercontent.com/opencv/opencv_zoo/main/#https://media.githubusercontent.com/media/opencv/opencv_zoo/main/#g' scripts/vendor-face-models.py
+          python3 scripts/vendor-face-models.py
 
       - name: Format Rust changes
         run: cargo fmt --all
