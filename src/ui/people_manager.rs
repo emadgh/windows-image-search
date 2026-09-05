@@ -28,7 +28,7 @@ enum PeopleManagerUiMessage {
 }
 
 pub(super) struct PeopleManagerUiState {
-    open: bool,
+    pub(super) open: bool,
     catalog: EffectivePeopleCatalog,
     members_by_person: HashMap<String, Arc<Vec<EffectiveMember>>>,
     exceptions: Arc<Vec<EffectiveMember>>,

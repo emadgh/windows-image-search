@@ -8,6 +8,7 @@ impl ImageSearchApp {
             || self.settings_open
             || self.collections_open
             || self.task_center_open
+            || self.people_manager_ui.open
             || self.close_confirmation_open
         {
             return;
