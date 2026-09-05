@@ -21,17 +21,17 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: Apply benchmark patch
-        run: python scripts/apply-face-batch-benchmark.py
+      - name: Apply robustness patch
+        run: python scripts/fix-face-batch-benchmark-robustness.py
       - name: Format Rust
         run: cargo fmt --all
-      - name: Commit benchmark source
+      - name: Commit robustness fix
         shell: bash
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/face_sface_adapter.rs src/face_sface_benchmark.rs docs/face-benchmark-gate.md
-          git commit -m 'perf(face): benchmark SFace batch sizes'
+          git add src/face_sface_benchmark.rs
+          git commit -m 'fix(face): keep batch benchmark failures reportable'
           git push origin HEAD:perf/face-batch-benchmark-sweep
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
