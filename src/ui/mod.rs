@@ -97,6 +97,7 @@ impl SortMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct VisibleOrderKey {
     image_catalog_revision: u64,
+    similarity_results_revision: u64,
     source_ptr: usize,
     source_len: usize,
     source_is_similarity: bool,
@@ -189,6 +190,7 @@ pub struct ImageSearchApp {
     pub(super) thumb_fit: ThumbnailFit,
     pub(super) sort_mode: SortMode,
     image_catalog_revision: u64,
+    similarity_results_revision: u64,
     visible_order_cache: RefCell<VisibleOrderCache>,
     pub(super) inspector_open: bool,
     pub(super) appearance_mode: AppearanceMode,
@@ -327,6 +329,7 @@ impl ImageSearchApp {
             thumb_fit: ThumbnailFit::Contain,
             sort_mode: SortMode::Relevance,
             image_catalog_revision: 0,
+            similarity_results_revision: 0,
             visible_order_cache: RefCell::new(VisibleOrderCache::default()),
             inspector_open: true,
             appearance_mode: AppearanceMode::System,
@@ -432,6 +435,8 @@ impl ImageSearchApp {
                     self.refresh_text_search_after_data_change();
                 }
                 WorkerMessage::SimilarityResults(results) => {
+                    self.similarity_results_revision =
+                        self.similarity_results_revision.wrapping_add(1);
                     self.similarity_results = Some(results);
                     if !self.indexing {
                         self.progress = None;
@@ -824,6 +829,7 @@ impl ImageSearchApp {
         let (people_resolve_generation, people_resolving) = self.people_filter_cache_token();
         VisibleOrderKey {
             image_catalog_revision: self.image_catalog_revision,
+            similarity_results_revision: self.similarity_results_revision,
             source_ptr: source.as_ptr() as usize,
             source_len: source.len(),
             source_is_similarity: self.similarity_results.is_some(),
