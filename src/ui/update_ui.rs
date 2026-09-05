@@ -3,6 +3,14 @@ use crate::update::UpdateStatus;
 use eframe::egui;
 use std::time::Duration;
 
+pub(super) fn install_blocked(app: &ImageSearchApp) -> bool {
+    app.busy
+        || app.face_model_download_running()
+        || app.people_filter_work_pending()
+        || app.text_search_pending
+        || app.text_search_due.is_some()
+}
+
 pub(super) fn process(app: &mut ImageSearchApp, ctx: &egui::Context) {
     if matches!(
         app.update_manager.status(),
@@ -15,9 +23,10 @@ pub(super) fn process(app: &mut ImageSearchApp, ctx: &egui::Context) {
         return;
     }
     app.update_install_requested = false;
-    if app.busy || app.face_model_download_running() {
+    if install_blocked(app) {
         app.last_error = Some(
-            "Finish active indexing/search/model work before installing the update.".to_owned(),
+            "Finish active indexing/search/model/People work before installing the update."
+                .to_owned(),
         );
         return;
     }
@@ -50,7 +59,7 @@ pub(super) fn show_banner(app: &mut ImageSearchApp, ctx: &egui::Context) {
                         app.update_manager.start_download();
                     }
                     if ui.button("Open update settings").clicked() {
-                        app.settings_open = true;
+                        super::settings_window::open_updates(app, ctx);
                     }
                 });
             });
@@ -87,7 +96,7 @@ pub(super) fn show_banner(app: &mut ImageSearchApp, ctx: &egui::Context) {
             egui::TopBottomPanel::top("update-ready-banner").show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.strong(format!("Update {} is ready to install", info.version));
-                    let can_install = !app.busy && !app.face_model_download_running();
+                    let can_install = !install_blocked(app);
                     if ui
                         .add_enabled(can_install, egui::Button::new("Restart & install"))
                         .on_hover_text(if can_install {
@@ -100,7 +109,7 @@ pub(super) fn show_banner(app: &mut ImageSearchApp, ctx: &egui::Context) {
                         app.update_install_requested = true;
                     }
                     if ui.button("Update settings").clicked() {
-                        app.settings_open = true;
+                        super::settings_window::open_updates(app, ctx);
                     }
                 });
             });
