@@ -1,4 +1,4 @@
-name: Apply visible-order cache optimization
+name: Apply visible-order cache compile fix
 
 on:
   push:
@@ -20,7 +20,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: Apply cache optimization
+      - name: Apply compile fix
         run: python scripts/apply_visible_order_cache.py
       - name: Format Rust
         run: cargo fmt --all
@@ -33,6 +33,6 @@ jobs:
           fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/ui/mod.rs src/ui/collections.rs src/ui/people_filter.rs
-          git commit -m 'perf(ui): cache filtered and sorted result order'
+          git add src/ui/mod.rs
+          git commit -m 'fix(ui): derive Debug for cached sort mode'
           git push origin HEAD:perf/cache-visible-result-order
