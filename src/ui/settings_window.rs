@@ -8,7 +8,6 @@ use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SettingsCategory {
-    Collections,
     SearchClip,
     FacesPeople,
     Performance,
@@ -16,8 +15,7 @@ enum SettingsCategory {
 }
 
 impl SettingsCategory {
-    const ALL: [Self; 5] = [
-        Self::Collections,
+    const ALL: [Self; 4] = [
         Self::SearchClip,
         Self::FacesPeople,
         Self::Performance,
@@ -26,7 +24,6 @@ impl SettingsCategory {
 
     fn label(self) -> &'static str {
         match self {
-            Self::Collections => "Collections",
             Self::SearchClip => "Search / CLIP",
             Self::FacesPeople => "Faces / People",
             Self::Performance => "Performance",
@@ -36,29 +33,21 @@ impl SettingsCategory {
 
     fn index(self) -> u8 {
         match self {
-            Self::Collections => 0,
-            Self::SearchClip => 1,
-            Self::FacesPeople => 2,
-            Self::Performance => 3,
-            Self::Storage => 4,
+            Self::SearchClip => 0,
+            Self::FacesPeople => 1,
+            Self::Performance => 2,
+            Self::Storage => 3,
         }
     }
 
     fn from_index(index: u8) -> Self {
         match index {
-            1 => Self::SearchClip,
-            2 => Self::FacesPeople,
-            3 => Self::Performance,
-            4 => Self::Storage,
-            _ => Self::Collections,
+            1 => Self::FacesPeople,
+            2 => Self::Performance,
+            3 => Self::Storage,
+            _ => Self::SearchClip,
         }
     }
-}
-
-pub(super) fn open_collections(app: &mut ImageSearchApp, ctx: &egui::Context) {
-    app.settings_open = true;
-    let category_id = egui::Id::new("preferences-category");
-    ctx.data_mut(|data| data.insert_temp(category_id, SettingsCategory::Collections.index()));
 }
 
 #[derive(Default)]
@@ -147,7 +136,6 @@ pub(super) fn show(app: &mut ImageSearchApp, ctx: &egui::Context) {
                                 .id_salt("preferences-category-content")
                                 .auto_shrink([false, false])
                                 .show(ui, |ui| match category {
-                                    SettingsCategory::Collections => settings_collections(app, ui),
                                     SettingsCategory::SearchClip => {
                                         settings_search_clip(app, ui, &mut effects)
                                     }
@@ -263,15 +251,6 @@ fn settings_library_indexing(app: &mut ImageSearchApp, ui: &mut egui::Ui, effect
     if let Some(reason) = &app.watcher_reconcile_required {
         ui.colored_label(egui::Color32::LIGHT_RED, reason);
     }
-}
-
-fn settings_collections(app: &mut ImageSearchApp, ui: &mut egui::Ui) {
-    section_title(
-        ui,
-        "Collections / Indexing",
-        "Collections are the library. Add folders here to attach/index them; source files and portable .imagesearch data are never deleted by collection edits.",
-    );
-    app.show_collections_settings(ui);
 }
 
 fn settings_search_clip(app: &mut ImageSearchApp, ui: &mut egui::Ui, effects: &mut Effects) {

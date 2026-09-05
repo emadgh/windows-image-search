@@ -1,4 +1,5 @@
 mod collections;
+mod collections_window;
 mod face_runtime;
 mod face_search_panel;
 mod inspector;
@@ -101,6 +102,7 @@ pub struct ImageSearchApp {
     people_filter_ui: people_filter::PeopleFilterUiState,
     people_manager_ui: people_manager::PeopleManagerUiState,
     collections: collections::CollectionsState,
+    pub(super) collections_open: bool,
     pub(super) search_text: String,
     text_search_service: TextSearchService,
     text_search_matches: Option<HashSet<PathBuf>>,
@@ -232,6 +234,7 @@ impl ImageSearchApp {
             people_filter_ui,
             people_manager_ui,
             collections: collections::CollectionsState::default(),
+            collections_open: false,
             search_text: String::new(),
             text_search_service,
             text_search_matches: None,
@@ -991,7 +994,7 @@ impl eframe::App for ImageSearchApp {
                 ui.strong("Windows Image Search");
                 ui.separator();
                 if ui
-                    .selectable_label(self.collection_filter_chip().is_none(), "Library")
+                    .selectable_label(self.collection_filter_chip().is_none(), "All Photos")
                     .clicked()
                 {
                     self.clear_collection_filter();
@@ -1000,7 +1003,7 @@ impl eframe::App for ImageSearchApp {
                     .button(format!("Collections ({})", self.collection_count()))
                     .clicked()
                 {
-                    settings_window::open_collections(self, ctx);
+                    self.collections_open = true;
                 }
                 if ui
                     .add_enabled(!self.busy, egui::Button::new("People"))
@@ -1031,6 +1034,7 @@ impl eframe::App for ImageSearchApp {
 
         self.show_search_sidebar(ctx);
         self.show_inspector(ctx);
+        self.show_collections_workspace(ctx);
         self.show_settings_window(ctx);
         self.show_face_search_window(ctx);
         self.show_people_manager_window(ctx);
