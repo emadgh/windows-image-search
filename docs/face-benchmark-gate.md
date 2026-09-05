@@ -51,6 +51,7 @@ Each run creates `benchmark-results/v0.3-face-benchmark-gate-<timestamp>/` plus 
 
 - YuNet CPU and DirectML stdout/stderr/reports
 - SFace CPU and DirectML stdout/stderr/reports
+- the current populated-index `--benchmark-face-ann 32` report for face-storage and exact-vs-ANN crossover evidence
 - `manifest.json` with exact commands, exit codes, wall time, process RAM/private-memory peaks, sampled GPU dedicated/shared memory and source manifest paths
 - `system-info.json` with Windows, CPU, RAM, GPU and driver information
 - `summary.txt` for a compact CPU-vs-DirectML comparison
@@ -62,4 +63,4 @@ The adapter reports retain the shared #92 evaluator metrics. YuNet reports IoU-b
 
 Do not select thresholds or execution-provider defaults from synthetic/unit-test data. Run the gate on representative small, angled, occluded, multi-face and low-resolution detector examples plus identity examples spanning pose, lighting, age/time, crop and compression changes. Attach or summarize the generated ZIP in #62 before changing production defaults.
 
-This gate covers model quality, initialization/inference timing and process/GPU memory. The remaining #62 evidence items—large-scale face-index storage and exact-vs-ANN crossover—should be measured separately against a populated representative face index.
+The gate covers model quality, initialization/inference timing, CPU/DirectML execution, batch-size behavior, process/GPU memory, and—through its built-in `--benchmark-face-ann 32` step—face-index storage plus exact-vs-ANN crossover. The storage/crossover result is only production evidence when the current index contains a representative number and distribution of face embeddings; a small or unrepresentative index should be recorded as insufficient evidence rather than used to select an ANN default.
