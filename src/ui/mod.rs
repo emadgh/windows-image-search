@@ -27,9 +27,12 @@ use crate::text_search::TextSearchService;
 use crate::thumbnail_cache;
 use eframe::egui;
 use egui::{ColorImage, TextureHandle, TextureOptions};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use texture_lru::{TextureLru, DEFAULT_GPU_TEXTURE_CAPACITY};
 use thumbnails::{ThumbnailPool, ThumbnailResult};
@@ -91,6 +94,47 @@ impl SortMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VisibleOrderKey {
+    image_catalog_revision: u64,
+    source_ptr: usize,
+    source_len: usize,
+    source_is_similarity: bool,
+    search_text_hash: u64,
+    text_search_generation: u64,
+    text_search_pending: bool,
+    text_match_count: usize,
+    collection_filter: Option<i64>,
+    collection_revision: u64,
+    people_resolve_generation: u64,
+    people_resolving: bool,
+    color_enabled: bool,
+    target_color: [u8; 3],
+    color_tolerance_bits: u32,
+    sort_mode: SortMode,
+}
+
+struct VisibleOrderCache {
+    key: Option<VisibleOrderKey>,
+    indices: Arc<[usize]>,
+}
+
+impl Default for VisibleOrderCache {
+    fn default() -> Self {
+        Self {
+            key: None,
+            indices: Vec::<usize>::new().into(),
+        }
+    }
+}
+
+fn sort_indices_by_cached_name<F>(indices: &mut [usize], mut key: F)
+where
+    F: FnMut(usize) -> String,
+{
+    indices.sort_by_cached_key(|index| key(*index));
+}
+
 enum StartupMessage {
     Stage {
         status: String,
@@ -144,6 +188,8 @@ pub struct ImageSearchApp {
     pub(super) thumb_size: f32,
     pub(super) thumb_fit: ThumbnailFit,
     pub(super) sort_mode: SortMode,
+    image_catalog_revision: u64,
+    visible_order_cache: RefCell<VisibleOrderCache>,
     pub(super) inspector_open: bool,
     pub(super) appearance_mode: AppearanceMode,
     pub(super) system_dark_mode: Option<bool>,
@@ -280,6 +326,8 @@ impl ImageSearchApp {
             thumb_size: 168.0,
             thumb_fit: ThumbnailFit::Contain,
             sort_mode: SortMode::Relevance,
+            image_catalog_revision: 0,
+            visible_order_cache: RefCell::new(VisibleOrderCache::default()),
             inspector_open: true,
             appearance_mode: AppearanceMode::System,
             system_dark_mode: None,
@@ -426,6 +474,7 @@ impl ImageSearchApp {
     }
 
     fn rebuild_image_positions(&mut self) {
+        self.image_catalog_revision = self.image_catalog_revision.wrapping_add(1);
         self.image_positions.clear();
         self.image_positions.extend(
             self.images
@@ -454,6 +503,7 @@ impl ImageSearchApp {
     }
 
     fn merge_indexed_batch(&mut self, records: Vec<ImageSummary>) {
+        self.image_catalog_revision = self.image_catalog_revision.wrapping_add(1);
         for record in records {
             self.textures.remove(&record.path);
             self.texture_lru.remove(&record.path);
@@ -471,6 +521,7 @@ impl ImageSearchApp {
         if paths.is_empty() {
             return;
         }
+        self.image_catalog_revision = self.image_catalog_revision.wrapping_add(1);
         let removed: HashSet<PathBuf> = paths.into_iter().collect();
         self.images.retain(|record| !removed.contains(&record.path));
         if let Some(results) = &mut self.similarity_results {
@@ -765,7 +816,41 @@ impl ImageSearchApp {
         self.similarity_results.as_deref().unwrap_or(&self.images)
     }
 
-    pub(super) fn visible_indices(&self) -> Vec<usize> {
+    fn visible_order_key(&self) -> VisibleOrderKey {
+        let source = self.source();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.search_text.hash(&mut hasher);
+        let (collection_filter, collection_revision) = self.collection_filter_cache_token();
+        let (people_resolve_generation, people_resolving) = self.people_filter_cache_token();
+        VisibleOrderKey {
+            image_catalog_revision: self.image_catalog_revision,
+            source_ptr: source.as_ptr() as usize,
+            source_len: source.len(),
+            source_is_similarity: self.similarity_results.is_some(),
+            search_text_hash: hasher.finish(),
+            text_search_generation: self.text_search_generation,
+            text_search_pending: self.text_search_pending,
+            text_match_count: self.text_search_matches.as_ref().map_or(0, HashSet::len),
+            collection_filter,
+            collection_revision,
+            people_resolve_generation,
+            people_resolving,
+            color_enabled: self.color_enabled,
+            target_color: self.target_color,
+            color_tolerance_bits: self.color_tolerance.to_bits(),
+            sort_mode: self.sort_mode,
+        }
+    }
+
+    pub(super) fn visible_indices(&self) -> Arc<[usize]> {
+        let key = self.visible_order_key();
+        if let Some(indices) = {
+            let cache = self.visible_order_cache.borrow();
+            (cache.key == Some(key)).then(|| Arc::clone(&cache.indices))
+        } {
+            return indices;
+        }
+
         let text_filter_active = !self.search_text.trim().is_empty();
         let source = self.source();
         let mut visible = source
@@ -778,16 +863,16 @@ impl ImageSearchApp {
                 if !self.people_filter_matches(&record.path) {
                     return false;
                 }
-                if text_filter_active {
-                    let Some(matches) = &self.text_search_matches else {
-                        return false;
-                    };
-                    if !matches.contains(&record.path) {
-                        return false;
-                    }
+                if text_filter_active
+                    && !self
+                        .text_search_matches
+                        .as_ref()
+                        .is_some_and(|paths| paths.contains(&record.path))
+                {
+                    return false;
                 }
                 !self.color_enabled
-                    || views::color_distance(record.dominant, self.target_color)
+                    || crate::indexer::color_distance(record.dominant, self.target_color)
                         <= self.color_tolerance
             })
             .map(|(index, _)| index)
@@ -795,87 +880,35 @@ impl ImageSearchApp {
 
         match self.sort_mode {
             SortMode::Relevance => {}
-            SortMode::Name => visible.sort_by(|a, b| {
-                source[*a]
-                    .file_name
-                    .to_lowercase()
-                    .cmp(&source[*b].file_name.to_lowercase())
+            SortMode::Name => sort_indices_by_cached_name(&mut visible, |index| {
+                source[index].file_name.to_lowercase()
             }),
-            SortMode::Modified => {
-                visible.sort_by(|a, b| source[*b].modified.cmp(&source[*a].modified))
-            }
-            SortMode::Size => visible.sort_by(|a, b| source[*b].size.cmp(&source[*a].size)),
+            SortMode::Modified => visible.sort_by(|a, b| {
+                source[*b]
+                    .modified
+                    .cmp(&source[*a].modified)
+                    .then_with(|| source[*a].file_name.cmp(&source[*b].file_name))
+            }),
+            SortMode::Size => visible.sort_by(|a, b| {
+                source[*b]
+                    .size
+                    .cmp(&source[*a].size)
+                    .then_with(|| source[*a].file_name.cmp(&source[*b].file_name))
+            }),
             SortMode::Resolution => visible.sort_by(|a, b| {
-                let a_pixels = source[*a].width as u64 * source[*a].height as u64;
-                let b_pixels = source[*b].width as u64 * source[*b].height as u64;
-                b_pixels.cmp(&a_pixels)
+                let left = u64::from(source[*a].width) * u64::from(source[*a].height);
+                let right = u64::from(source[*b].width) * u64::from(source[*b].height);
+                right
+                    .cmp(&left)
+                    .then_with(|| source[*a].file_name.cmp(&source[*b].file_name))
             }),
         }
-        visible
-    }
 
-    fn observe_text_search_input(&mut self) {
-        if self.search_text == self.text_search_observed {
-            return;
-        }
-        self.text_search_observed = self.search_text.clone();
-        self.text_search_generation = self.text_search_generation.wrapping_add(1);
-        self.text_search_matches = None;
-
-        if self.search_text.trim().is_empty() {
-            self.text_search_due = None;
-            self.text_search_pending = false;
-        } else {
-            self.text_search_due = Some(Instant::now() + Duration::from_millis(160));
-            self.text_search_pending = true;
-        }
-    }
-
-    fn refresh_text_search_after_data_change(&mut self) {
-        if self.search_text.trim().is_empty() {
-            return;
-        }
-        self.text_search_generation = self.text_search_generation.wrapping_add(1);
-        self.text_search_due = Some(Instant::now() + Duration::from_millis(220));
-        self.text_search_pending = true;
-    }
-
-    fn dispatch_text_search_if_due(&mut self) {
-        let Some(due) = self.text_search_due else {
-            return;
-        };
-        if Instant::now() < due {
-            return;
-        }
-        self.text_search_due = None;
-        self.text_search_service
-            .request(self.text_search_generation, self.search_text.clone());
-    }
-
-    fn process_text_search_results(&mut self) {
-        while let Some(result) = self.text_search_service.try_recv() {
-            if result.generation != self.text_search_generation || result.query != self.search_text
-            {
-                continue;
-            }
-            match result.paths {
-                Ok(paths) => {
-                    let count = paths.len();
-                    self.text_search_matches = Some(paths);
-                    self.text_search_pending = false;
-                    self.status = format!(
-                        "Indexed text search: {count} match{} in {} ms",
-                        if count == 1 { "" } else { "es" },
-                        result.elapsed_ms
-                    );
-                }
-                Err(err) => {
-                    self.text_search_matches = Some(HashSet::new());
-                    self.text_search_pending = false;
-                    self.last_error = Some(format!("Text search failed: {err}"));
-                }
-            }
-        }
+        let indices: Arc<[usize]> = visible.into();
+        let mut cache = self.visible_order_cache.borrow_mut();
+        cache.key = Some(key);
+        cache.indices = Arc::clone(&indices);
+        indices
     }
 
     pub(super) fn thumbnail(&mut self, path: &Path) -> Option<TextureHandle> {
@@ -891,7 +924,8 @@ impl ImageSearchApp {
         let indices = self.visible_indices();
         let source = self.source();
         indices
-            .into_iter()
+            .iter()
+            .copied()
             .filter_map(|index| source.get(index).map(|record| record.path.clone()))
             .collect()
     }
@@ -1193,5 +1227,27 @@ impl eframe::App for ImageSearchApp {
                 self.show_details(ui, &visible);
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod visible_order_tests {
+    use super::sort_indices_by_cached_name;
+
+    #[test]
+    fn cached_name_sort_handles_large_synthetic_result_set() {
+        const COUNT: usize = 50_000;
+        let names = (0..COUNT)
+            .map(|index| format!("IMG_{:05}.JPG", COUNT - index))
+            .collect::<Vec<_>>();
+        let mut indices = (0..COUNT).collect::<Vec<_>>();
+
+        sort_indices_by_cached_name(&mut indices, |index| names[index].to_lowercase());
+
+        assert_eq!(indices.first().copied(), Some(COUNT - 1));
+        assert_eq!(indices.last().copied(), Some(0));
+        assert!(indices
+            .windows(2)
+            .all(|pair| { names[pair[0]].to_lowercase() <= names[pair[1]].to_lowercase() }));
     }
 }

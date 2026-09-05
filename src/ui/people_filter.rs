@@ -166,6 +166,13 @@ impl ImageSearchApp {
         self.people_filter_ui.selected_person_ids.len()
     }
 
+    pub(super) fn people_filter_cache_token(&self) -> (u64, bool) {
+        (
+            self.people_filter_ui.resolve_generation,
+            self.people_filter_ui.resolving,
+        )
+    }
+
     pub(super) fn clear_people_filter(&mut self) {
         if self.people_filter_ui.selected_person_ids.is_empty() {
             return;
