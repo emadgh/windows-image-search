@@ -3,6 +3,7 @@ use crate::face_settings;
 use crate::face_sface_adapter::SFaceExecutionProvider;
 use crate::portable;
 use crate::settings::{self, ClipExecutionProvider, IndexingSettings};
+use crate::update::{self, UpdateStatus};
 use eframe::egui;
 use std::path::PathBuf;
 
@@ -13,15 +14,17 @@ enum SettingsCategory {
     FacesPeople,
     Performance,
     Storage,
+    Updates,
 }
 
 impl SettingsCategory {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Appearance,
         Self::SearchClip,
         Self::FacesPeople,
         Self::Performance,
         Self::Storage,
+        Self::Updates,
     ];
 
     fn label(self) -> &'static str {
@@ -31,6 +34,7 @@ impl SettingsCategory {
             Self::FacesPeople => "Faces / People",
             Self::Performance => "Performance",
             Self::Storage => "Storage",
+            Self::Updates => "Updates",
         }
     }
 
@@ -41,6 +45,7 @@ impl SettingsCategory {
             Self::FacesPeople => 2,
             Self::Performance => 3,
             Self::Storage => 4,
+            Self::Updates => 5,
         }
     }
 
@@ -50,6 +55,7 @@ impl SettingsCategory {
             2 => Self::FacesPeople,
             3 => Self::Performance,
             4 => Self::Storage,
+            5 => Self::Updates,
             _ => Self::Appearance,
         }
     }
@@ -62,6 +68,9 @@ struct Effects {
     clear_cache: bool,
     save_performance_settings: bool,
     save_face_settings: bool,
+    save_update_settings: bool,
+    check_updates: bool,
+    download_update: bool,
 }
 
 pub(super) fn show(app: &mut ImageSearchApp, ctx: &egui::Context) {
@@ -153,6 +162,9 @@ pub(super) fn show(app: &mut ImageSearchApp, ctx: &egui::Context) {
                                     }
                                     SettingsCategory::Storage => {
                                         settings_storage(app, ui, &mut effects)
+                                    }
+                                    SettingsCategory::Updates => {
+                                        settings_updates(app, ui, &mut effects)
                                     }
                                 });
                         },
@@ -485,6 +497,140 @@ fn settings_performance(app: &mut ImageSearchApp, ui: &mut egui::Ui, effects: &m
     }
 }
 
+fn settings_updates(app: &mut ImageSearchApp, ui: &mut egui::Ui, effects: &mut Effects) {
+    section_title(
+        ui,
+        "Updates",
+        "Windows Image Search checks GitHub Releases in the background. Installation always requires an explicit restart action.",
+    );
+
+    ui.strong(format!("Current version: {}", env!("CARGO_PKG_VERSION")));
+    ui.small(
+        "Channel: stable GitHub Releases. Prerelease builds are never installed automatically.",
+    );
+    ui.add_space(10.0);
+
+    if ui
+        .checkbox(
+            &mut app.update_settings.auto_check,
+            "Check for updates automatically at startup",
+        )
+        .changed()
+    {
+        effects.save_update_settings = true;
+        if app.update_settings.auto_check {
+            effects.check_updates = true;
+        }
+    }
+    if ui
+        .checkbox(
+            &mut app.update_settings.auto_download,
+            "Download verified updates automatically",
+        )
+        .on_hover_text(
+            "Downloaded updates are SHA-256 verified. Installation still waits for Restart & install.",
+        )
+        .changed()
+    {
+        effects.save_update_settings = true;
+        if app.update_settings.auto_download
+            && matches!(app.update_manager.status(), UpdateStatus::Available(_))
+        {
+            effects.download_update = true;
+        }
+    }
+
+    ui.add_space(12.0);
+    ui.separator();
+    ui.strong("Update status");
+    let status = app.update_manager.status();
+    match &status {
+        UpdateStatus::Idle => {
+            ui.label("Not checked in this session.");
+        }
+        UpdateStatus::Checking => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Checking GitHub Releases…");
+            });
+        }
+        UpdateStatus::UpToDate => {
+            ui.label("You are running the newest stable release.");
+        }
+        UpdateStatus::Available(info) => {
+            ui.label(format!("Version {} is available.", info.version));
+        }
+        UpdateStatus::Downloading {
+            info,
+            downloaded,
+            total,
+        } => {
+            ui.label(format!("Downloading version {}…", info.version));
+            let fraction = total
+                .filter(|total| *total > 0)
+                .map(|total| *downloaded as f32 / total as f32)
+                .unwrap_or(0.0);
+            let text = total
+                .map(|total| {
+                    format!(
+                        "{:.1} / {:.1} MiB",
+                        *downloaded as f64 / 1_048_576.0,
+                        total as f64 / 1_048_576.0
+                    )
+                })
+                .unwrap_or_else(|| format!("{:.1} MiB", *downloaded as f64 / 1_048_576.0));
+            ui.add(
+                egui::ProgressBar::new(fraction.clamp(0.0, 1.0))
+                    .desired_width(ui.available_width().min(540.0))
+                    .text(text),
+            );
+        }
+        UpdateStatus::Ready(info, _) => {
+            ui.label(format!(
+                "Version {} is downloaded, verified, and ready.",
+                info.version
+            ));
+        }
+        UpdateStatus::Failed(error) => {
+            ui.colored_label(egui::Color32::LIGHT_RED, error);
+        }
+    }
+
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        let checking = matches!(
+            &status,
+            UpdateStatus::Checking | UpdateStatus::Downloading { .. }
+        );
+        if ui
+            .add_enabled(!checking, egui::Button::new("Check now"))
+            .clicked()
+        {
+            effects.check_updates = true;
+        }
+        if matches!(&status, UpdateStatus::Available(_)) && ui.button("Download now").clicked() {
+            effects.download_update = true;
+        }
+        if matches!(&status, UpdateStatus::Ready(_, _)) {
+            let can_install = !app.busy && !app.face_model_download_running();
+            if ui
+                .add_enabled(can_install, egui::Button::new("Restart & install"))
+                .on_hover_text(if can_install {
+                    "Close the application, replace the executable, then restart"
+                } else {
+                    "Finish active indexing/search/model work before installing"
+                })
+                .clicked()
+            {
+                app.update_install_requested = true;
+            }
+        }
+    });
+
+    ui.add_space(10.0);
+    ui.small("Security: updater traffic is HTTPS-only; the downloaded file must be a plausible Windows executable and pass SHA-256 verification before installation.");
+}
+
 fn settings_storage(app: &mut ImageSearchApp, ui: &mut egui::Ui, effects: &mut Effects) {
     section_title(
         ui,
@@ -590,6 +736,19 @@ fn apply_effects(app: &mut ImageSearchApp, effects: Effects) {
                 app.last_error = Some(format!("Cannot save performance settings: {err:#}"));
             }
         }
+    }
+
+    if effects.save_update_settings {
+        if let Err(err) = update::save_settings(&app.update_settings_path, app.update_settings) {
+            app.last_error = Some(format!("Cannot save update settings: {err}"));
+        }
+    }
+    if effects.check_updates {
+        app.update_manager
+            .start_check(app.update_settings.auto_download);
+    }
+    if effects.download_update {
+        app.update_manager.start_download();
     }
 
     if effects.save_face_settings {
