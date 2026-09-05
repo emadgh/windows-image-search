@@ -8,7 +8,9 @@ mod people_manager;
 mod photo_grid;
 mod search_panel;
 mod settings_window;
+mod task_center;
 mod texture_lru;
+mod theme;
 mod thumbnails;
 mod ux;
 mod views;
@@ -31,6 +33,23 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 use texture_lru::{TextureLru, DEFAULT_GPU_TEXTURE_CAPACITY};
 use thumbnails::{ThumbnailPool, ThumbnailResult};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AppearanceMode {
+    System,
+    Light,
+    Dark,
+}
+
+impl AppearanceMode {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::System => "System",
+            Self::Light => "Light",
+            Self::Dark => "Dark",
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum SearchMode {
@@ -126,6 +145,9 @@ pub struct ImageSearchApp {
     pub(super) thumb_fit: ThumbnailFit,
     pub(super) sort_mode: SortMode,
     pub(super) inspector_open: bool,
+    pub(super) appearance_mode: AppearanceMode,
+    pub(super) system_dark_mode: Option<bool>,
+    pub(super) task_center_open: bool,
     pub(super) textures: HashMap<PathBuf, TextureHandle>,
     texture_lru: TextureLru,
     pub(super) selected_paths: HashSet<PathBuf>,
@@ -259,6 +281,9 @@ impl ImageSearchApp {
             thumb_fit: ThumbnailFit::Contain,
             sort_mode: SortMode::Relevance,
             inspector_open: true,
+            appearance_mode: AppearanceMode::System,
+            system_dark_mode: None,
+            task_center_open: false,
             textures: HashMap::new(),
             texture_lru: TextureLru::new(DEFAULT_GPU_TEXTURE_CAPACITY),
             selected_paths: HashSet::new(),
@@ -967,6 +992,7 @@ impl ImageSearchApp {
 
 impl eframe::App for ImageSearchApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.apply_design_system(ctx);
         self.process_startup_messages();
         self.process_worker_messages();
         self.process_face_runtime_messages();
@@ -995,12 +1021,14 @@ impl eframe::App for ImageSearchApp {
         }
         self.show_close_confirmation(ctx);
         self.show_error_banner(ctx);
+        self.show_task_center(ctx);
 
         if self.busy || self.face_model_download_running() {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
 
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
+            ui.set_min_height(theme::TOP_BAR_HEIGHT);
             ui.horizontal(|ui| {
                 ui.strong("Windows Image Search");
                 ui.separator();
@@ -1050,6 +1078,7 @@ impl eframe::App for ImageSearchApp {
         self.show_people_manager_window(ctx);
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+            ui.set_min_height(theme::STATUS_BAR_HEIGHT);
             ui.horizontal(|ui| {
                 if self.busy || self.face_model_download_running() {
                     ui.spinner();
@@ -1061,12 +1090,10 @@ impl eframe::App for ImageSearchApp {
                     ui.small(file_name);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    self.show_task_status_button(ui);
+                    ui.separator();
                     if self.indexing && self.index_control.is_some() {
-                        let label = if self.index_paused {
-                            "▶ Resume"
-                        } else {
-                            "⏸ Pause"
-                        };
+                        let label = if self.index_paused { "Resume" } else { "Pause" };
                         if ui
                             .add_enabled(!self.searching, egui::Button::new(label))
                             .on_hover_text(if self.searching {

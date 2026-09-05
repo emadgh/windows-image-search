@@ -1,4 +1,4 @@
-use super::{ImageSearchApp, SearchMode};
+use super::{theme, ImageSearchApp, SearchMode};
 use eframe::egui;
 
 impl ImageSearchApp {
@@ -33,9 +33,9 @@ impl ImageSearchApp {
     pub(super) fn show_search_sidebar(&mut self, ctx: &egui::Context) {
         egui::SidePanel::left("search_sidebar")
             .resizable(true)
-            .default_width(310.0)
-            .min_width(270.0)
-            .max_width(430.0)
+            .default_width(theme::SEARCH_SIDEBAR_DEFAULT)
+            .min_width(theme::SEARCH_SIDEBAR_MIN)
+            .max_width(theme::SEARCH_SIDEBAR_MAX)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.heading("Search");

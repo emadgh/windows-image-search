@@ -1,4 +1,4 @@
-use super::ImageSearchApp;
+use super::{theme, ImageSearchApp};
 use chrono::{Local, TimeZone};
 use eframe::egui;
 
@@ -10,9 +10,9 @@ impl ImageSearchApp {
 
         egui::SidePanel::right("image_inspector")
             .resizable(true)
-            .default_width(320.0)
-            .min_width(260.0)
-            .max_width(430.0)
+            .default_width(theme::INSPECTOR_DEFAULT)
+            .min_width(theme::INSPECTOR_MIN)
+            .max_width(theme::INSPECTOR_MAX)
             .show(ctx, |ui| {
                 ui.heading("Inspector");
                 ui.separator();

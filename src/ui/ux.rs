@@ -7,6 +7,7 @@ impl ImageSearchApp {
         if ctx.wants_keyboard_input()
             || self.settings_open
             || self.collections_open
+            || self.task_center_open
             || self.close_confirmation_open
         {
             return;
@@ -87,16 +88,33 @@ impl ImageSearchApp {
         let Some(error) = self.last_error.clone() else {
             return;
         };
-        egui::TopBottomPanel::top("global-error-banner").show(ctx, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.strong("Something needs attention");
-                ui.label(super::views::truncate_middle(&error, 140))
-                    .on_hover_text(&error);
-                if ui.button("Dismiss").clicked() {
-                    self.last_error = None;
-                }
+        let mut dismiss = false;
+        let mut open_tasks = false;
+        egui::Area::new(egui::Id::new("global-error-toast"))
+            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 50.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                ui.set_max_width(460.0);
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.strong("Needs attention");
+                    ui.label(super::views::truncate_middle(&error, 180))
+                        .on_hover_text(&error);
+                    ui.horizontal(|ui| {
+                        if ui.small_button("Task Center").clicked() {
+                            open_tasks = true;
+                        }
+                        if ui.small_button("Dismiss").clicked() {
+                            dismiss = true;
+                        }
+                    });
+                });
             });
-        });
+        if open_tasks {
+            self.task_center_open = true;
+        }
+        if dismiss {
+            self.last_error = None;
+        }
     }
 
     pub(super) fn show_active_filter_chips(&mut self, ui: &mut egui::Ui) {

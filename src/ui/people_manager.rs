@@ -435,7 +435,7 @@ impl ImageSearchApp {
                     if ui
                         .add_enabled(
                             !self.people_manager_ui.loading,
-                            egui::Button::new("⟳ Refresh"),
+                            egui::Button::new("Refresh"),
                         )
                         .clicked()
                     {

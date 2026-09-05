@@ -292,7 +292,7 @@ impl ImageSearchApp {
             if ui
                 .add_enabled(
                     !self.busy && !self.roots.is_empty(),
-                    egui::Button::new("⟳ Rescan changed"),
+                    egui::Button::new("Rescan changed"),
                 )
                 .clicked()
             {
@@ -301,7 +301,7 @@ impl ImageSearchApp {
             if ui
                 .add_enabled(
                     !self.busy && !self.roots.is_empty(),
-                    egui::Button::new("⟳ Force rescan all"),
+                    egui::Button::new("Force rescan all"),
                 )
                 .on_hover_text("Rebuild all descriptors for folders referenced by Collections.")
                 .clicked()
@@ -309,11 +309,7 @@ impl ImageSearchApp {
                 self.start_force_rescan();
             }
             if self.indexing && self.index_control.is_some() {
-                let label = if self.index_paused {
-                    "▶ Resume"
-                } else {
-                    "⏸ Pause"
-                };
+                let label = if self.index_paused { "Resume" } else { "Pause" };
                 if ui
                     .add_enabled(!self.searching, egui::Button::new(label))
                     .clicked()
@@ -497,7 +493,7 @@ impl ImageSearchApp {
         ui.horizontal(|ui| {
             ui.strong("Indexed folders");
             if ui
-                .add_enabled(!self.busy, egui::Button::new("＋ Add folder").small())
+                .add_enabled(!self.busy, egui::Button::new("Add folder").small())
                 .clicked()
             {
                 action = Some(CollectionAction::AddFolderDialog(id));
@@ -537,7 +533,7 @@ impl ImageSearchApp {
         ui.horizontal(|ui| {
             ui.strong("Manually added indexed files");
             if ui
-                .add_enabled(!self.busy, egui::Button::new("＋ Add files").small())
+                .add_enabled(!self.busy, egui::Button::new("Add files").small())
                 .clicked()
             {
                 action = Some(CollectionAction::AddFilesDialog(id));
