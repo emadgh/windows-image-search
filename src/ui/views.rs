@@ -45,6 +45,11 @@ impl ImageSearchApp {
         let row_height = self.thumb_size + 62.0;
         let fit = self.thumb_fit;
         let spec = PhotoGridSpec::new("main-result-photo-grid", cell_width, row_height);
+        self.result_grid_columns = photo_grid::columns_for_width(
+            ui.available_width(),
+            cell_width,
+            ui.spacing().item_spacing.x,
+        );
 
         photo_grid::show(ui, visible.len(), spec, |ui, pos| {
             let record = self.record_view(visible[pos]);
@@ -94,6 +99,7 @@ impl ImageSearchApp {
     }
 
     pub(super) fn show_details(&mut self, ui: &mut egui::Ui, visible: &[usize]) {
+        self.result_grid_columns = 1;
         // Reserve the vertical scrollbar gutter once, then reuse one geometry for the
         // header and every virtualized row. Row content never gets to resize columns.
         let available = (ui.available_width() - 18.0).max(720.0);
@@ -207,10 +213,9 @@ impl ImageSearchApp {
             crate::windows_shell::show_context_menu(path.to_path_buf());
         }
         if response.clicked() {
-            let additive = response
-                .ctx
-                .input(|input| input.modifiers.ctrl || input.modifiers.command);
-            self.select_path(path, additive);
+            let modifiers = response.ctx.input(|input| input.modifiers);
+            let additive = modifiers.ctrl || modifiers.command;
+            self.select_path_with_modifiers(path, additive, modifiers.shift);
         }
         if response.double_clicked() {
             let _ = open::that(path);

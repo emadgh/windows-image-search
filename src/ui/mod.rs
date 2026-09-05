@@ -119,6 +119,9 @@ pub struct ImageSearchApp {
     pub(super) textures: HashMap<PathBuf, TextureHandle>,
     texture_lru: TextureLru,
     pub(super) selected_paths: HashSet<PathBuf>,
+    pub(super) selection_anchor: Option<PathBuf>,
+    pub(super) focused_result: Option<PathBuf>,
+    pub(super) result_grid_columns: usize,
     thumb_pool: ThumbnailPool,
     pub(super) tx: Sender<WorkerMessage>,
     pub(super) rx: Receiver<WorkerMessage>,
@@ -247,6 +250,9 @@ impl ImageSearchApp {
             textures: HashMap::new(),
             texture_lru: TextureLru::new(DEFAULT_GPU_TEXTURE_CAPACITY),
             selected_paths: HashSet::new(),
+            selection_anchor: None,
+            focused_result: None,
+            result_grid_columns: 1,
             thumb_pool,
             tx,
             rx,
@@ -842,6 +848,15 @@ impl ImageSearchApp {
         None
     }
 
+    pub(super) fn visible_result_paths(&self) -> Vec<PathBuf> {
+        let indices = self.visible_indices();
+        let source = self.source();
+        indices
+            .into_iter()
+            .filter_map(|index| source.get(index).map(|record| record.path.clone()))
+            .collect()
+    }
+
     pub(super) fn select_path(&mut self, path: &Path, additive: bool) {
         if additive {
             if !self.selected_paths.insert(path.to_path_buf()) {
@@ -851,6 +866,36 @@ impl ImageSearchApp {
             self.selected_paths.clear();
             self.selected_paths.insert(path.to_path_buf());
         }
+        self.selection_anchor = Some(path.to_path_buf());
+        self.focused_result = Some(path.to_path_buf());
+    }
+
+    pub(super) fn select_path_with_modifiers(&mut self, path: &Path, additive: bool, range: bool) {
+        if !range {
+            self.select_path(path, additive);
+            return;
+        }
+
+        let visible = self.visible_result_paths();
+        let anchor = self
+            .selection_anchor
+            .as_ref()
+            .or(self.focused_result.as_ref())
+            .and_then(|anchor| visible.iter().position(|candidate| candidate == anchor));
+        let target = visible.iter().position(|candidate| candidate == path);
+        let (Some(anchor), Some(target)) = (anchor, target) else {
+            self.select_path(path, additive);
+            return;
+        };
+
+        if !additive {
+            self.selected_paths.clear();
+        }
+        let start = anchor.min(target);
+        let end = anchor.max(target);
+        self.selected_paths
+            .extend(visible[start..=end].iter().cloned());
+        self.focused_result = Some(path.to_path_buf());
     }
 
     fn clear_thumbnail_cache(&mut self) {

@@ -10,24 +10,73 @@ impl ImageSearchApp {
 
         if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
             self.selected_paths.clear();
+            self.selection_anchor = None;
+            self.focused_result = None;
+            return;
         }
 
         if ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::A)) {
-            let source = self.source();
-            let paths = self
-                .visible_indices()
-                .into_iter()
-                .filter_map(|index| source.get(index).map(|record| record.path.clone()))
-                .collect::<Vec<_>>();
+            let paths = self.visible_result_paths();
             self.selected_paths.clear();
-            self.selected_paths.extend(paths);
+            self.selected_paths.extend(paths.iter().cloned());
+            self.selection_anchor = paths.first().cloned();
+            self.focused_result = paths.last().cloned();
+            return;
         }
 
         if ctx.input(|input| input.key_pressed(egui::Key::Enter)) {
             if let Some(path) = self.selected_path() {
                 let _ = open::that(path);
             }
+            return;
         }
+
+        if ctx.input(|input| input.key_pressed(egui::Key::Space)) {
+            if !self.selected_paths.is_empty() {
+                self.inspector_open = !self.inspector_open;
+            }
+            return;
+        }
+
+        let navigation = ctx.input(|input| {
+            let delta = if input.key_pressed(egui::Key::ArrowLeft) {
+                Some(-1_isize)
+            } else if input.key_pressed(egui::Key::ArrowRight) {
+                Some(1_isize)
+            } else if input.key_pressed(egui::Key::ArrowUp) {
+                Some(-(self.result_grid_columns.max(1) as isize))
+            } else if input.key_pressed(egui::Key::ArrowDown) {
+                Some(self.result_grid_columns.max(1) as isize)
+            } else {
+                None
+            };
+            delta.map(|delta| (delta, input.modifiers.shift))
+        });
+        let Some((delta, extend_range)) = navigation else {
+            return;
+        };
+
+        let visible = self.visible_result_paths();
+        if visible.is_empty() {
+            return;
+        }
+        let current =
+            self.focused_result
+                .as_ref()
+                .and_then(|path| visible.iter().position(|candidate| candidate == path))
+                .or_else(|| {
+                    (self.selected_paths.len() == 1)
+                        .then(|| {
+                            self.selected_paths.iter().next().and_then(|path| {
+                                visible.iter().position(|candidate| candidate == path)
+                            })
+                        })
+                        .flatten()
+                })
+                .unwrap_or(0);
+        let target = (current as isize + delta).clamp(0, visible.len() as isize - 1) as usize;
+        let target_path = visible[target].clone();
+        self.select_path_with_modifiers(&target_path, false, extend_range);
     }
 
     pub(super) fn show_error_banner(&mut self, ctx: &egui::Context) {
