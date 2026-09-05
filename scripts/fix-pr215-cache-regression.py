@@ -40,6 +40,38 @@ replacements = [
 ]
 for old, new, label in replacements:
     text = ensure_once(text, old, new, label)
+
+old_sort = '''            SortMode::Modified => visible.sort_by(|a, b| {
+                source[*b]
+                    .modified
+                    .cmp(&source[*a].modified)
+                    .then_with(|| source[*a].file_name.cmp(&source[*b].file_name))
+            }),
+            SortMode::Size => visible.sort_by(|a, b| {
+                source[*b]
+                    .size
+                    .cmp(&source[*a].size)
+                    .then_with(|| source[*a].file_name.cmp(&source[*b].file_name))
+            }),
+            SortMode::Resolution => visible.sort_by(|a, b| {
+                let left = u64::from(source[*a].width) * u64::from(source[*a].height);
+                let right = u64::from(source[*b].width) * u64::from(source[*b].height);
+                right
+                    .cmp(&left)
+                    .then_with(|| source[*a].file_name.cmp(&source[*b].file_name))
+            }),
+'''
+new_sort = '''            SortMode::Modified => {
+                visible.sort_by(|a, b| source[*b].modified.cmp(&source[*a].modified))
+            }
+            SortMode::Size => visible.sort_by(|a, b| source[*b].size.cmp(&source[*a].size)),
+            SortMode::Resolution => visible.sort_by(|a, b| {
+                let a_pixels = u64::from(source[*a].width) * u64::from(source[*a].height);
+                let b_pixels = u64::from(source[*b].width) * u64::from(source[*b].height);
+                b_pixels.cmp(&a_pixels)
+            }),
+'''
+text = ensure_once(text, old_sort, new_sort, "baseline sort tie semantics")
 path.write_text(text, encoding="utf-8")
 
 face_path = Path("src/ui/face_search_panel.rs")
