@@ -5,13 +5,12 @@ on:
     branches:
       - main
       - feat/v0.1.0-mvp
-      - fix/scan-thumbnail-and-decode-failures
   pull_request:
     branches: [main]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -22,19 +21,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: Apply scan indexing fixes
-        if: github.event_name == 'push' && github.ref == 'refs/heads/fix/scan-thumbnail-and-decode-failures'
-        shell: pwsh
-        run: |
-          python scripts/apply-scan-indexing-fixes.py
-          cargo fmt --all
-          if (git status --porcelain) {
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add src/indexer.rs src/db/mod.rs
-            git commit -m "Fix scan thumbnail reuse and decode failure retries"
-            git push
-          }
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
       - name: PowerShell benchmark script syntax
