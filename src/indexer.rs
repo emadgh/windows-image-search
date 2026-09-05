@@ -74,6 +74,15 @@ struct PendingImage {
     prefer_thumbnail: bool,
 }
 
+#[derive(Clone, Debug)]
+struct DecodeFailureRecord {
+    root: PathBuf,
+    path: PathBuf,
+    size: u64,
+    modified: i64,
+    reason: String,
+}
+
 struct PreparedImage {
     root: PathBuf,
     path: PathBuf,
@@ -266,6 +275,7 @@ fn incremental_update(
 ) -> Result<()> {
     let indexing_settings = indexing_settings.sanitized();
     let mut conn = db::open(db_path)?;
+    db::ensure_decode_failure_store(&conn)?;
     let unique_paths: HashSet<PathBuf> = changed_paths.iter().cloned().collect();
     let mut candidates = HashMap::<PathBuf, PathBuf>::new();
     let mut removed_targets = Vec::<PathBuf>::new();
@@ -429,6 +439,7 @@ fn incremental_update(
 
     for batch in pending.chunks(batch_size) {
         control.wait_if_paused();
+        let decode_failures = Arc::new(Mutex::new(Vec::<DecodeFailureRecord>::new()));
         let prepared: Vec<PreparedImage> = pool.install(|| {
             batch
                 .par_iter()
@@ -490,6 +501,18 @@ fn incremental_update(
                     match result {
                         Ok(value) => Some(value),
                         Err(err) => {
+                            if let Some(reason) = durable_decode_failure_reason(&err) {
+                                decode_failures
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .push(DecodeFailureRecord {
+                                        root: item.root.clone(),
+                                        path: item.path.clone(),
+                                        size: item.size,
+                                        modified: item.modified,
+                                        reason,
+                                    });
+                            }
                             let _ = tx.send(WorkerMessage::Warning(compact_decode_failure(
                                 &item.path, &err,
                             )));
@@ -499,6 +522,14 @@ fn incremental_update(
                 })
                 .collect()
         });
+
+        let failures = {
+            let mut locked = decode_failures
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::mem::take(&mut *locked)
+        };
+        persist_decode_failures(&conn, roots, failures, tx)?;
 
         if prepared.is_empty() {
             continue;
@@ -525,6 +556,7 @@ fn incremental_update(
                 db::set_material_texture(&transaction, &item.path, &item.material_texture)?;
                 db::set_content_fingerprint(&transaction, &item.path, item.content_fingerprint)?;
                 persist_descriptor_provenance(&transaction, &item.path, item.size)?;
+                db::clear_decode_failure(&transaction, &item.path)?;
                 committed_paths.push(item.path.clone());
             }
             transaction.commit()?;
@@ -542,7 +574,7 @@ fn incremental_update(
             indexing_settings,
             embedding_service,
             roots,
-            false,
+            true,
             control,
             tx,
         ) {
@@ -560,6 +592,83 @@ fn incremental_update(
         removed_paths.len()
     )));
     Ok(())
+}
+
+fn durable_decode_failure_reason(err: &anyhow::Error) -> Option<String> {
+    let detail = format!("{err:#}");
+    let lower = detail.to_ascii_lowercase();
+    if lower.contains("permission denied")
+        || lower.contains("access is denied")
+        || lower.contains("sharing violation")
+    {
+        return None;
+    }
+    let durable = lower.contains("illegal start bytes")
+        || lower.contains("format error")
+        || lower.contains("decoding")
+        || lower.contains("unexpected eof")
+        || lower.contains("unexpected end")
+        || lower.contains("end of file")
+        || lower.contains("truncated")
+        || lower.contains("unsupported");
+    if !durable {
+        return None;
+    }
+    let reason = if lower.contains("illegal start bytes")
+        || lower.contains("format error decoding jpeg")
+        || lower.contains("jpeg") && lower.contains("format error")
+    {
+        "invalid JPEG data"
+    } else if lower.contains("unexpected eof")
+        || lower.contains("unexpected end")
+        || lower.contains("end of file")
+        || lower.contains("truncated")
+    {
+        "truncated image"
+    } else if lower.contains("unsupported") {
+        "unsupported image format"
+    } else {
+        "decode error"
+    };
+    Some(reason.to_owned())
+}
+
+fn persist_decode_failures(
+    conn: &rusqlite::Connection,
+    roots: &[PathBuf],
+    failures: Vec<DecodeFailureRecord>,
+    tx: &Sender<WorkerMessage>,
+) -> Result<()> {
+    if failures.is_empty() {
+        return Ok(());
+    }
+    let mut invalidated_paths = Vec::<PathBuf>::new();
+    for failure in failures {
+        db::record_decode_failure(
+            conn,
+            &failure.path,
+            &failure.root,
+            failure.size,
+            failure.modified,
+            &failure.reason,
+        )?;
+        invalidated_paths.extend(db::delete_path_tree(conn, &failure.path)?);
+    }
+    invalidated_paths.sort();
+    invalidated_paths.dedup();
+    if !invalidated_paths.is_empty() {
+        portable::remove_absolute_paths(roots, &invalidated_paths)?;
+        let _ = tx.send(WorkerMessage::RemovedPaths(invalidated_paths));
+    }
+    Ok(())
+}
+
+fn unchanged_known_decode_failure(
+    state: Option<&db::DecodeFailureState>,
+    size: u64,
+    modified: i64,
+) -> bool {
+    state.is_some_and(|state| state.size == size && state.modified == modified)
 }
 
 fn compact_decode_failure(path: &Path, err: &anyhow::Error) -> String {
@@ -606,6 +715,7 @@ fn rescan(
     let indexing_settings = indexing_settings.sanitized();
     let mut conn = db::open(db_path)?;
     let existing_file_states = db::load_file_states(&conn)?;
+    let existing_decode_failures = db::load_decode_failure_states(&conn)?;
     let force_rescan = mode == RescanMode::ForcePreferThumbnail;
     let mut candidates: Vec<(PathBuf, PathBuf)> = Vec::new();
 
@@ -680,6 +790,7 @@ fn rescan(
         db::mark_discovered_paths_seen(&mut conn, scan_generation, &candidates)?;
     for root in &prunable_roots {
         let _ = db::delete_stale_discovered_for_root(&conn, root, scan_generation)?;
+        let _ = db::prune_decode_failures_not_discovered(&conn, root)?;
     }
     let _ = tx.send(WorkerMessage::Status(format!(
         "Discovered {discovered_marked}/{total} eligible image paths; {oversized_preview_eligible} routed through resized preview; skipped {oversized_skipped} above {} MiB; checking index state…",
@@ -687,6 +798,7 @@ fn rescan(
     )));
     let _ = tx.send(WorkerMessage::RootCounts(db::load_root_counts(db_path)?));
     let mut pending = Vec::<PendingImage>::new();
+    let mut known_decode_failures_skipped = 0usize;
 
     // Keep filesystem/SQLite state checks cheap and serialized, but move image
     // decoding + metadata extraction to a small worker pool below. Completed
@@ -714,8 +826,12 @@ fn rescan(
         let previous = existing_file_states.get(path);
         let unchanged =
             previous.is_some_and(|state| state.size == size && state.modified == modified);
+        let failed_unchanged =
+            unchanged_known_decode_failure(existing_decode_failures.get(path), size, modified);
 
-        if force_rescan || !unchanged {
+        if !force_rescan && failed_unchanged {
+            known_decode_failures_skipped += 1;
+        } else if force_rescan || !unchanged {
             pending.push(PendingImage {
                 root: root.clone(),
                 path: path.clone(),
@@ -734,6 +850,13 @@ fn rescan(
                 total,
             });
         }
+    }
+
+    if known_decode_failures_skipped > 0 {
+        let _ = tx.send(WorkerMessage::Status(format!(
+            "Skipped {known_decode_failures_skipped} unchanged image{} with remembered decode failures; retry requires a source change or Force Rescan",
+            if known_decode_failures_skipped == 1 { "" } else { "s" }
+        )));
     }
 
     let changed_total = pending.len();
@@ -755,6 +878,7 @@ fn rescan(
 
     for batch in pending.chunks(batch_size) {
         control.wait_if_paused();
+        let decode_failures = Arc::new(Mutex::new(Vec::<DecodeFailureRecord>::new()));
         let prepared: Vec<PreparedImage> = pool.install(|| {
             batch
                 .par_iter()
@@ -819,6 +943,18 @@ fn rescan(
                     match result {
                         Ok(value) => Some(value),
                         Err(err) => {
+                            if let Some(reason) = durable_decode_failure_reason(&err) {
+                                decode_failures
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .push(DecodeFailureRecord {
+                                        root: item.root.clone(),
+                                        path: item.path.clone(),
+                                        size: item.size,
+                                        modified: item.modified,
+                                        reason,
+                                    });
+                            }
                             let _ = tx.send(WorkerMessage::Warning(compact_decode_failure(
                                 &item.path, &err,
                             )));
@@ -828,6 +964,14 @@ fn rescan(
                 })
                 .collect()
         });
+
+        let failures = {
+            let mut locked = decode_failures
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::mem::take(&mut *locked)
+        };
+        persist_decode_failures(&conn, roots, failures, tx)?;
 
         if prepared.is_empty() {
             continue;
@@ -855,6 +999,7 @@ fn rescan(
                 db::set_material_texture(&transaction, &item.path, &item.material_texture)?;
                 db::set_content_fingerprint(&transaction, &item.path, item.content_fingerprint)?;
                 persist_descriptor_provenance(&transaction, &item.path, item.size)?;
+                db::clear_decode_failure(&transaction, &item.path)?;
             }
             transaction.commit()?;
         }
@@ -917,7 +1062,7 @@ fn rescan(
             indexing_settings,
             embedding_service,
             roots,
-            force_rescan,
+            true,
             control,
             tx,
         ) {
@@ -2136,6 +2281,57 @@ mod tests {
         assert_eq!((width, height), (900, 700));
         assert_eq!(fingerprint, 123456789);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn clip_embedding_prefers_cached_thumbnail_and_falls_back_to_source() {
+        use image::{ImageBuffer, Rgb};
+        let root = std::env::temp_dir().join(format!(
+            "wis-clip-thumb-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("tiles")).unwrap();
+        let source = root.join("tiles").join("large.png");
+        DynamicImage::ImageRgb8(ImageBuffer::from_pixel(900, 700, Rgb([20, 40, 60])))
+            .save(&source)
+            .unwrap();
+        let settings = IndexingSettings::default().sanitized();
+
+        let without_cache =
+            safe_embedding_input_path(&source, std::slice::from_ref(&root), settings, true)
+                .unwrap();
+        assert_eq!(without_cache, source);
+
+        let decoded = image::ImageReader::open(&source).unwrap().decode().unwrap();
+        let cached =
+            thumbnail_cache::store_from_decoded_for_root(&root, &source, &decoded).unwrap();
+        let with_cache =
+            safe_embedding_input_path(&source, std::slice::from_ref(&root), settings, true)
+                .unwrap();
+        assert_eq!(with_cache, cached);
+        assert_ne!(with_cache, source);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unchanged_decode_failure_is_skipped_until_changed_or_forced() {
+        let state = db::DecodeFailureState {
+            root: PathBuf::from("C:/images"),
+            size: 123,
+            modified: 456,
+            reason: "invalid JPEG data".to_owned(),
+        };
+        assert!(unchanged_known_decode_failure(Some(&state), 123, 456));
+        assert!(!unchanged_known_decode_failure(Some(&state), 124, 456));
+        assert!(!unchanged_known_decode_failure(Some(&state), 123, 457));
+        assert!(!unchanged_known_decode_failure(None, 123, 456));
+
+        let force_rescan = true;
+        assert!(force_rescan || !unchanged_known_decode_failure(Some(&state), 123, 456));
     }
 
     #[test]
