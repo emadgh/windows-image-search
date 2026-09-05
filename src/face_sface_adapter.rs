@@ -119,6 +119,15 @@ pub struct SFaceInferenceStats {
     pub dimension: usize,
 }
 
+#[derive(Clone, Debug)]
+pub struct SFaceBatchInferenceStats {
+    pub provider: SFaceExecutionProvider,
+    pub init: Duration,
+    pub inference: Duration,
+    pub batch_size: usize,
+    pub dimension: usize,
+}
+
 pub struct SFaceOnnxAdapter {
     session: Session,
     provider: SFaceExecutionProvider,
@@ -191,6 +200,59 @@ impl SFaceOnnxAdapter {
         ))
     }
 
+    pub fn embed_aligned_batch(
+        &mut self,
+        aligned: &[DynamicImage],
+    ) -> Result<(Vec<Vec<f32>>, SFaceBatchInferenceStats)> {
+        if aligned.is_empty() {
+            bail!("SFace batch must contain at least one aligned face");
+        }
+        let batch_size = aligned.len();
+        let input = sface_batch_nchw_rgb_f32(aligned)?;
+        let tensor = TensorRef::from_array_view((
+            [
+                batch_size,
+                3usize,
+                SFACE_INPUT_SIZE as usize,
+                SFACE_INPUT_SIZE as usize,
+            ],
+            input.as_slice(),
+        ))
+        .context("creating batched SFace ONNX input tensor")?;
+        let started = Instant::now();
+        let outputs = self
+            .session
+            .run(ort::inputs![tensor])
+            .context("running batched SFace ONNX inference")?;
+        let inference = started.elapsed();
+        let (_shape, values) = outputs[0]
+            .try_extract_tensor::<f32>()
+            .context("extracting batched SFace ONNX output tensor")?;
+        let expected = batch_size * SFACE_EMBEDDING_DIMENSION;
+        if values.len() != expected {
+            bail!(
+                "batched SFace ONNX returned {} values; expected {} for batch size {}",
+                values.len(),
+                expected,
+                batch_size
+            );
+        }
+        let mut embeddings = Vec::with_capacity(batch_size);
+        for chunk in values.chunks_exact(SFACE_EMBEDDING_DIMENSION) {
+            embeddings.push(normalize(chunk.to_vec())?);
+        }
+        Ok((
+            embeddings,
+            SFaceBatchInferenceStats {
+                provider: self.provider,
+                init: self.init,
+                inference,
+                batch_size,
+                dimension: SFACE_EMBEDDING_DIMENSION,
+            },
+        ))
+    }
+
     pub fn align_and_embed(
         &mut self,
         image: &DynamicImage,
@@ -246,6 +308,18 @@ pub fn sface_nchw_rgb_f32(image: &DynamicImage) -> Result<Vec<f32>> {
         output[index] = pixel[0] as f32;
         output[plane + index] = pixel[1] as f32;
         output[2 * plane + index] = pixel[2] as f32;
+    }
+    Ok(output)
+}
+
+pub fn sface_batch_nchw_rgb_f32(images: &[DynamicImage]) -> Result<Vec<f32>> {
+    if images.is_empty() {
+        bail!("SFace batch must contain at least one aligned face");
+    }
+    let per_face = (SFACE_INPUT_SIZE * SFACE_INPUT_SIZE) as usize * 3;
+    let mut output = Vec::with_capacity(per_face * images.len());
+    for image in images {
+        output.extend(sface_nchw_rgb_f32(image)?);
     }
     Ok(output)
 }
@@ -366,6 +440,31 @@ mod tests {
         assert_eq!(values[plane + 1], 50.0);
         assert_eq!(values[2 * plane], 30.0);
         assert_eq!(values[2 * plane + 1], 60.0);
+    }
+
+    #[test]
+    fn batch_preprocessing_concatenates_nchw_faces_in_batch_order() {
+        let first = DynamicImage::ImageRgb8(ImageBuffer::from_pixel(
+            SFACE_INPUT_SIZE,
+            SFACE_INPUT_SIZE,
+            Rgb([10u8, 20, 30]),
+        ));
+        let second = DynamicImage::ImageRgb8(ImageBuffer::from_pixel(
+            SFACE_INPUT_SIZE,
+            SFACE_INPUT_SIZE,
+            Rgb([40u8, 50, 60]),
+        ));
+        let values = sface_batch_nchw_rgb_f32(&[first, second]).unwrap();
+        let plane = (SFACE_INPUT_SIZE * SFACE_INPUT_SIZE) as usize;
+        let per_face = plane * 3;
+        assert_eq!(values.len(), per_face * 2);
+        assert_eq!(values[0], 10.0);
+        assert_eq!(values[plane], 20.0);
+        assert_eq!(values[2 * plane], 30.0);
+        assert_eq!(values[per_face], 40.0);
+        assert_eq!(values[per_face + plane], 50.0);
+        assert_eq!(values[per_face + 2 * plane], 60.0);
+        assert!(sface_batch_nchw_rgb_f32(&[]).is_err());
     }
 
     #[test]

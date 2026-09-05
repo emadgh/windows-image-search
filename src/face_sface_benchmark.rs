@@ -29,6 +29,7 @@ pub fn benchmark(path: &Path) -> Result<String> {
     let mut adapter =
         face_sface_adapter::SFaceOnnxAdapter::load(&manifest.model.model_path, manifest.provider)?;
     let mut embeddings = Vec::with_capacity(manifest.faces.len());
+    let mut aligned_faces = Vec::with_capacity(manifest.faces.len());
     let mut inference_times = Vec::with_capacity(manifest.faces.len());
 
     for face in &manifest.faces {
@@ -44,11 +45,14 @@ pub fn benchmark(path: &Path) -> Result<String> {
                 x: point.x * oriented.width() as f32,
                 y: point.y * oriented.height() as f32,
             });
+        let aligned = face_sface_adapter::align_sface_112(&oriented, landmarks)
+            .with_context(|| format!("aligning SFace case {}", face.face_id))?;
         let (embedding, stats) = adapter
-            .align_and_embed(&oriented, landmarks)
+            .embed_aligned(&aligned)
             .with_context(|| format!("embedding SFace case {}", face.face_id))?;
         inference_times.push(stats.inference);
         embeddings.push(embedding);
+        aligned_faces.push(aligned);
     }
 
     let evaluator_manifest = build_evaluator_manifest(&manifest, &embeddings)?;
@@ -100,6 +104,7 @@ pub fn benchmark(path: &Path) -> Result<String> {
         adapter.init_duration().as_secs_f64() * 1000.0
     )?;
     append_latency(&mut report, &inference_times)?;
+    append_batch_sweep(&mut report, &mut adapter, &aligned_faces)?;
     writeln!(report)?;
     writeln!(report, "shared_evaluator_begin")?;
     write!(report, "{evaluated}")?;
@@ -261,6 +266,71 @@ fn append_latency(report: &mut String, times: &[Duration]) -> Result<()> {
     writeln!(report, "inference_p50_ms={p50:.3}")?;
     writeln!(report, "inference_p95_ms={p95:.3}")?;
     writeln!(report, "inference_faces_per_second={throughput:.3}")?;
+    Ok(())
+}
+
+fn append_batch_sweep(
+    report: &mut String,
+    adapter: &mut face_sface_adapter::SFaceOnnxAdapter,
+    aligned_faces: &[image::DynamicImage],
+) -> Result<()> {
+    const BATCH_SIZES: [usize; 5] = [1, 2, 4, 8, 16];
+    const MEASURED_ITERATIONS: usize = 5;
+
+    writeln!(report, "batch_sweep_begin")?;
+    writeln!(report, "batch_sweep_iterations={MEASURED_ITERATIONS}")?;
+    for batch_size in BATCH_SIZES {
+        let batch = (0..batch_size)
+            .map(|index| aligned_faces[index % aligned_faces.len()].clone())
+            .collect::<Vec<_>>();
+
+        let supported = adapter.embed_aligned_batch(&batch);
+        match supported {
+            Ok((_warmup, warmup_stats)) => {
+                let mut times = Vec::with_capacity(MEASURED_ITERATIONS);
+                let mut dimensions_ok = true;
+                for _ in 0..MEASURED_ITERATIONS {
+                    let (embeddings, stats) = adapter.embed_aligned_batch(&batch)?;
+                    dimensions_ok &= embeddings.len() == batch_size
+                        && embeddings.iter().all(|embedding| {
+                            embedding.len() == face_sface_adapter::SFACE_EMBEDDING_DIMENSION
+                        });
+                    times.push(stats.inference.as_secs_f64() * 1000.0);
+                }
+                times.sort_by(f64::total_cmp);
+                let total_ms = times.iter().sum::<f64>();
+                let mean_ms = total_ms / times.len() as f64;
+                let p50_ms = percentile(&times, 0.50);
+                let faces_per_second = if total_ms <= f64::EPSILON {
+                    0.0
+                } else {
+                    (batch_size * times.len()) as f64 / (total_ms / 1000.0)
+                };
+                writeln!(report, "batch_{batch_size}_supported=true")?;
+                writeln!(
+                    report,
+                    "batch_{batch_size}_warmup_ms={:.3}",
+                    warmup_stats.inference.as_secs_f64() * 1000.0
+                )?;
+                writeln!(report, "batch_{batch_size}_mean_ms={mean_ms:.3}")?;
+                writeln!(report, "batch_{batch_size}_p50_ms={p50_ms:.3}")?;
+                writeln!(
+                    report,
+                    "batch_{batch_size}_faces_per_second={faces_per_second:.3}"
+                )?;
+                writeln!(report, "batch_{batch_size}_dimensions_ok={dimensions_ok}")?;
+            }
+            Err(err) => {
+                writeln!(report, "batch_{batch_size}_supported=false")?;
+                writeln!(
+                    report,
+                    "batch_{batch_size}_error={}",
+                    tsv_field(&format!("{err:#}"))
+                )?;
+            }
+        }
+    }
+    writeln!(report, "batch_sweep_end")?;
     Ok(())
 }
 
