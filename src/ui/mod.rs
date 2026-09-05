@@ -1120,22 +1120,24 @@ impl eframe::App for ImageSearchApp {
                     ui.selectable_value(&mut self.view_mode, ViewMode::Details, "Details");
                     ui.selectable_value(&mut self.view_mode, ViewMode::Grid, "Grid");
                     ui.separator();
+                    ui.menu_button("Display", |ui| {
+                        ui.strong("Thumbnail fit");
+                        ui.selectable_value(
+                            &mut self.thumb_fit,
+                            ThumbnailFit::Contain,
+                            "Contain whole image",
+                        );
+                        ui.selectable_value(&mut self.thumb_fit, ThumbnailFit::Cover, "Cover tile");
+                        ui.separator();
+                        ui.checkbox(&mut self.inspector_open, "Show Inspector");
+                    });
 
-                    let fit_label = match self.thumb_fit {
-                        ThumbnailFit::Contain => "Fit: Contain",
-                        ThumbnailFit::Cover => "Fit: Cover",
-                    };
-                    if ui.button(fit_label).clicked() {
-                        self.thumb_fit = match self.thumb_fit {
-                            ThumbnailFit::Contain => ThumbnailFit::Cover,
-                            ThumbnailFit::Cover => ThumbnailFit::Contain,
-                        };
-                    }
-
-                    ui.add(
+                    ui.add_sized(
+                        [150.0, 20.0],
                         egui::Slider::new(&mut self.thumb_size, 96.0..=512.0)
                             .text("Size")
-                            .suffix(" px"),
+                            .suffix(" px")
+                            .integer(),
                     );
                 });
             });
