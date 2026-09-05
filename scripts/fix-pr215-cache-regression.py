@@ -37,3 +37,11 @@ for old, new, label in replacements:
     text = text.replace(old, new, 1)
 
 path.write_text(text, encoding="utf-8")
+
+face_path = Path("src/ui/face_search_panel.rs")
+face_text = face_path.read_text(encoding="utf-8")
+old = "        self.similarity_results = Some(results);\n        self.query_image = Some(query_image);\n"
+new = "        self.similarity_results_revision =\n            self.similarity_results_revision.wrapping_add(1);\n        self.similarity_results = Some(results);\n        self.query_image = Some(query_image);\n"
+if old not in face_text:
+    raise SystemExit("missing face-search similarity result target")
+face_path.write_text(face_text.replace(old, new, 1), encoding="utf-8")
