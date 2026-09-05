@@ -379,10 +379,83 @@ fn open_portable_read_only(root: &Path) -> Result<Connection> {
 
 fn portable_library_id(conn: &Connection) -> Result<String> {
     conn.query_row(
-        "SELECT value FROM index_meta WHERE key = 'library_id'",
+        "SELECT value FROM portable_meta WHERE key = 'library_id'",
         [],
         |row| row.get(0),
     )
     .optional()?
     .context("portable index does not contain library_id")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn portable_library_id_reads_portable_meta_contract() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE portable_meta(key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);\
+             INSERT INTO portable_meta(key, value) VALUES('library_id', 'library-test');",
+        )
+        .unwrap();
+
+        assert_eq!(portable_library_id(&conn).unwrap(), "library-test");
+    }
+
+    #[test]
+    fn any_mode_unions_selected_people_without_duplicates() {
+        let selected = vec!["alice".to_owned(), "bob".to_owned()];
+        let by_person = HashMap::from([
+            (
+                "alice".to_owned(),
+                [PathBuf::from("a.jpg"), PathBuf::from("shared.jpg")]
+                    .into_iter()
+                    .collect(),
+            ),
+            (
+                "bob".to_owned(),
+                [PathBuf::from("b.jpg"), PathBuf::from("shared.jpg")]
+                    .into_iter()
+                    .collect(),
+            ),
+        ]);
+        let expected = [
+            PathBuf::from("a.jpg"),
+            PathBuf::from("b.jpg"),
+            PathBuf::from("shared.jpg"),
+        ]
+        .into_iter()
+        .collect();
+
+        assert_eq!(
+            combine_match_sets(&selected, &by_person, PeopleFilterMode::Any),
+            expected
+        );
+    }
+
+    #[test]
+    fn all_mode_intersects_selected_people() {
+        let selected = vec!["alice".to_owned(), "bob".to_owned()];
+        let by_person = HashMap::from([
+            (
+                "alice".to_owned(),
+                [PathBuf::from("a.jpg"), PathBuf::from("shared.jpg")]
+                    .into_iter()
+                    .collect(),
+            ),
+            (
+                "bob".to_owned(),
+                [PathBuf::from("b.jpg"), PathBuf::from("shared.jpg")]
+                    .into_iter()
+                    .collect(),
+            ),
+        ]);
+        let expected = [PathBuf::from("shared.jpg")].into_iter().collect();
+
+        assert_eq!(
+            combine_match_sets(&selected, &by_person, PeopleFilterMode::All),
+            expected
+        );
+    }
 }
