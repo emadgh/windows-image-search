@@ -10,15 +10,26 @@ pub(super) const INSPECTOR_MAX: f32 = 430.0;
 pub(super) const TOP_BAR_HEIGHT: f32 = 38.0;
 pub(super) const STATUS_BAR_HEIGHT: f32 = 34.0;
 
+const APPLIED_DARK_MODE_ID: &str = "windows-image-search.applied-design-system-dark-mode";
+
+fn resolved_dark_mode(appearance: AppearanceMode, system_dark: bool) -> bool {
+    match appearance {
+        AppearanceMode::System => system_dark,
+        AppearanceMode::Light => false,
+        AppearanceMode::Dark => true,
+    }
+}
+
 impl ImageSearchApp {
     pub(super) fn apply_design_system(&mut self, ctx: &egui::Context) {
         let inherited_dark = ctx.style().visuals.dark_mode;
         let system_dark = *self.system_dark_mode.get_or_insert(inherited_dark);
-        let dark = match self.appearance_mode {
-            AppearanceMode::System => system_dark,
-            AppearanceMode::Light => false,
-            AppearanceMode::Dark => true,
-        };
+        let dark = resolved_dark_mode(self.appearance_mode, system_dark);
+        let state_id = egui::Id::new(APPLIED_DARK_MODE_ID);
+
+        if ctx.data_mut(|data| data.get_temp::<bool>(state_id)) == Some(dark) {
+            return;
+        }
 
         let mut style = (*ctx.style()).clone();
         style.visuals = if dark {
@@ -57,5 +68,28 @@ impl ImageSearchApp {
         style.visuals.selection.stroke.width = 2.0;
 
         ctx.set_style(style);
+        ctx.data_mut(|data| data.insert_temp(state_id, dark));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn appearance_mode_resolves_expected_dark_state() {
+        assert!(!resolved_dark_mode(AppearanceMode::System, false));
+        assert!(resolved_dark_mode(AppearanceMode::System, true));
+        assert!(!resolved_dark_mode(AppearanceMode::Light, true));
+        assert!(resolved_dark_mode(AppearanceMode::Dark, false));
+    }
+
+    #[test]
+    fn cached_dark_state_prevents_reapplying_unchanged_style() {
+        let ctx = egui::Context::default();
+        let state_id = egui::Id::new(APPLIED_DARK_MODE_ID);
+        assert_eq!(ctx.data_mut(|data| data.get_temp::<bool>(state_id)), None);
+        ctx.data_mut(|data| data.insert_temp(state_id, true));
+        assert_eq!(ctx.data_mut(|data| data.get_temp::<bool>(state_id)), Some(true));
     }
 }
