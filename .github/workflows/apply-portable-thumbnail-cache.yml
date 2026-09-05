@@ -1,0 +1,47 @@
+name: Apply portable thumbnail cache
+
+on:
+  push:
+    branches: [fix/portable-thumbnail-cache]
+    paths:
+      - '.github/workflows/apply-portable-thumbnail-cache.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/portable-thumbnail-cache
+          fetch-depth: 0
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply portable thumbnail patch
+        run: python scripts/apply-portable-thumbnail-cache.py
+      - name: Format Rust
+        run: cargo fmt --all
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Cargo check
+        run: cargo check --all-targets
+      - name: Tests
+        run: cargo test --all-targets
+      - name: Release build
+        run: cargo build --release
+      - name: Commit validated source and remove helpers
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/ui/thumbnails.rs src/ui/mod.rs src/ui/settings_window.rs
+          git commit -m 'fix(storage): keep thumbnails with indexed roots'
+          git rm .github/workflows/apply-portable-thumbnail-cache.yml scripts/apply-portable-thumbnail-cache.py
+          git commit -m 'chore: remove portable thumbnail validation helpers'
+          git push origin HEAD:fix/portable-thumbnail-cache
