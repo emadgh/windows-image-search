@@ -305,7 +305,7 @@ pub(super) fn show_query_preview(ui: &mut egui::Ui, texture: &egui::TextureHandl
     );
 }
 
-fn thumbnail_widget(
+pub(super) fn thumbnail_widget(
     ui: &mut egui::Ui,
     texture: &egui::TextureHandle,
     desired: egui::Vec2,

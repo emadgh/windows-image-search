@@ -25,6 +25,7 @@ pub struct NamedPersonOption {
     pub person_id: String,
     pub display_name: String,
     pub member_count: usize,
+    pub representative_image: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -59,22 +60,41 @@ pub struct ImagePeopleDetail {
     pub named_people: Vec<ImageNamedPerson>,
 }
 
-pub fn load_named_people(session_db_path: &Path) -> Result<Vec<NamedPersonOption>> {
+pub fn load_named_people(
+    session_db_path: &Path,
+    roots: &[PathBuf],
+) -> Result<Vec<NamedPersonOption>> {
     let conn = db::open(session_db_path)
         .with_context(|| format!("opening People catalog {}", session_db_path.display()))?;
     let catalog = people_effective::load(&conn)?;
-    let mut people = catalog
-        .people
-        .into_iter()
-        .filter_map(|person| {
-            let display_name = person.display_name?.trim().to_owned();
-            (!display_name.is_empty()).then_some(NamedPersonOption {
-                person_id: person.person_id,
-                display_name,
-                member_count: person.member_count,
-            })
-        })
-        .collect::<Vec<_>>();
+    let mut people = Vec::new();
+    for person in catalog.people {
+        let Some(display_name) = person
+            .display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let representative_image = person
+            .representative_library_id
+            .as_deref()
+            .zip(person.representative_face_id.as_deref())
+            .and_then(|(library_id, face_id)| {
+                crate::face_search::resolve_searchable_face(roots, library_id, face_id)
+                    .ok()
+                    .flatten()
+                    .map(|face| face.image_path)
+            });
+        people.push(NamedPersonOption {
+            person_id: person.person_id,
+            display_name,
+            member_count: person.member_count,
+            representative_image,
+        });
+    }
     people.sort_by(|left, right| {
         left.display_name
             .to_lowercase()

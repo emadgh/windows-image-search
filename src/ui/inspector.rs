@@ -4,7 +4,7 @@ use eframe::egui;
 
 impl ImageSearchApp {
     pub(super) fn show_inspector(&mut self, ctx: &egui::Context) {
-        if self.selected_paths.is_empty() {
+        if !self.inspector_open || self.selected_paths.is_empty() {
             return;
         }
 
@@ -110,6 +110,11 @@ impl ImageSearchApp {
                             let _ = open::that(parent);
                         }
                     }
+                    self.show_add_to_collection_menu(
+                        ui,
+                        "Add to Collection",
+                        &[record.path.clone()],
+                    );
                     if ui.button("Copy path").clicked() {
                         ui.ctx().copy_text(record.path.display().to_string());
                     }

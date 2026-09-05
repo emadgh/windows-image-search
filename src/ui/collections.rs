@@ -188,6 +188,38 @@ impl ImageSearchApp {
         self.collections.active_filter = None;
     }
 
+    pub(super) fn collection_count(&self) -> usize {
+        self.collections.items.len()
+    }
+
+    pub(super) fn show_add_to_collection_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        label: &str,
+        paths: &[PathBuf],
+    ) {
+        let items = self
+            .collections
+            .items
+            .iter()
+            .map(|item| (item.id, item.name.clone(), self.collections.count(item.id)))
+            .collect::<Vec<_>>();
+        let mut target = None;
+        ui.add_enabled_ui(!self.busy && !items.is_empty() && !paths.is_empty(), |ui| {
+            ui.menu_button(label, |ui| {
+                for (id, name, count) in &items {
+                    if ui.button(format!("{name} ({count})")).clicked() {
+                        target = Some(*id);
+                        ui.close();
+                    }
+                }
+            });
+        });
+        if let Some(id) = target {
+            self.apply_collection_action(CollectionAction::Drop(id, paths.to_vec()));
+        }
+    }
+
     pub(super) fn prompt_add_library_folder(&mut self) {
         if self.busy {
             return;

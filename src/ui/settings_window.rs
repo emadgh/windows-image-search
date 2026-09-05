@@ -55,6 +55,12 @@ impl SettingsCategory {
     }
 }
 
+pub(super) fn open_collections(app: &mut ImageSearchApp, ctx: &egui::Context) {
+    app.settings_open = true;
+    let category_id = egui::Id::new("preferences-category");
+    ctx.data_mut(|data| data.insert_temp(category_id, SettingsCategory::Collections.index()));
+}
+
 #[derive(Default)]
 struct Effects {
     add_folder: bool,

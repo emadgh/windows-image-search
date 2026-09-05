@@ -115,6 +115,7 @@ pub struct ImageSearchApp {
     pub(super) thumb_size: f32,
     pub(super) thumb_fit: ThumbnailFit,
     pub(super) sort_mode: SortMode,
+    pub(super) inspector_open: bool,
     pub(super) textures: HashMap<PathBuf, TextureHandle>,
     texture_lru: TextureLru,
     pub(super) selected_paths: HashSet<PathBuf>,
@@ -242,6 +243,7 @@ impl ImageSearchApp {
             thumb_size: 168.0,
             thumb_fit: ThumbnailFit::Contain,
             sort_mode: SortMode::Relevance,
+            inspector_open: true,
             textures: HashMap::new(),
             texture_lru: TextureLru::new(DEFAULT_GPU_TEXTURE_CAPACITY),
             selected_paths: HashSet::new(),
@@ -942,8 +944,18 @@ impl eframe::App for ImageSearchApp {
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.strong("Windows Image Search");
-                if ui.button("Settings").clicked() {
-                    self.settings_open = true;
+                ui.separator();
+                if ui
+                    .selectable_label(self.collection_filter_chip().is_none(), "Library")
+                    .clicked()
+                {
+                    self.clear_collection_filter();
+                }
+                if ui
+                    .button(format!("Collections ({})", self.collection_count()))
+                    .clicked()
+                {
+                    settings_window::open_collections(self, ctx);
                 }
                 if ui
                     .add_enabled(!self.busy, egui::Button::new("People"))
@@ -951,6 +963,7 @@ impl eframe::App for ImageSearchApp {
                 {
                     self.open_people_manager();
                 }
+                ui.separator();
                 if ui
                     .add_enabled(
                         !self.busy && !self.roots.is_empty(),
@@ -959,6 +972,9 @@ impl eframe::App for ImageSearchApp {
                     .clicked()
                 {
                     self.start_rescan();
+                }
+                if ui.button("Settings").clicked() {
+                    self.settings_open = true;
                 }
                 ui.separator();
                 ui.small(format!("{} indexed images", self.images.len()));
@@ -1030,6 +1046,8 @@ impl eframe::App for ImageSearchApp {
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.toggle_value(&mut self.inspector_open, "Inspector");
+                    ui.separator();
                     egui::ComboBox::from_id_salt("result-sort")
                         .selected_text(self.sort_mode.label())
                         .width(112.0)

@@ -130,8 +130,8 @@ impl ImageSearchApp {
         let single = (count == 1)
             .then(|| self.selected_paths.iter().next().cloned())
             .flatten();
-        let all_paths = self
-            .selected_paths
+        let selected_paths = self.selected_paths.iter().cloned().collect::<Vec<_>>();
+        let all_paths = selected_paths
             .iter()
             .map(|path| path.display().to_string())
             .collect::<Vec<_>>();
@@ -161,6 +161,7 @@ impl ImageSearchApp {
                 if ui.button("Copy path(s)").clicked() {
                     ui.ctx().copy_text(all_paths.join("\n"));
                 }
+                self.show_add_to_collection_menu(ui, "Add to Collection", &selected_paths);
                 if ui.button("Clear selection").clicked() {
                     self.selected_paths.clear();
                 }
