@@ -222,11 +222,11 @@ impl ImageSearchApp {
                     }
                 }
                 if ui
-                    .add_enabled(single.is_some(), egui::Button::new("Open folder"))
+                    .add_enabled(single.is_some(), egui::Button::new("Show in Explorer"))
                     .clicked()
                 {
-                    if let Some(parent) = single.as_ref().and_then(|path| path.parent()) {
-                        let _ = open::that(parent);
+                    if let Some(path) = &single {
+                        crate::windows_shell::show_in_explorer(path.clone());
                     }
                 }
                 if ui.button("Copy path(s)").clicked() {

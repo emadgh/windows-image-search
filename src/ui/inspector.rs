@@ -105,10 +105,8 @@ impl ImageSearchApp {
                     if ui.button("Open").clicked() {
                         let _ = open::that(&record.path);
                     }
-                    if ui.button("Open folder").clicked() {
-                        if let Some(parent) = record.path.parent() {
-                            let _ = open::that(parent);
-                        }
+                    if ui.button("Show in Explorer").clicked() {
+                        crate::windows_shell::show_in_explorer(record.path.clone());
                     }
                     self.show_add_to_collection_menu(
                         ui,

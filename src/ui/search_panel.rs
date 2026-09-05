@@ -139,6 +139,18 @@ impl ImageSearchApp {
 
                             if self.query_image.is_some() {
                                 ui.add_space(8.0);
+                                ui.small(format!(
+                                    "Mix · Color {:.0}% · Texture {:.0}% · Semantic {:.0}% · Dominant {:.0}%{}",
+                                    self.similarity_settings.color_distribution_weight,
+                                    self.similarity_settings.texture_weight,
+                                    self.similarity_settings.clip_weight,
+                                    self.similarity_settings.dominant_color_weight,
+                                    if self.similarity_settings.strict_color_rejection {
+                                        " · strict color"
+                                    } else {
+                                        ""
+                                    }
+                                ));
                                 egui::CollapsingHeader::new("Advanced similarity")
                                     .default_open(false)
                                     .show(ui, |ui| {
