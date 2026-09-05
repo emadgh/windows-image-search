@@ -364,6 +364,7 @@ impl ImageSearchApp {
         self.face_search_ui.match_boxes = match_boxes;
         self.face_search_ui.last_rows_considered = report.rows_considered;
         self.similarity_results_revision = self.similarity_results_revision.wrapping_add(1);
+        self.similarity_results_revision = self.similarity_results_revision.wrapping_add(1);
         self.similarity_results = Some(results);
         self.query_image = Some(query_image);
         self.selected_paths.clear();

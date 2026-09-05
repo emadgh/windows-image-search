@@ -889,24 +889,14 @@ impl ImageSearchApp {
             SortMode::Name => sort_indices_by_cached_name(&mut visible, |index| {
                 source[index].file_name.to_lowercase()
             }),
-            SortMode::Modified => visible.sort_by(|a, b| {
-                source[*b]
-                    .modified
-                    .cmp(&source[*a].modified)
-                    .then_with(|| source[*a].file_name.cmp(&source[*b].file_name))
-            }),
-            SortMode::Size => visible.sort_by(|a, b| {
-                source[*b]
-                    .size
-                    .cmp(&source[*a].size)
-                    .then_with(|| source[*a].file_name.cmp(&source[*b].file_name))
-            }),
+            SortMode::Modified => {
+                visible.sort_by(|a, b| source[*b].modified.cmp(&source[*a].modified))
+            }
+            SortMode::Size => visible.sort_by(|a, b| source[*b].size.cmp(&source[*a].size)),
             SortMode::Resolution => visible.sort_by(|a, b| {
-                let left = u64::from(source[*a].width) * u64::from(source[*a].height);
-                let right = u64::from(source[*b].width) * u64::from(source[*b].height);
-                right
-                    .cmp(&left)
-                    .then_with(|| source[*a].file_name.cmp(&source[*b].file_name))
+                let a_pixels = u64::from(source[*a].width) * u64::from(source[*a].height);
+                let b_pixels = u64::from(source[*b].width) * u64::from(source[*b].height);
+                b_pixels.cmp(&a_pixels)
             }),
         }
 
