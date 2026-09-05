@@ -65,21 +65,23 @@ impl ImageSearchApp {
         if visible.is_empty() {
             return;
         }
-        let current =
-            self.focused_result
-                .as_ref()
-                .and_then(|path| visible.iter().position(|candidate| candidate == path))
-                .or_else(|| {
-                    (self.selected_paths.len() == 1)
-                        .then(|| {
-                            self.selected_paths.iter().next().and_then(|path| {
-                                visible.iter().position(|candidate| candidate == path)
-                            })
-                        })
-                        .flatten()
-                })
-                .unwrap_or(0);
-        let target = (current as isize + delta).clamp(0, visible.len() as isize - 1) as usize;
+        let current = self
+            .focused_result
+            .as_ref()
+            .and_then(|path| visible.iter().position(|candidate| candidate == path))
+            .or_else(|| {
+                (self.selected_paths.len() == 1)
+                    .then(|| {
+                        self.selected_paths
+                            .iter()
+                            .next()
+                            .and_then(|path| visible.iter().position(|candidate| candidate == path))
+                    })
+                    .flatten()
+            });
+        let Some(target) = navigation_target(current, delta, visible.len()) else {
+            return;
+        };
         let target_path = visible[target].clone();
         self.select_path_with_modifiers(&target_path, false, extend_range);
     }
@@ -293,5 +295,36 @@ impl ImageSearchApp {
         (self.selected_paths.len() == 1)
             .then(|| self.selected_paths.iter().next().cloned())
             .flatten()
+    }
+}
+
+fn navigation_target(current: Option<usize>, delta: isize, len: usize) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    let Some(current) = current else {
+        return Some(0);
+    };
+    Some((current as isize + delta).clamp(0, len as isize - 1) as usize)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::navigation_target;
+
+    #[test]
+    fn first_arrow_focuses_first_result() {
+        assert_eq!(navigation_target(None, 1, 8), Some(0));
+        assert_eq!(navigation_target(None, 4, 8), Some(0));
+        assert_eq!(navigation_target(None, -1, 8), Some(0));
+    }
+
+    #[test]
+    fn navigation_clamps_at_result_boundaries() {
+        assert_eq!(navigation_target(Some(0), -1, 8), Some(0));
+        assert_eq!(navigation_target(Some(7), 1, 8), Some(7));
+        assert_eq!(navigation_target(Some(3), 4, 8), Some(7));
+        assert_eq!(navigation_target(Some(3), -4, 8), Some(0));
+        assert_eq!(navigation_target(Some(0), 1, 0), None);
     }
 }
