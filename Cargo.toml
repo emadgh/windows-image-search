@@ -25,6 +25,7 @@ rayon = "1.10"
 rfd = "0.15"
 rusqlite = { version = "0.37", features = ["bundled"] }
 sha2 = "0.10"
+update-via-github = { git = "https://github.com/emadgh/update-via-github.git", rev = "720f3d4c80c7d65e1427640b9ae9aea7946dc9d5" }
 ureq = "2.12"
 walkdir = "2.5"
 
