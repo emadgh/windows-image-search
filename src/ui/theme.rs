@@ -90,6 +90,9 @@ mod tests {
         let state_id = egui::Id::new(APPLIED_DARK_MODE_ID);
         assert_eq!(ctx.data_mut(|data| data.get_temp::<bool>(state_id)), None);
         ctx.data_mut(|data| data.insert_temp(state_id, true));
-        assert_eq!(ctx.data_mut(|data| data.get_temp::<bool>(state_id)), Some(true));
+        assert_eq!(
+            ctx.data_mut(|data| data.get_temp::<bool>(state_id)),
+            Some(true)
+        );
     }
 }
