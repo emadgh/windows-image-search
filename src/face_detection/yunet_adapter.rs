@@ -3,6 +3,7 @@ use anyhow::{bail, Context, Result};
 use image::{DynamicImage, GenericImageView};
 use ort::{ep::DirectML, session::Session, value::TensorRef};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 pub const YUNET_DIVISOR: u32 = 32;
 pub const YUNET_STRIDES: [u32; 3] = [8, 16, 32];
@@ -31,6 +32,15 @@ struct YuNetInput {
     height: u32,
     padded_width: u32,
     padded_height: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct YuNetBatchInferenceStats {
+    pub provider: YuNetExecutionProvider,
+    pub inference: Duration,
+    pub batch_size: usize,
+    pub padded_width: u32,
+    pub padded_height: u32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -91,6 +101,70 @@ impl YuNetOnnxAdapter {
 
     pub fn model_fingerprint(&self) -> u64 {
         self.model_fingerprint
+    }
+
+    pub fn benchmark_batch_inference(
+        &mut self,
+        image: &DynamicImage,
+        batch_size: usize,
+    ) -> Result<YuNetBatchInferenceStats> {
+        let input = preprocess(image)?;
+        let values = repeat_input_for_batch(&input, batch_size)?;
+        let tensor = TensorRef::from_array_view((
+            [
+                batch_size,
+                3usize,
+                input.padded_height as usize,
+                input.padded_width as usize,
+            ],
+            values.as_slice(),
+        ))
+        .context("creating batched YuNet input tensor")?;
+        let started = Instant::now();
+        let outputs = self
+            .session
+            .run(ort::inputs![tensor])
+            .context("running batched YuNet ONNX inference")?;
+        let inference = started.elapsed();
+
+        for stride in YUNET_STRIDES {
+            let cells =
+                (input.padded_width / stride) as usize * (input.padded_height / stride) as usize;
+            for (prefix, values_per_cell) in [
+                ("cls", 1usize),
+                ("obj", 1usize),
+                ("bbox", 4usize),
+                ("kps", 10usize),
+            ] {
+                let name = format!("{prefix}_{stride}");
+                let value = outputs
+                    .get(name.as_str())
+                    .with_context(|| format!("YuNet output `{name}` is missing"))?;
+                let (_shape, data) = value
+                    .try_extract_tensor::<f32>()
+                    .with_context(|| format!("extracting batched YuNet output `{name}`"))?;
+                let expected = batch_size
+                    .checked_mul(cells)
+                    .and_then(|count| count.checked_mul(values_per_cell))
+                    .context("YuNet batched output size overflow")?;
+                if data.len() != expected {
+                    bail!(
+                        "batched YuNet output `{name}` returned {} values; expected {} for batch size {}",
+                        data.len(),
+                        expected,
+                        batch_size
+                    );
+                }
+            }
+        }
+
+        Ok(YuNetBatchInferenceStats {
+            provider: self.provider,
+            inference,
+            batch_size,
+            padded_width: input.padded_width,
+            padded_height: input.padded_height,
+        })
     }
 
     pub fn detect(&mut self, image: &DynamicImage) -> Result<Vec<DetectedFace>> {
@@ -162,6 +236,22 @@ impl YuNetOnnxAdapter {
             })
             .collect())
     }
+}
+
+fn repeat_input_for_batch(input: &YuNetInput, batch_size: usize) -> Result<Vec<f32>> {
+    if batch_size == 0 {
+        bail!("YuNet batch size must be greater than zero");
+    }
+    let capacity = input
+        .values
+        .len()
+        .checked_mul(batch_size)
+        .context("YuNet batched input size overflow")?;
+    let mut values = Vec::with_capacity(capacity);
+    for _ in 0..batch_size {
+        values.extend_from_slice(&input.values);
+    }
+    Ok(values)
 }
 
 fn validate_thresholds(score: f32, nms: f32, top_k: usize) -> Result<()> {
@@ -345,6 +435,17 @@ mod tests {
         assert_eq!(input.values[plane], 20.0);
         assert_eq!(input.values[2 * plane], 10.0);
         assert_eq!(input.values[63], 0.0);
+    }
+
+    #[test]
+    fn batch_preprocessing_repeats_preprocessed_image_in_batch_order() {
+        let image = DynamicImage::ImageRgb8(ImageBuffer::from_pixel(33, 17, Rgb([10u8, 20, 30])));
+        let input = preprocess(&image).unwrap();
+        let batched = repeat_input_for_batch(&input, 2).unwrap();
+        assert_eq!(batched.len(), input.values.len() * 2);
+        assert_eq!(&batched[..input.values.len()], input.values.as_slice());
+        assert_eq!(&batched[input.values.len()..], input.values.as_slice());
+        assert!(repeat_input_for_batch(&input, 0).is_err());
     }
 
     #[test]

@@ -51,6 +51,7 @@ pub fn benchmark(path: &Path) -> Result<String> {
 
     let mut predictions: BTreeMap<String, Vec<face_detection::DetectedFace>> = BTreeMap::new();
     let mut inference_times = Vec::with_capacity(manifest.images.len());
+    let mut batch_probe_image = None;
 
     for image in &manifest.images {
         let oriented = face_detection::decode_oriented(&image.image_path).with_context(|| {
@@ -59,6 +60,9 @@ pub fn benchmark(path: &Path) -> Result<String> {
                 image.image_path.display()
             )
         })?;
+        if batch_probe_image.is_none() {
+            batch_probe_image = Some(oriented.clone());
+        }
         let started = Instant::now();
         let detected = adapter
             .detect(&oriented)
@@ -124,6 +128,18 @@ pub fn benchmark(path: &Path) -> Result<String> {
         init_duration.as_secs_f64() * 1000.0
     )?;
     append_latency(&mut report, &inference_times)?;
+    writeln!(
+        report,
+        "batch_probe_image_id={}",
+        tsv_field(&manifest.images[0].image_id)
+    )?;
+    append_batch_sweep(
+        &mut report,
+        &mut adapter,
+        batch_probe_image
+            .as_ref()
+            .context("YuNet batch probe image is unavailable")?,
+    )?;
     writeln!(report)?;
     writeln!(report, "shared_evaluator_begin")?;
     write!(report, "{evaluated}")?;
@@ -325,6 +341,103 @@ fn append_latency(report: &mut String, times: &[Duration]) -> Result<()> {
     writeln!(report, "inference_p50_ms={p50:.3}")?;
     writeln!(report, "inference_p95_ms={p95:.3}")?;
     writeln!(report, "inference_images_per_second={throughput:.3}")?;
+    Ok(())
+}
+
+fn append_batch_sweep(
+    report: &mut String,
+    adapter: &mut YuNetOnnxAdapter,
+    image: &image::DynamicImage,
+) -> Result<()> {
+    const BATCH_SIZES: [usize; 5] = [1, 2, 4, 8, 16];
+    const MEASURED_ITERATIONS: usize = 5;
+
+    writeln!(report, "batch_sweep_begin")?;
+    writeln!(report, "batch_sweep_iterations={MEASURED_ITERATIONS}")?;
+    for batch_size in BATCH_SIZES {
+        match adapter.benchmark_batch_inference(image, batch_size) {
+            Ok(warmup) => {
+                let mut times = Vec::with_capacity(MEASURED_ITERATIONS);
+                let mut measurement_error = None;
+                let mut geometry_stable = true;
+                for iteration in 0..MEASURED_ITERATIONS {
+                    match adapter.benchmark_batch_inference(image, batch_size) {
+                        Ok(stats) => {
+                            geometry_stable &= stats.batch_size == batch_size
+                                && stats.padded_width == warmup.padded_width
+                                && stats.padded_height == warmup.padded_height;
+                            times.push(stats.inference.as_secs_f64() * 1000.0);
+                        }
+                        Err(err) => {
+                            measurement_error = Some(format!(
+                                "iteration {} of {} failed: {err:#}",
+                                iteration + 1,
+                                MEASURED_ITERATIONS
+                            ));
+                            break;
+                        }
+                    }
+                }
+                writeln!(report, "batch_{batch_size}_supported=true")?;
+                writeln!(
+                    report,
+                    "batch_{batch_size}_warmup_ms={:.3}",
+                    warmup.inference.as_secs_f64() * 1000.0
+                )?;
+                writeln!(
+                    report,
+                    "batch_{batch_size}_input={}x{}",
+                    warmup.padded_width, warmup.padded_height
+                )?;
+                writeln!(
+                    report,
+                    "batch_{batch_size}_measured_iterations={}",
+                    times.len()
+                )?;
+                if let Some(error) = measurement_error {
+                    writeln!(report, "batch_{batch_size}_measurement_succeeded=false")?;
+                    writeln!(
+                        report,
+                        "batch_{batch_size}_measurement_error={}",
+                        tsv_field(&error)
+                    )?;
+                    continue;
+                }
+                times.sort_by(f64::total_cmp);
+                let total_ms = times.iter().sum::<f64>();
+                let mean_ms = total_ms / times.len() as f64;
+                let p50_ms = percentile(&times, 0.50);
+                let images_per_second = if total_ms <= f64::EPSILON {
+                    0.0
+                } else {
+                    (batch_size * times.len()) as f64 / (total_ms / 1000.0)
+                };
+                writeln!(report, "batch_{batch_size}_measurement_succeeded=true")?;
+                writeln!(report, "batch_{batch_size}_mean_ms={mean_ms:.3}")?;
+                writeln!(report, "batch_{batch_size}_p50_ms={p50_ms:.3}")?;
+                writeln!(
+                    report,
+                    "batch_{batch_size}_images_per_second={images_per_second:.3}"
+                )?;
+                writeln!(report, "batch_{batch_size}_output_shapes_valid=true")?;
+                writeln!(
+                    report,
+                    "batch_{batch_size}_input_geometry_stable={geometry_stable}"
+                )?;
+            }
+            Err(err) => {
+                writeln!(report, "batch_{batch_size}_supported=false")?;
+                writeln!(report, "batch_{batch_size}_measurement_succeeded=false")?;
+                writeln!(report, "batch_{batch_size}_measured_iterations=0")?;
+                writeln!(
+                    report,
+                    "batch_{batch_size}_error={}",
+                    tsv_field(&format!("{err:#}"))
+                )?;
+            }
+        }
+    }
+    writeln!(report, "batch_sweep_end")?;
     Ok(())
 }
 
