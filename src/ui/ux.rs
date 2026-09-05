@@ -65,20 +65,19 @@ impl ImageSearchApp {
         if visible.is_empty() {
             return;
         }
-        let current = self
-            .focused_result
-            .as_ref()
-            .and_then(|path| visible.iter().position(|candidate| candidate == path))
-            .or_else(|| {
-                (self.selected_paths.len() == 1)
-                    .then(|| {
-                        self.selected_paths
-                            .iter()
-                            .next()
-                            .and_then(|path| visible.iter().position(|candidate| candidate == path))
-                    })
-                    .flatten()
-            });
+        let current =
+            self.focused_result
+                .as_ref()
+                .and_then(|path| visible.iter().position(|candidate| candidate == path))
+                .or_else(|| {
+                    (self.selected_paths.len() == 1)
+                        .then(|| {
+                            self.selected_paths.iter().next().and_then(|path| {
+                                visible.iter().position(|candidate| candidate == path)
+                            })
+                        })
+                        .flatten()
+                });
         let Some(target) = navigation_target(current, delta, visible.len()) else {
             return;
         };
