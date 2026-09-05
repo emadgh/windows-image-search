@@ -12,6 +12,7 @@ mod task_center;
 mod texture_lru;
 mod theme;
 mod thumbnails;
+mod update_ui;
 mod ux;
 mod views;
 
@@ -25,6 +26,7 @@ use crate::portable;
 use crate::settings::{self, ClipExecutionProvider, IndexingSettings};
 use crate::text_search::TextSearchService;
 use crate::thumbnail_cache;
+use crate::update::{UpdateManager, UpdateSettings};
 use eframe::egui;
 use egui::{ColorImage, TextureHandle, TextureOptions};
 use std::cell::RefCell;
@@ -166,6 +168,10 @@ pub struct ImageSearchApp {
     pub(super) similarity_settings: indexer::SimilaritySettings,
     pub(super) indexing_settings: IndexingSettings,
     settings_path: PathBuf,
+    pub(super) update_settings: UpdateSettings,
+    pub(super) update_settings_path: PathBuf,
+    pub(super) update_manager: UpdateManager,
+    pub(super) update_install_requested: bool,
     face_embedding_settings: FaceEmbeddingSettings,
     face_settings_path: PathBuf,
     face_runtime: face_runtime::FaceRuntimeState,
@@ -229,6 +235,12 @@ impl ImageSearchApp {
         let thumbnail_cache = thumbnail_cache::cache_dir_for_db(&db_path);
         let settings_path = app_data_dir.join("performance-settings.ini");
         let indexing_settings = settings::load(&settings_path);
+        let update_settings_path = app_data_dir.join("update-settings.ini");
+        let update_settings = crate::update::load_settings(&update_settings_path);
+        let update_manager = UpdateManager::default();
+        if update_settings.auto_check {
+            update_manager.start_check(update_settings.auto_download);
+        }
         let face_settings_path = app_data_dir.join("face-embedding-settings.ini");
         let mut face_embedding_settings = face_settings::load(&face_settings_path);
         let face_runtime = face_runtime::FaceRuntimeState::new(app_data_dir);
@@ -305,6 +317,10 @@ impl ImageSearchApp {
             similarity_settings: indexer::SimilaritySettings::default(),
             indexing_settings,
             settings_path,
+            update_settings,
+            update_settings_path,
+            update_manager,
+            update_install_requested: false,
             face_embedding_settings,
             face_settings_path,
             face_runtime,
@@ -1097,6 +1113,7 @@ impl eframe::App for ImageSearchApp {
         self.observe_text_search_input();
         self.dispatch_text_search_if_due();
         self.process_text_search_results();
+        update_ui::process(self, ctx);
         self.handle_result_shortcuts(ctx);
 
         if self.text_search_pending
@@ -1165,6 +1182,7 @@ impl eframe::App for ImageSearchApp {
             });
         });
 
+        update_ui::show_banner(self, ctx);
         self.show_search_sidebar(ctx);
         self.show_inspector(ctx);
         self.show_collections_workspace(ctx);
