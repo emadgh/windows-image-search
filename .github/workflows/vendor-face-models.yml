@@ -1,0 +1,273 @@
+name: Vendor face models
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/vendor-face-models.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  vendor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download and verify YuNet + SFace
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import urllib.request
+
+          models = [
+              (
+                  "face_detection_yunet_2026may.onnx",
+                  "https://raw.githubusercontent.com/opencv/opencv_zoo/main/models/face_detection_yunet/face_detection_yunet_2026may.onnx",
+                  229_738,
+                  "ebafce4e3c118d6554634be5c27ab333b4c047a9a8c3faf1d7cf93101c22f0f0",
+              ),
+              (
+                  "face_recognition_sface_2021dec.onnx",
+                  "https://raw.githubusercontent.com/opencv/opencv_zoo/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx",
+                  38_696_353,
+                  "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79",
+              ),
+          ]
+
+          target = Path("models/faces")
+          target.mkdir(parents=True, exist_ok=True)
+          for name, url, expected_size, expected_sha in models:
+              path = target / name
+              print(f"Downloading {name} from OpenCV Zoo...")
+              request = urllib.request.Request(url, headers={"User-Agent": "windows-image-search-model-vendor"})
+              with urllib.request.urlopen(request, timeout=120) as response, path.open("wb") as out:
+                  while True:
+                      chunk = response.read(1024 * 1024)
+                      if not chunk:
+                          break
+                      out.write(chunk)
+              data = path.read_bytes()
+              digest = hashlib.sha256(data).hexdigest()
+              if len(data) != expected_size:
+                  raise SystemExit(f"{name}: size {len(data)} != {expected_size}")
+              if digest.lower() != expected_sha.lower():
+                  raise SystemExit(f"{name}: sha256 {digest} != {expected_sha}")
+              print(f"Verified {name}: {len(data)} bytes, sha256={digest}")
+          PY
+
+      - name: Point runtime downloads at this repository and enable automatic face-model bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          manager = Path("src/face_model_manager.rs")
+          text = manager.read_text(encoding="utf-8")
+          replacements = {
+              'https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2026may.onnx':
+                  'https://raw.githubusercontent.com/emadgh/windows-image-search/main/models/faces/face_detection_yunet_2026may.onnx',
+              'https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx':
+                  'https://raw.githubusercontent.com/emadgh/windows-image-search/main/models/faces/face_recognition_sface_2021dec.onnx',
+          }
+          for old, new in replacements.items():
+              if old not in text and new not in text:
+                  raise SystemExit(f"Expected model URL not found: {old}")
+              text = text.replace(old, new)
+          manager.write_text(text, encoding="utf-8")
+
+          runtime = Path("src/ui/face_runtime.rs")
+          text = runtime.read_text(encoding="utf-8")
+
+          old_import = "use crate::face_sface_production;\n"
+          new_import = "use crate::face_sface_production;\nuse crate::face_scope;\n"
+          if "use crate::face_scope;" not in text:
+              if old_import not in text:
+                  raise SystemExit("Could not locate face_scope import insertion point")
+              text = text.replace(old_import, new_import, 1)
+
+          old_schedule = '''    pub(super) fn schedule_face_pipeline_after_base_index(&mut self) {
+        if self.face_runtime.configured_and_available() {
+            self.face_runtime.run_after_base_index = true;
+        }
+    }
+'''
+          new_schedule = '''    pub(super) fn schedule_face_pipeline_after_base_index(&mut self) {
+        let face_needed = self.roots.iter().any(|root| {
+            face_scope::count_eligible_paths(&self.db_path, root).unwrap_or(0) > 0
+        });
+        if face_needed {
+            self.face_runtime.run_after_base_index = true;
+        }
+    }
+'''
+          if old_schedule in text:
+              text = text.replace(old_schedule, new_schedule, 1)
+          elif new_schedule not in text:
+              raise SystemExit("Could not patch schedule_face_pipeline_after_base_index")
+
+          old_download_status = '''    pub(super) fn face_model_download_running(&self) -> bool {
+        self.face_runtime.model_download_running
+    }
+'''
+          new_download_status = '''    pub(super) fn face_model_download_running(&self) -> bool {
+        self.face_runtime.model_download_running
+    }
+
+    pub(super) fn face_model_download_progress(&self) -> Option<(&'static str, u64, u64)> {
+        if !self.face_runtime.model_download_running {
+            return None;
+        }
+        Some((
+            self.face_runtime
+                .model_download_kind
+                .map(|kind| kind.label())
+                .unwrap_or("Face models"),
+            self.face_runtime.model_downloaded,
+            self.face_runtime.model_download_total,
+        ))
+    }
+'''
+          if "fn face_model_download_progress" not in text:
+              if old_download_status not in text:
+                  raise SystemExit("Could not patch face-model download progress accessor")
+              text = text.replace(old_download_status, new_download_status, 1)
+
+          marker = '''    fn start_default_face_model_download(&mut self, force: bool, run_face_after: bool) {
+'''
+          helper = '''    fn managed_default_models_needed(&self) -> bool {
+        let yunet_needed = !self.model_path_is_custom(FaceModelKind::YuNet)
+            && !matches!(
+                face_model_manager::inspect(&self.face_runtime.model_cache_dir, YUNET),
+                ManagedModelState::Ready
+            );
+        let sface_needed = !self.model_path_is_custom(FaceModelKind::SFace)
+            && !matches!(
+                face_model_manager::inspect(&self.face_runtime.model_cache_dir, SFACE),
+                ManagedModelState::Ready
+            );
+        yunet_needed || sface_needed
+    }
+
+'''
+          if "fn managed_default_models_needed" not in text:
+              if marker not in text:
+                  raise SystemExit("Could not locate model bootstrap helper insertion point")
+              text = text.replace(marker, helper + marker, 1)
+
+          old_guard = '''        if !self.face_runtime.settings.configured() || !self.face_embedding_settings.configured() {
+            self.start_default_face_model_download(false, true);
+            return;
+        }
+'''
+          new_guard = '''        if self.managed_default_models_needed()
+            || !self.face_runtime.settings.configured()
+            || !self.face_embedding_settings.configured()
+        {
+            self.start_default_face_model_download(false, true);
+            return;
+        }
+'''
+          if old_guard in text:
+              text = text.replace(old_guard, new_guard, 1)
+          elif new_guard not in text:
+              raise SystemExit("Could not patch automatic model bootstrap guard")
+
+          old_help = "Defaults are downloaded from OpenCV Zoo, verified by exact size + SHA-256, validated as ONNX, then atomically installed. Browse paths below remain advanced custom overrides."
+          new_help = "Defaults are downloaded from this project's GitHub repository, verified by exact size + SHA-256, validated as ONNX, then atomically installed. Browse paths below remain advanced custom overrides."
+          text = text.replace(old_help, new_help)
+          runtime.write_text(text, encoding="utf-8")
+
+          task = Path("src/ui/task_center.rs")
+          text = task.read_text(encoding="utf-8")
+          old_progress = '''                        if let Some((done, total)) = self.progress.filter(|(_, total)| *total > 0) {
+                            ui.add(
+                                egui::ProgressBar::new(done as f32 / total as f32)
+                                    .desired_width(ui.available_width().min(440.0))
+                                    .text(format!("{done}/{total}")),
+                            );
+                        }
+'''
+          new_progress = '''                        if let Some((label, downloaded, total)) = self.face_model_download_progress() {
+                            let fraction = if total == 0 {
+                                0.0
+                            } else {
+                                downloaded as f32 / total as f32
+                            };
+                            let detail = if total == 0 {
+                                format!("Preparing {label} download…")
+                            } else {
+                                format!(
+                                    "{label}: {:.1}% · {:.1}/{:.1} MB",
+                                    fraction * 100.0,
+                                    downloaded as f64 / 1_048_576.0,
+                                    total as f64 / 1_048_576.0
+                                )
+                            };
+                            ui.add(
+                                egui::ProgressBar::new(fraction.clamp(0.0, 1.0))
+                                    .desired_width(ui.available_width().min(440.0))
+                                    .text(detail),
+                            );
+                        } else if let Some((done, total)) =
+                            self.progress.filter(|(_, total)| *total > 0)
+                        {
+                            ui.add(
+                                egui::ProgressBar::new(done as f32 / total as f32)
+                                    .desired_width(ui.available_width().min(440.0))
+                                    .text(format!("{done}/{total}")),
+                            );
+                        }
+'''
+          if "Preparing {label} download" not in text:
+              if old_progress not in text:
+                  raise SystemExit("Could not patch Task Center model download progress")
+              text = text.replace(old_progress, new_progress, 1)
+          task.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Add model provenance
+        shell: bash
+        run: |
+          cat > models/faces/README.md <<'EOF'
+          # Face models
+
+          These ONNX files are vendored so installed builds can bootstrap face search from this repository instead of depending on a third-party runtime URL.
+
+          - `face_detection_yunet_2026may.onnx` — OpenCV Zoo YuNet, MIT. SHA-256 `ebafce4e3c118d6554634be5c27ab333b4c047a9a8c3faf1d7cf93101c22f0f0`.
+          - `face_recognition_sface_2021dec.onnx` — OpenCV Zoo SFace, Apache-2.0. SHA-256 `0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79`.
+
+          Upstream source: https://github.com/opencv/opencv_zoo
+          EOF
+
+      - name: Sanity-check patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F "raw.githubusercontent.com/emadgh/windows-image-search/main/models/faces" src/face_model_manager.rs
+          grep -F "face_scope::count_eligible_paths" src/ui/face_runtime.rs
+          grep -F "managed_default_models_needed" src/ui/face_runtime.rs
+          grep -F "face_model_download_progress" src/ui/task_center.rs
+          git diff --check
+
+      - name: Commit vendored models and runtime bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add models/faces src/face_model_manager.rs src/ui/face_runtime.rs src/ui/task_center.rs
+          if git diff --cached --quiet; then
+            echo "Face models and runtime bootstrap are already up to date."
+            exit 0
+          fi
+          git commit -m "Vendor face models and auto-download before face scan"
+          git push origin HEAD:main
