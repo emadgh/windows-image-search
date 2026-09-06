@@ -6,6 +6,8 @@ impl ImageSearchApp {
         if self.search_mode == mode {
             return;
         }
+        self.cancel_visual_search();
+        self.cancel_face_search();
         match mode {
             SearchMode::Text => {
                 self.similarity_results = None;
@@ -14,7 +16,6 @@ impl ImageSearchApp {
                 self.selected_paths.clear();
             }
             SearchMode::SimilarImage => {
-                self.search_text.clear();
                 if self.face_search_active() {
                     self.similarity_results = None;
                     self.query_image = None;
@@ -25,6 +26,11 @@ impl ImageSearchApp {
             SearchMode::Face => {
                 self.open_face_search();
                 return;
+            }
+            SearchMode::Semantic => {
+                self.similarity_results = None;
+                self.query_image = None;
+                self.clear_face_search_result_state();
             }
         }
         self.search_mode = mode;
@@ -65,9 +71,21 @@ impl ImageSearchApp {
                             self.activate_search_mode(SearchMode::Face);
                         }
                     });
+                    if ui.selectable_label(self.search_mode == SearchMode::Semantic, "Describe an image").clicked() {
+                        self.activate_search_mode(SearchMode::Semantic);
+                    }
                     ui.add_space(8.0);
 
                     match self.search_mode {
+                        SearchMode::Semantic => {
+                            ui.label("Describe what the image looks like");
+                            ui.text_edit_multiline(&mut self.semantic_description);
+                            ui.small("Uses the matching CLIP text model. First use downloads it; cached inference is local. English descriptions usually work best.");
+                            if ui.add_enabled(self.can_run_similarity_search() && !self.semantic_description.trim().is_empty(), egui::Button::new("Find images")).clicked() {
+                                self.run_description_search();
+                            }
+                            if self.searching && ui.button("Cancel search").clicked() { self.cancel_visual_search(); }
+                        }
                         SearchMode::Text => {
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.search_text)
@@ -82,6 +100,62 @@ impl ImageSearchApp {
                             }
                         }
                         SearchMode::SimilarImage => {
+                            ui.collapsing("Search a region", |ui| {
+                                ui.checkbox(&mut self.query_region_enabled, "Use selected rectangle");
+                                if self.query_region_enabled {
+                                    ui.add(egui::Slider::new(&mut self.query_region.x,0.0..=0.99).text("Left"));
+                                    ui.add(egui::Slider::new(&mut self.query_region.y,0.0..=0.99).text("Top"));
+                                    self.query_region.width = self.query_region.width.min(1.0-self.query_region.x);
+                                    self.query_region.height = self.query_region.height.min(1.0-self.query_region.y);
+                                    ui.add(egui::Slider::new(&mut self.query_region.width,0.01..=1.0-self.query_region.x).text("Width"));
+                                    ui.add(egui::Slider::new(&mut self.query_region.height,0.01..=1.0-self.query_region.y).text("Height"));
+                                    if let Some(path) = self.query_image.clone() {
+                                        if let Some(texture) = self.thumbnail(&path) {
+                                            let response = ui.add(egui::Image::new(&texture).max_size(egui::vec2(ui.available_width(), 200.0)));
+                                            let region = self.query_region;
+                                            let rectangle = egui::Rect::from_min_max(
+                                                response.rect.min + response.rect.size() * egui::vec2(region.x, region.y),
+                                                response.rect.min + response.rect.size() * egui::vec2(region.x + region.width, region.y + region.height));
+                                            ui.painter().rect_stroke(rectangle, 0.0, egui::Stroke::new(2.0, egui::Color32::YELLOW), egui::StrokeKind::Inside);
+                                        }
+                                    }
+                                    ui.small("Coordinates are fractions of the image. Re-run applies the crop without modifying the source.");
+                                }
+                            });
+                            if self.searching && ui.button("Cancel search").clicked() {
+                                self.cancel_visual_search();
+                            }
+                            ui.add_enabled_ui(!self.searching, |ui| {
+                                let selected = crate::indexer::SimilarityPreset::matching(
+                                    self.similarity_settings,
+                                );
+                                egui::ComboBox::from_id_salt("similarity_preset")
+                                    .selected_text(selected.map_or("Custom", |preset| preset.label()))
+                                    .show_ui(ui, |ui| {
+                                        for preset in crate::indexer::SimilarityPreset::ALL {
+                                            if ui
+                                                .selectable_label(selected == Some(preset), preset.label())
+                                                .clicked()
+                                            {
+                                                self.similarity_settings = preset.settings();
+                                            }
+                                        }
+                                    });
+                                ui.small("Presets change controls; re-run to update results. Possible duplicates require review.");
+                            });
+                            if let Some(reason) = self
+                                .similarity_semantic_unavailable
+                                .as_ref()
+                                .filter(|_| self.similarity_results.is_some())
+                            {
+                                ui.group(|ui| {
+                                    ui.strong("Semantic model unavailable");
+                                    ui.label("These results use texture and color only.");
+                                    ui.collapsing("Details", |ui| {
+                                        ui.label(reason);
+                                    });
+                                });
+                            }
                             if let Some(query) = self.query_image.clone() {
                                 ui.group(|ui| {
                                     ui.strong("Similarity query");
@@ -132,7 +206,7 @@ impl ImageSearchApp {
                             }
 
                             if self.indexing && !self.index_paused {
-                                ui.small("Pause indexing to search committed images.");
+                                ui.small("Search is available while indexing continues. Re-run to include newly indexed images.");
                             } else if self.indexing && self.index_paused {
                                 ui.small("Indexing is paused; search uses committed images.");
                             }
@@ -151,6 +225,17 @@ impl ImageSearchApp {
                                         ""
                                     }
                                 ));
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .add_enabled(
+                                            self.can_run_similarity_search(),
+                                            egui::Button::new("Re-run search"),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.rerun_similarity_search();
+                                    }
+                                });
                                 egui::CollapsingHeader::new("Advanced similarity")
                                     .default_open(false)
                                     .show(ui, |ui| {
@@ -241,6 +326,16 @@ impl ImageSearchApp {
                     ui.add_space(10.0);
                     ui.separator();
                     ui.strong("Filters");
+                    if self.search_mode != SearchMode::Text {
+                        ui.add(egui::TextEdit::singleline(&mut self.search_text).hint_text("Filename / tags / People name filter"));
+                    }
+                    if let Some(timing) = &self.similarity_timings {
+                        ui.collapsing("Last search timing", |ui| {
+                            ui.small(format!("Decode {:.0} ms · Inference {:.0} ms · Retrieval {:.0} ms · Ranking {:.0} ms · Total {:.0} ms", timing.decode_ms,timing.inference_ms,timing.retrieval_ms,timing.ranking_ms,timing.total_ms));
+                            ui.small(format!("Result metadata {:.1} ms", timing.metadata_ms));
+                            ui.small(format!("Descriptors: {} / {:.1} MiB retained (64 MiB budget)", if timing.descriptor_cache_hit { "cache hit" } else { "loaded" }, timing.descriptor_cache_bytes as f64 / (1024.0 * 1024.0)));
+                        });
+                    }
                     self.show_collection_filter(ui);
                     self.show_people_filter(ui);
 

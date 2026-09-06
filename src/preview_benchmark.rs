@@ -104,6 +104,20 @@ pub fn benchmark(db_path: &Path, model_cache: &Path, requested_samples: usize) -
         0.0
     };
 
+    let mut extensions = std::collections::BTreeMap::<String, usize>::new();
+    for path in &source_paths {
+        let extension = path
+            .extension()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_lowercase();
+        *extensions.entry(extension).or_default() += 1;
+    }
+    let extension_summary = extensions
+        .iter()
+        .map(|(extension, count)| format!("sample_extension.{extension}={count}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     Ok(format!(
         "Windows Image Search CLIP preview benchmark\n\
 version={}\n\
@@ -123,8 +137,10 @@ pair_cosine_min={:.6}\n\
 retrieval_recall_at_10={:.6}\n\
 retrieval_recall_at_25={:.6}\n\
 top1_agreement={:.6}\n\
-production_clip_input=original\n\
-notes=Recall compares original-query/original-corpus baseline against original-query/preview-corpus retrieval. Production behavior is intentionally unchanged until representative material-image results justify switching.\n",
+indexing_clip_input=cached_thumbnail_when_valid_else_source_or_oversized_preview\n\
+production_behavior_changed=false\n\
+{extension_summary}\n\
+notes=Recall compares original-query/original-corpus baseline against original-query/preview-corpus retrieval. Timings include decoding/preprocessing; the original pass may include model initialization, so preview_speedup_x is not an inference-only comparison. This benchmark does not change indexing settings.\n",
         env!("CARGO_PKG_VERSION"),
         requested_samples,
         source_paths.len(),

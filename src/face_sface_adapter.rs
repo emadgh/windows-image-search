@@ -144,8 +144,16 @@ impl SFaceOnnxAdapter {
         let mut builder = match provider {
             SFaceExecutionProvider::Cpu => builder,
             SFaceExecutionProvider::DirectMl => builder
-                .with_execution_providers([DirectML::default().build()])
-                .map_err(|err| anyhow::anyhow!("configuring DirectML for SFace: {err}"))?,
+                .with_execution_providers([DirectML::default().build().error_on_failure()])
+                .map_err(|err| anyhow::anyhow!("configuring DirectML for SFace: {err}"))?
+                .with_memory_pattern(false)
+                .map_err(|err| {
+                    anyhow::anyhow!("disabling DirectML memory patterns for SFace: {err}")
+                })?
+                .with_parallel_execution(false)
+                .map_err(|err| {
+                    anyhow::anyhow!("configuring sequential DirectML execution for SFace: {err}")
+                })?,
         };
         let session = builder
             .commit_from_file(model_path)

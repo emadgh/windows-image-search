@@ -1,0 +1,20 @@
+Windows Image Search CLIP preview benchmark
+version=0.3.0-alpha.6
+samples_requested=50
+samples_used=50
+preview_edge_px=512
+clip_threads=4
+embedding_batch_size=16
+original_embedding_ms=47248.218
+preview_embedding_ms=1384.571
+preview_speedup_x=34.125
+original_model_reloaded=true
+preview_model_reloaded=false
+pair_cosine_mean=0.980682
+pair_cosine_p05=0.944322
+pair_cosine_min=0.914828
+retrieval_recall_at_10=0.808000
+retrieval_recall_at_25=0.900000
+top1_agreement=0.580000
+production_clip_input=original
+notes=Recall compares original-query/original-corpus baseline against original-query/preview-corpus retrieval. Production behavior is intentionally unchanged until representative material-image results justify switching.

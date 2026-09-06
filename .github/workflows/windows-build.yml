@@ -84,6 +84,11 @@ jobs:
         run: cargo check --all-targets
       - name: Tests
         run: cargo test --all-targets
+      - name: Benchmark workspace isolation regression
+        run: python scripts/test-benchmark-workspace.py
+      - name: Face benchmark provider manifest regression
+        shell: powershell
+        run: ./scripts/test-benchmark-runners.ps1
       - name: Release build
         run: cargo build --release
       - name: Prepare Windows test bundle
@@ -94,6 +99,8 @@ jobs:
           Copy-Item scripts/run-indexed-sample-benchmark.ps1 artifact/
           Copy-Item scripts/run-v0.2-benchmark-gate.ps1 artifact/
           Copy-Item scripts/run-v0.3-face-benchmark-gate.ps1 artifact/
+          Copy-Item scripts/prepare-benchmark-workspace.py artifact/
+          Copy-Item docs/isolated-benchmarks.md artifact/
           Copy-Item scripts/run-oversized-source-validation.ps1 artifact/
           Copy-Item README.md artifact/
           Copy-Item LICENSE artifact/

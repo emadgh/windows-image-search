@@ -1,0 +1,25 @@
+Windows Image Search CLIP preview benchmark
+version=0.3.0-alpha.6
+samples_requested=54
+samples_used=54
+preview_edge_px=512
+clip_threads=4
+embedding_batch_size=16
+original_embedding_ms=36256.125
+preview_embedding_ms=1416.103
+preview_speedup_x=25.603
+original_model_reloaded=true
+preview_model_reloaded=false
+pair_cosine_mean=0.985188
+pair_cosine_p05=0.967743
+pair_cosine_min=0.947614
+retrieval_recall_at_10=0.825926
+retrieval_recall_at_25=0.920740
+top1_agreement=0.666667
+indexing_clip_input=cached_thumbnail_when_valid_else_source_or_oversized_preview
+production_behavior_changed=false
+sample_extension.jpeg=9
+sample_extension.jpg=9
+sample_extension.png=18
+sample_extension.tif=18
+notes=Recall compares original-query/original-corpus baseline against original-query/preview-corpus retrieval. Timings include decoding/preprocessing; the original pass may include model initialization, so preview_speedup_x is not an inference-only comparison. This benchmark does not change indexing settings.

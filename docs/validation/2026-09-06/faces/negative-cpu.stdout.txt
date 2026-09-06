@@ -1,0 +1,89 @@
+Windows Image Search YuNet ONNX Benchmark
+application_version=v0.3.0-alpha.6
+model_file=face_detection_yunet_2026may.onnx
+model_source=user-supplied-local-model
+model_license=external-review
+model_redistributable=false
+model_commercial_use=false
+model_source_mode=external
+provider=cpu
+model_bytes=229738
+model_fingerprint_fnv1a64=4b624cc14e1e8d5a
+images=6
+ground_truth_faces=0
+score_threshold=0.6000
+nms_threshold=0.3000
+top_k=5000
+init_ms=40.269
+inference_mean_ms=2.359
+inference_p50_ms=2.226
+inference_p95_ms=3.745
+inference_images_per_second=423.828
+batch_probe_image_id=negative-01
+batch_sweep_begin
+batch_sweep_iterations=5
+batch_1_supported=true
+batch_1_warmup_ms=1.635
+batch_1_input=512x288
+batch_1_measured_iterations=5
+batch_1_measurement_succeeded=true
+batch_1_mean_ms=1.351
+batch_1_p50_ms=1.387
+batch_1_images_per_second=740.006
+batch_1_output_shapes_valid=true
+batch_1_input_geometry_stable=true
+batch_2_supported=false
+batch_2_measurement_succeeded=false
+batch_2_measured_iterations=0
+batch_2_error=running batched YuNet ONNX inference: Got invalid dimensions for input: input for the following indices  index: 0 Got: 2 Expected: 1  Please fix either the inputs/outputs or the model.
+batch_4_supported=false
+batch_4_measurement_succeeded=false
+batch_4_measured_iterations=0
+batch_4_error=running batched YuNet ONNX inference: Got invalid dimensions for input: input for the following indices  index: 0 Got: 4 Expected: 1  Please fix either the inputs/outputs or the model.
+batch_8_supported=false
+batch_8_measurement_succeeded=false
+batch_8_measured_iterations=0
+batch_8_error=running batched YuNet ONNX inference: Got invalid dimensions for input: input for the following indices  index: 0 Got: 8 Expected: 1  Please fix either the inputs/outputs or the model.
+batch_16_supported=false
+batch_16_measurement_succeeded=false
+batch_16_measured_iterations=0
+batch_16_error=running batched YuNet ONNX inference: Got invalid dimensions for input: input for the following indices  index: 0 Got: 16 Expected: 1  Please fix either the inputs/outputs or the model.
+batch_sweep_end
+
+shared_evaluator_begin
+Face benchmark evaluation
+
+model=yunet-external
+model_version=fnv-4b624cc14e1e8d5a
+execution_provider=cpu
+license=external-review
+redistributable=false
+commercial_use=false
+source_mode=external
+source=user-supplied-local-model
+model_distribution=external/user-supplied; benchmark does not redistribute model weights
+
+[detector]
+iou_threshold=0.50
+images=6
+ground_truth_faces=0
+predictions=0
+true_positives=0
+false_positives=0
+false_negatives=0
+precision=0.000000
+recall=0.000000
+f1=0.000000
+no_face_images=6
+no_face_images_with_false_positive=0
+no_face_false_positive_rate=0.000000
+tiny_faces_area_le_0.01=0
+tiny_face_recall=0.000000
+small_faces_area_0.01_to_0.04=0
+small_face_recall=0.000000
+large_faces_area_gt_0.04=0
+large_face_recall=0.000000
+
+[identity]
+status=not_evaluated; no identity rows supplied
+shared_evaluator_end

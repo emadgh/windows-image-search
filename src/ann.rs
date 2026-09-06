@@ -175,6 +175,66 @@ pub fn benchmark(db_path: &Path, requested_queries: usize) -> Result<String> {
         writeln!(report, "recall@{k}={:.2}%", recall * 100.0)?;
     }
 
+    // The UI reloads the graph and validates SQLite state for each query. Its
+    // candidate count is much larger than Top-100; measure that actual API too.
+    let record_count: usize =
+        db::open_search_reader(db_path)?
+            .query_row("SELECT count(*) FROM images", [], |row| row.get(0))?;
+    let candidate_limit = crate::visual_search::component_candidate_limit(record_count);
+    let effective_limit = candidate_limit.min(entries.len());
+    let mut production_us = Vec::new();
+    let mut candidate_exact_us = Vec::new();
+    let mut candidate_overlap = 0usize;
+    for index in &query_indices {
+        let query = &entries[*index].embedding;
+        let started = Instant::now();
+        let exact = exact_top_rowids(&entries, query, effective_limit);
+        candidate_exact_us.push(started.elapsed().as_micros());
+        let started = Instant::now();
+        let candidates = search_candidates(db_path, query, candidate_limit)?;
+        production_us.push(started.elapsed().as_micros());
+        candidate_overlap += exact
+            .iter()
+            .filter(|id| candidates.contains_key(id))
+            .count();
+    }
+    writeln!(report, "production_candidate_limit={candidate_limit}")?;
+    writeln!(report, "candidate_api_forced_for_diagnostic=true")?;
+    writeln!(
+        report,
+        "production_effective_candidate_limit={effective_limit}"
+    )?;
+    writeln!(
+        report,
+        "production_ef_search={}",
+        search_ef(effective_limit, entries.len())
+    )?;
+    writeln!(
+        report,
+        "production_reload_query_avg_ms={:.3}",
+        average_ms(&production_us)
+    )?;
+    writeln!(
+        report,
+        "production_reload_query_p95_ms={:.3}",
+        percentile_ms(&production_us, 0.95)
+    )?;
+    writeln!(
+        report,
+        "production_exact_candidate_avg_ms={:.3}",
+        average_ms(&candidate_exact_us)
+    )?;
+    writeln!(
+        report,
+        "production_candidate_recall={:.6}",
+        candidate_overlap as f64 / (effective_limit * query_indices.len()) as f64
+    )?;
+    writeln!(
+        report,
+        "production_candidate_speedup={:.3}x",
+        average_ms(&candidate_exact_us) / average_ms(&production_us).max(0.001)
+    )?;
+    writeln!(report, "notes=Warm Top-100 graph timings exclude preparation/reload. Production candidate API timings include SQLite signature validation and graph reload, but exclude query inference and hybrid reranking.")?;
     Ok(report)
 }
 
@@ -376,6 +436,83 @@ mod tests {
         assert_eq!(loaded.basename, manifest.basename);
         assert_eq!(loaded.count, manifest.count);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn persisted_candidates_follow_add_update_delete_and_missing_dump() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("wis-ann-lifecycle-{nonce}"));
+        let database = root.join("index.sqlite3");
+        let conn = db::open(&database).unwrap();
+        let insert = |name: &str, vector: &[f32]| {
+            let path = root.join(name);
+            db::upsert_image(
+                &conn,
+                &path,
+                &root,
+                name,
+                "jpg",
+                100,
+                200,
+                32,
+                32,
+                "",
+                "",
+                [1, 2, 3],
+                7,
+                &[1.0, 0.0],
+            )
+            .unwrap();
+            db::set_embedding(&conn, &path, vector).unwrap();
+            path
+        };
+        let first = insert("first.jpg", &[1.0, 0.0]);
+        let second = insert("second.jpg", &[0.0, 1.0]);
+        assert!(prepare_index(&database).unwrap());
+        assert!(!prepare_index(&database).unwrap());
+        assert_eq!(
+            search_candidates(&database, &[1.0, 0.0], 10).unwrap().len(),
+            2
+        );
+        insert("third.jpg", &[0.8, 0.6]);
+        assert!(prepare_index(&database).unwrap());
+        assert_eq!(
+            search_candidates(&database, &[1.0, 0.0], 10).unwrap().len(),
+            3
+        );
+        db::set_embedding(&conn, &first, &[0.0, 1.0]).unwrap();
+        assert!(prepare_index(&database).unwrap());
+        let first_id: usize = conn
+            .query_row(
+                "SELECT rowid FROM images WHERE path=?",
+                [first.to_string_lossy().as_ref()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(search_candidates(&database, &[1.0, 0.0], 10).unwrap()[&first_id] < 0.01);
+        conn.execute(
+            "DELETE FROM images WHERE path=?",
+            [second.to_string_lossy().as_ref()],
+        )
+        .unwrap();
+        assert!(prepare_index(&database).unwrap());
+        assert_eq!(
+            search_candidates(&database, &[1.0, 0.0], 10).unwrap().len(),
+            2
+        );
+        let index_dir = index_dir_for_db(&database);
+        let manifest = load_manifest(&index_dir).unwrap();
+        std::fs::remove_file(index_dir.join(format!("{}.hnsw.graph", manifest.basename))).unwrap();
+        assert!(prepare_index(&database).unwrap());
+        assert_eq!(
+            search_candidates(&database, &[1.0, 0.0], 10).unwrap().len(),
+            2
+        );
+        drop(conn);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

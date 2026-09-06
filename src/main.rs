@@ -1,8 +1,12 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod ann;
+mod benchmark_workspace;
 mod db;
+mod descriptor_cache;
+mod duplicates;
 mod embedding;
+mod external_face_query;
 mod face_ann_benchmark;
 mod face_benchmark;
 mod face_detection;
@@ -42,12 +46,15 @@ mod portable;
 mod portable_verify;
 mod preview_benchmark;
 mod runtime_benchmark;
+mod search_request;
 mod settings;
 mod text_search;
 mod texture_benchmark;
 mod thumbnail_cache;
 mod ui;
 mod update;
+mod visual_query;
+mod visual_search;
 mod windows_shell;
 
 use anyhow::{Context, Result};
@@ -61,10 +68,12 @@ enum StartupMode {
     Version,
     AnnBenchmark(usize),
     FaceAnnBenchmark(usize),
+    FaceAnnRootBenchmark(PathBuf),
     ClipPreviewBenchmark(usize),
     ClipRuntimeBenchmark(usize),
     ImageModelBenchmark(usize),
     LibraryProfile,
+    BuildPreviewVectorBank,
     MaterialEval(PathBuf),
     MaterialTextureBenchmark(usize),
     FaceBenchmark(PathBuf),
@@ -90,8 +99,20 @@ fn app_paths() -> Result<(PathBuf, PathBuf)> {
 fn startup_mode() -> StartupMode {
     let mut args = std::env::args().skip(1).peekable();
     while let Some(arg) = args.next() {
+        if arg == "--benchmark-workspace" {
+            args.next();
+            continue;
+        }
+        if arg == "--benchmark-face-ann-root" {
+            return StartupMode::FaceAnnRootBenchmark(
+                args.next().map(PathBuf::from).unwrap_or_default(),
+            );
+        }
         if arg == "--version" || arg == "-V" {
             return StartupMode::Version;
+        }
+        if arg == "--benchmark-build-preview-vectors" {
+            return StartupMode::BuildPreviewVectorBank;
         }
         if let Some(value) = arg.strip_prefix("--validate-oversized-preview=") {
             if !value.trim().is_empty() {
@@ -360,6 +381,34 @@ fn attach_parent_console_for_cli() {}
 
 fn main() -> eframe::Result<()> {
     let mode = startup_mode();
+    let workspace = match benchmark_workspace::from_args(std::env::args().skip(1)) {
+        Ok(value) => value,
+        Err(err) => benchmark_failed("Benchmark isolation", &err),
+    };
+    if workspace.is_some()
+        && !matches!(
+            &mode,
+            StartupMode::Version
+                | StartupMode::AnnBenchmark(_)
+                | StartupMode::FaceAnnBenchmark(_)
+                | StartupMode::ClipPreviewBenchmark(_)
+                | StartupMode::ClipRuntimeBenchmark(_)
+                | StartupMode::ImageModelBenchmark(_)
+                | StartupMode::LibraryProfile
+                | StartupMode::BuildPreviewVectorBank
+                | StartupMode::MaterialEval(_)
+                | StartupMode::MaterialTextureBenchmark(_)
+                | StartupMode::FaceBenchmark(_)
+                | StartupMode::FaceBenchmarkValidate(_)
+                | StartupMode::YuNetBenchmark(_)
+                | StartupMode::SFaceBenchmark(_)
+        )
+    {
+        benchmark_failed(
+            "Benchmark isolation",
+            &anyhow::anyhow!("workspace option is restricted to benchmark modes"),
+        );
+    }
     if !matches!(&mode, StartupMode::Gui) {
         attach_parent_console_for_cli();
     }
@@ -368,10 +417,41 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
-    let (db_path, model_cache) = app_paths().unwrap_or_else(|_| {
-        let fallback = PathBuf::from(".");
-        (fallback.join("index.sqlite3"), fallback.join("models"))
-    });
+    if matches!(&mode, StartupMode::BuildPreviewVectorBank) {
+        let result = workspace
+            .as_deref()
+            .context("--benchmark-build-preview-vectors requires --benchmark-workspace")
+            .and_then(benchmark_workspace::build_preview_vectors);
+        match result {
+            Ok(report) => write_benchmark_report(
+                &benchmark_report_path(
+                    &workspace.as_ref().unwrap().join("index.sqlite3"),
+                    "preview-vector-bank",
+                ),
+                &report,
+                "preview vector bank",
+            ),
+            Err(err) => benchmark_failed("Benchmark isolation", &err),
+        }
+        return Ok(());
+    }
+
+    if let StartupMode::FaceAnnRootBenchmark(root) = &mode {
+        match face_ann_benchmark::benchmark(std::slice::from_ref(root), 32) {
+            Ok(report) => println!("{report}"),
+            Err(err) => benchmark_failed("Portable face ANN benchmark", &err),
+        }
+        return Ok(());
+    }
+
+    let (db_path, model_cache) = if let Some(workspace) = &workspace {
+        (workspace.join("index.sqlite3"), workspace.join("models"))
+    } else {
+        app_paths().unwrap_or_else(|_| {
+            let fallback = PathBuf::from(".");
+            (fallback.join("index.sqlite3"), fallback.join("models"))
+        })
+    };
 
     if let StartupMode::OversizedPreviewValidation(source) = &mode {
         match oversized_validation::validate_preview(source) {
@@ -414,8 +494,10 @@ fn main() -> eframe::Result<()> {
     // CLI modes still prepare the database synchronously before running diagnostics.
     if !matches!(&mode, StartupMode::Gui) {
         let _ = db::open(&db_path);
-        let registered_roots = db::load_roots(&db_path).unwrap_or_default();
-        let _ = portable::prepare_registered_roots(&db_path, &registered_roots);
+        if workspace.is_none() {
+            let registered_roots = db::load_roots(&db_path).unwrap_or_default();
+            let _ = portable::prepare_registered_roots(&db_path, &registered_roots);
+        }
     }
 
     if let StartupMode::FaceAnnBenchmark(query_count) = &mode {
@@ -467,11 +549,24 @@ fn main() -> eframe::Result<()> {
 
     if let StartupMode::ImageModelBenchmark(query_count) = &mode {
         match model_benchmark::benchmark(&db_path, &model_cache, *query_count) {
-            Ok(report) => write_benchmark_report(
-                &image_model_benchmark_report_path(&db_path),
-                &report,
-                "image models",
-            ),
+            Ok(report) => {
+                write_benchmark_report(
+                    &image_model_benchmark_report_path(&db_path),
+                    &report,
+                    "image models",
+                );
+                if report
+                    .lines()
+                    .any(|line| line == "model_comparison_complete=false")
+                {
+                    benchmark_failed(
+                        "Image model comparison",
+                        &anyhow::anyhow!(
+                            "one or more requested models failed; per-model results were saved"
+                        ),
+                    );
+                }
+            }
             Err(err) => benchmark_failed("Image model benchmark", &err),
         }
         return Ok(());

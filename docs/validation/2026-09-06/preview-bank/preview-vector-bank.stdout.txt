@@ -1,0 +1,10 @@
+Windows Image Search Isolated Preview Vector Bank
+indexed_images=10458
+preview_vectors=7093
+missing_previews=3365
+provider=cpu
+threads=4
+batch_size=32
+input=existing_512px_portable_previews
+elapsed_ms=264073.222
+production_database_modified=false

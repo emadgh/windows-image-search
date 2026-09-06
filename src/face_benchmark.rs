@@ -6,6 +6,34 @@ use std::path::{Path, PathBuf};
 const DETECTION_IOU_THRESHOLD: f32 = 0.5;
 const THRESHOLD_STEPS: usize = 200;
 
+/// Runtime measurements may use unlabeled images, but must never turn model
+/// predictions or placeholder identities into ground truth.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum EvaluationMode {
+    #[default]
+    Labeled,
+    RuntimeOnly,
+}
+
+impl EvaluationMode {
+    pub fn parse(columns: &[&str]) -> Result<Self> {
+        match columns {
+            ["evaluation", "labeled"] => Ok(Self::Labeled),
+            ["evaluation", "runtime-only"] => Ok(Self::RuntimeOnly),
+            _ => bail!("evaluation row requires labeled or runtime-only"),
+        }
+    }
+
+    pub fn evaluate(self, evaluator: impl FnOnce() -> Result<String>) -> Result<String> {
+        match self {
+            Self::Labeled => evaluator(),
+            Self::RuntimeOnly => {
+                Ok("quality_status=not_evaluated\nquality_reason=no_independent_labels\n".into())
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NormalizedBox {
     pub x: f32,
@@ -762,6 +790,23 @@ fn percentile(values: &[f64], percentile: f64) -> f64 {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn runtime_only_never_evaluates_placeholder_labels() {
+        let mode = EvaluationMode::parse(&["evaluation", "runtime-only"]).unwrap();
+        let report = mode
+            .evaluate(|| panic!("unlabeled data reached evaluator"))
+            .unwrap();
+        assert!(report.contains("quality_status=not_evaluated"));
+        assert!(!report.contains("recall"));
+        assert!(EvaluationMode::parse(&["evaluation", "automatic"]).is_err());
+        assert_eq!(
+            EvaluationMode::default()
+                .evaluate(|| Ok("labeled".into()))
+                .unwrap(),
+            "labeled"
+        );
+    }
 
     fn temp_manifest(label: &str, content: &str) -> PathBuf {
         let nonce = SystemTime::now()

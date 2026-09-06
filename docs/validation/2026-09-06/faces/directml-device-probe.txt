@@ -1,0 +1,6 @@
+automatic.status=error
+automatic.error=D:\a\ort-artifacts\ort-artifacts\onnxruntime\onnxruntime\core\providers\dml\dml_provider_factory.cc(551)\probe_directml.exe!00007FF6C7A8ABE5: (caller: 00007FF6C7A8B2BC) Exception(1) tid(35ec) 887A0004 The specified device interface or feature level is not supported on this system.
+dxgi_0.status=error
+dxgi_0.error=D:\a\ort-artifacts\ort-artifacts\onnxruntime\onnxruntime\core\providers\dml\dml_provider_factory.cc(551)\probe_directml.exe!00007FF6C7A8ABE5: (caller: 00007FF6C7A885B3) Exception(2) tid(35ec) 887A0004 The specified device interface or feature level is not supported on this system.
+dxgi_1.status=error
+dxgi_1.error=D:\a\ort-artifacts\ort-artifacts\onnxruntime\onnxruntime\core\providers\dml\dml_provider_factory.cc(522)\probe_directml.exe!00007FF6C7A8A945: (caller: 00007FF6C7A88594) Exception(3) tid(35ec) C0262002 Specified display adapter handle is invalid.

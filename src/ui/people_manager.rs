@@ -45,6 +45,8 @@ pub(super) struct PeopleManagerUiState {
     tx: Sender<PeopleManagerUiMessage>,
     rx: Receiver<PeopleManagerUiMessage>,
     loading: bool,
+    undo: Vec<people_management::ManualSnapshot>,
+    bulk_faces: BTreeSet<(String, String)>,
 }
 
 impl Default for PeopleManagerUiState {
@@ -68,6 +70,8 @@ impl Default for PeopleManagerUiState {
             tx,
             rx,
             loading: false,
+            undo: Vec::new(),
+            bulk_faces: BTreeSet::new(),
         }
     }
 }
@@ -75,6 +79,10 @@ impl Default for PeopleManagerUiState {
 #[derive(Clone, Debug)]
 enum PeopleAction {
     Refresh,
+    Undo,
+    Backup,
+    RestoreBackup,
+    Bulk(people_management::BulkCorrection),
     Rename {
         person_id: String,
         name: String,
@@ -136,7 +144,7 @@ fn load_people_manager_data(db_path: &Path) -> anyhow::Result<PeopleManagerLoade
                 .entry(person_id.clone())
                 .or_default()
                 .push(member.clone());
-        } else if member.detached || member.ignored {
+        } else {
             exceptions.push(member.clone());
         }
     }
@@ -261,9 +269,88 @@ impl ImageSearchApp {
             return;
         }
 
+        if matches!(
+            action,
+            PeopleAction::Backup | PeopleAction::Undo | PeopleAction::RestoreBackup
+        ) {
+            let result = (|| -> anyhow::Result<()> {
+                let conn = crate::db::open(&self.db_path)?;
+                match action {
+                    PeopleAction::Backup => {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("People corrections", &["json"])
+                            .set_file_name("people-corrections.json")
+                            .save_file()
+                        {
+                            people_management::save_manual_backup(&conn, &path)?;
+                            self.status =
+                                format!("People corrections backed up to {}", path.display());
+                        }
+                    }
+                    PeopleAction::Undo => {
+                        if let Some(snapshot) = self.people_manager_ui.undo.last().cloned() {
+                            people_management::restore_manual_snapshot(&conn, &snapshot)?;
+                            self.people_manager_ui.undo.pop();
+                            self.status = "Previous People corrections restored".to_owned();
+                        }
+                    }
+                    PeopleAction::RestoreBackup => {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_title("Replace People corrections from backup (Undo available)")
+                            .add_filter("People corrections", &["json"])
+                            .pick_file()
+                        {
+                            let snapshot = people_management::read_manual_backup(&path)?;
+                            let before = people_management::capture_manual_snapshot(&conn)?;
+                            self.people_manager_ui.undo.push(before);
+                            people_management::restore_manual_snapshot(&conn, &snapshot)?;
+                            self.status =
+                                "People backup restored; photos and automatic clusters preserved"
+                                    .to_owned();
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+                Ok(())
+            })();
+            if let Err(err) = result {
+                self.last_error = Some(format!("People recovery failed: {err:#}"));
+            }
+            self.refresh_people_manager();
+            self.refresh_face_suggestions();
+            self.refresh_people_filter_catalog();
+            return;
+        }
+        // Keep the recovery point even when a multi-shard operation only partly succeeds.
+        if !matches!(action, PeopleAction::ShowImages { .. }) {
+            match crate::db::open(&self.db_path)
+                .and_then(|conn| people_management::capture_manual_snapshot(&conn))
+            {
+                Ok(snapshot) => {
+                    if self.people_manager_ui.undo.len() >= 20 {
+                        self.people_manager_ui.undo.remove(0);
+                    }
+                    self.people_manager_ui.undo.push(snapshot);
+                }
+                Err(err) => {
+                    self.last_error = Some(format!("Cannot capture People undo point: {err:#}"));
+                    return;
+                }
+            }
+        }
         let result = (|| -> anyhow::Result<()> {
             match action {
-                PeopleAction::Refresh => unreachable!(),
+                PeopleAction::Refresh
+                | PeopleAction::Undo
+                | PeopleAction::Backup
+                | PeopleAction::RestoreBackup => unreachable!(),
+                PeopleAction::Bulk(correction) => {
+                    let conn = crate::db::open(&self.db_path)?;
+                    let faces: Vec<_> = self.people_manager_ui.bulk_faces.iter().cloned().collect();
+                    people_management::correct_faces(&conn, &faces, &correction)?;
+                    self.people_manager_ui.bulk_faces.clear();
+                    self.status = format!("Corrected {} selected faces", faces.len());
+                }
                 PeopleAction::Rename { person_id, name } => {
                     let conn = crate::db::open(&self.db_path)?;
                     let id = people_management::rename_effective_person(&conn, &person_id, &name)?;
@@ -376,6 +463,9 @@ impl ImageSearchApp {
     }
 
     fn show_effective_person_images(&mut self, person_id: &str) -> anyhow::Result<()> {
+        self.cancel_visual_search();
+        self.similarity_details.clear();
+        self.similarity_timings = None;
         let members = self
             .people_manager_ui
             .members_by_person
@@ -441,6 +531,11 @@ impl ImageSearchApp {
                     {
                         action = Some(PeopleAction::Refresh);
                     }
+                    ui.add_enabled_ui(!self.people_manager_ui.loading, |ui| {
+                        if ui.add_enabled(!self.people_manager_ui.undo.is_empty(), egui::Button::new("Undo correction")).clicked() { action = Some(PeopleAction::Undo); }
+                        if ui.button("Backup corrections...").clicked() { action = Some(PeopleAction::Backup); }
+                        if ui.button("Restore backup...").clicked() { action = Some(PeopleAction::RestoreBackup); }
+                    });
                     if self.people_manager_ui.loading {
                         ui.spinner();
                         ui.small("Loading catalog…");
@@ -455,6 +550,22 @@ impl ImageSearchApp {
                             "s"
                         }
                     ));
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(format!("{} faces selected", self.people_manager_ui.bulk_faces.len()));
+                    if ui.button("Clear selection").clicked() { self.people_manager_ui.bulk_faces.clear(); }
+                    let targets: Vec<_> = self.people_manager_ui.catalog.people.iter().filter(|p|p.source == EffectivePersonSource::Manual).cloned().collect();
+                    egui::ComboBox::from_id_salt("bulk-person-target").selected_text(self.people_manager_ui.move_target.as_ref().and_then(|id|targets.iter().find(|p| &p.person_id==id)).and_then(|p|p.display_name.as_deref()).unwrap_or("Choose manual Person")).show_ui(ui,|ui| {
+                        for person in &targets { ui.selectable_value(&mut self.people_manager_ui.move_target, Some(person.person_id.clone()), person.display_name.as_deref().unwrap_or("Unnamed Person")); }
+                    });
+                    ui.add_enabled_ui(!self.people_manager_ui.loading && !self.people_manager_ui.bulk_faces.is_empty(), |ui| {
+                        if let Some(target) = self.people_manager_ui.move_target.clone() {
+                            if ui.button("Assign selected").clicked() { action=Some(PeopleAction::Bulk(people_management::BulkCorrection::Assign(target))); }
+                        }
+                        for (label,correction) in [("Ignore selected",people_management::BulkCorrection::Ignore),("Detach selected",people_management::BulkCorrection::Detach),("Restore selected",people_management::BulkCorrection::Restore)] {
+                            if ui.button(label).clicked() { action=Some(PeopleAction::Bulk(correction)); }
+                        }
+                    });
                 });
                 ui.small("Automatic groups are derived. Names, merges, splits, ignored faces and representative choices are stored as durable manual overrides.");
                 ui.separator();
@@ -566,7 +677,7 @@ impl ImageSearchApp {
                             if exception_count != 0 {
                                 ui.add_space(8.0);
                                 ui.separator();
-                                ui.strong(format!("Manual exceptions ({exception_count})"));
+                                ui.strong(format!("Unassigned / exceptions ({exception_count})"));
                                 ui.small("Detached/ignored faces stay here so every correction can be restored.");
                                 let exceptions = Arc::clone(&self.people_manager_ui.exceptions);
                                 egui::ScrollArea::vertical()
@@ -599,11 +710,16 @@ impl ImageSearchApp {
                                                     ui.vertical(|ui| {
                                                         ui.small(if member.ignored {
                                                             "Ignored face"
-                                                        } else {
+                                                        } else if member.detached {
                                                             "Detached face"
-                                                        });
+                                                        } else { "Unassigned face" });
                                                         ui.small(&member.face_id);
                                                     });
+                                                    let key = (member.library_id.clone(), member.face_id.clone());
+                                                    let mut checked = self.people_manager_ui.bulk_faces.contains(&key);
+                                                    if ui.checkbox(&mut checked, "Select").changed() {
+                                                        if checked { self.people_manager_ui.bulk_faces.insert(key); } else { self.people_manager_ui.bulk_faces.remove(&key); }
+                                                    }
                                                     if ui.small_button("Restore").clicked() {
                                                         action = Some(PeopleAction::Restore {
                                                             library_id: member.library_id.clone(),
@@ -755,7 +871,11 @@ impl ImageSearchApp {
                                 ui.add_sized([82.0, 82.0], egui::Button::new("Unavailable"))
                             };
                             if response.clicked() {
-                                self.people_manager_ui.selected_face = Some(key);
+                                self.people_manager_ui.selected_face = Some(key.clone());
+                            }
+                            let mut checked = self.people_manager_ui.bulk_faces.contains(&key);
+                            if ui.checkbox(&mut checked, "Select").changed() {
+                                if checked { self.people_manager_ui.bulk_faces.insert(key); } else { self.people_manager_ui.bulk_faces.remove(&key); }
                             }
                             let mut flags = Vec::new();
                             if member.explicit_manual_assignment {
@@ -777,6 +897,20 @@ impl ImageSearchApp {
                         {
                             ui.add_space(8.0);
                             ui.strong("Selected face correction");
+                            ui.horizontal(|ui| {
+                                let representative = person.representative_library_id.clone().zip(person.representative_face_id.clone());
+                                for (label, key) in [("Representative", representative), ("Selected face", Some((library_id.clone(),face_id.clone())))] {
+                                    ui.vertical(|ui| { ui.label(label);
+                                        if let Some((library,face)) = key {
+                                            if let Some(preview) = self.people_preview(&library,&face) {
+                                                if let Some(texture) = self.thumbnail(&preview.image_path) {
+                                                    photo_grid::photo_tile(ui,&texture,egui::vec2(130.0,130.0),PhotoTileMode::Face(preview.bbox),false,egui::Sense::hover());
+                                                }
+                                            }
+                                        }
+                                    });
+                                }
+                            });
                             ui.horizontal_wrapped(|ui| {
                                 if ui.button("Set representative").clicked() {
                                     action = Some(PeopleAction::SetRepresentative {

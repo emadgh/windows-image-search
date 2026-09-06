@@ -1,0 +1,53 @@
+Windows Image Search Face ANN Crossover Benchmark
+application_version=v0.3.0-alpha.6
+roots_requested=1
+roots_searched=1
+roots_unavailable=0
+invalid_embeddings_skipped=0
+revision_groups=1
+total_searchable_faces=167
+total_unique_images=96
+requested_queries=32
+hnsw_m=24
+hnsw_ef_construction=200
+crossover_min_speedup=1.50
+crossover_min_recall_at_25=98.00%
+crossover_min_recall_at_100=95.00%
+
+revision_1_model_id=opencv-sface-external
+revision_1_model_version=1
+revision_1_model_cache_revision=1-57da50d32f48e81a-align2-112x128
+revision_1_schema_version=1
+revision_1_alignment_revision=2
+revision_1_dimension=128
+revision_1_searchable_faces=167
+revision_1_unique_images=96
+revision_1_raw_embedding_bytes=85504
+revision_1_raw_embedding_bytes_per_face=512.00
+revision_1_logical_face_embedding_payload_estimate_bytes=142203
+revision_1_logical_payload_estimate_bytes_per_face=851.51
+revision_1_n1000_status=unavailable
+revision_1_n5000_status=unavailable
+revision_1_n10000_status=unavailable
+revision_1_n25000_status=unavailable
+revision_1_n50000_status=unavailable
+revision_1_n100000_status=unavailable
+revision_1_crossover_size=not_reached
+revision_1_n167_status=measured
+revision_1_n167_queries=32
+revision_1_n167_hnsw_build_ms=4.384
+revision_1_n167_hnsw_dump_bytes=177717
+revision_1_n167_exact_avg_ms=0.019
+revision_1_n167_exact_p50_ms=0.018
+revision_1_n167_exact_p95_ms=0.019
+revision_1_n167_ann_avg_ms=0.087
+revision_1_n167_ann_p50_ms=0.086
+revision_1_n167_ann_p95_ms=0.092
+revision_1_n167_speedup=0.221x
+revision_1_n167_recall_at_10=100.00%
+revision_1_n167_recall_at_25=99.75%
+revision_1_n167_recall_at_100=99.78%
+
+payload_estimate_note=logical payload estimate is a deterministic lower-bound over face/embedding field payloads and excludes SQLite page/index overhead
+hnsw_dump_note=hnsw_dump_bytes is serialized graph+data size; process peak memory should be captured by the benchmark gate for runtime memory evidence
+crossover_note=diagnostic crossover requires >=1.50x exact-search speedup with Recall@25 >=98% and Recall@100 >=95%; it does not change production search defaults

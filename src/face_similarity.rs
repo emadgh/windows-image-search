@@ -171,11 +171,47 @@ pub fn search_available_roots(
     query: &FaceSimilarityQuery,
     options: FaceSimilarityOptions,
 ) -> Result<FaceSimilaritySearchReport> {
+    search_available_roots_cancellable(roots, query, options, None)
+}
+
+pub fn search_available_roots_cancellable(
+    roots: &[PathBuf],
+    query: &FaceSimilarityQuery,
+    options: FaceSimilarityOptions,
+    request: Option<&crate::search_request::SearchRequest>,
+) -> Result<FaceSimilaritySearchReport> {
+    search_available_roots_scoped(roots, query, options, request, None)
+}
+
+pub fn search_available_roots_scoped(
+    roots: &[PathBuf],
+    query: &FaceSimilarityQuery,
+    options: FaceSimilarityOptions,
+    request: Option<&crate::search_request::SearchRequest>,
+    eligible: Option<&std::collections::HashSet<PathBuf>>,
+) -> Result<FaceSimilaritySearchReport> {
+    search_available_roots_scoped_excluding(roots, query, options, request, eligible, None)
+}
+
+pub fn search_available_roots_scoped_excluding(
+    roots: &[PathBuf],
+    query: &FaceSimilarityQuery,
+    options: FaceSimilarityOptions,
+    request: Option<&crate::search_request::SearchRequest>,
+    eligible: Option<&std::collections::HashSet<PathBuf>>,
+    excluded_image: Option<&Path>,
+) -> Result<FaceSimilaritySearchReport> {
+    if let Some(request) = request {
+        request.check()?;
+    }
     validate_query(query)?;
     let options = options.sanitized();
     let mut report = FaceSimilaritySearchReport::default();
 
     for root in roots {
+        if let Some(request) = request {
+            request.check()?;
+        }
         let conn = match open_read_only_root(root) {
             Ok(conn) => conn,
             Err(_) => {
@@ -190,10 +226,14 @@ pub fn search_available_roots(
                 continue;
             }
         };
+        conn.execute_batch("BEGIN DEFERRED")?;
         report.roots_searched += 1;
         let mut cursor: Option<String> = None;
 
         loop {
+            if let Some(request) = request {
+                request.check()?;
+            }
             let batch =
                 load_compatible_batch(&conn, cursor.as_deref(), &query.revision, READ_BATCH_SIZE)?;
             if batch.is_empty() {
@@ -201,6 +241,9 @@ pub fn search_available_roots(
             }
 
             for row in batch {
+                if let Some(request) = request {
+                    request.check()?;
+                }
                 cursor = Some(row.face_id.clone());
                 report.rows_considered += 1;
                 if current_library_id == query.library_id && row.face_id == query.face_id {
@@ -217,6 +260,11 @@ pub fn search_available_roots(
                     Ok(path) => path,
                     Err(_) => continue,
                 };
+                if excluded_image == Some(absolute.as_path())
+                    || eligible.is_some_and(|paths| !paths.contains(&absolute))
+                {
+                    continue;
+                }
                 let candidate = FaceSimilarityMatch {
                     root: root.clone(),
                     library_id: current_library_id.clone(),
@@ -594,9 +642,60 @@ mod tests {
         assert!(report.matches[0].similarity > report.matches[1].similarity);
         assert!(report.matches.iter().all(|item| item.face_id != query_face));
 
+        // A better global match must not starve a filtered one-result query.
+        let eligible = std::collections::HashSet::from([people_root.join("far.jpg")]);
+        let scoped = search_available_roots_scoped(
+            std::slice::from_ref(&people_root),
+            &query,
+            FaceSimilarityOptions {
+                limit: 1,
+                collapse_same_image: true,
+            },
+            None,
+            Some(&eligible),
+        )
+        .unwrap();
+        assert_eq!(scoped.matches.len(), 1);
+        assert_eq!(scoped.matches[0].image_path, people_root.join("far.jpg"));
+        let empty = search_available_roots_scoped(
+            std::slice::from_ref(&people_root),
+            &query,
+            FaceSimilarityOptions::default(),
+            None,
+            Some(&std::collections::HashSet::new()),
+        )
+        .unwrap();
+        assert!(empty.matches.is_empty());
+
         let _ = std::fs::remove_dir_all(query_root);
         let _ = std::fs::remove_dir_all(people_root);
         let _ = std::fs::remove_dir_all(wrong_root);
+    }
+
+    #[test]
+    fn indexed_query_parent_is_excluded_before_top_k() {
+        let root = setup_root("parent-exclusion", "lib-parent-exclusion");
+        let query_face = add_image_faces(
+            &root,
+            "query.jpg",
+            &[vec![1.0, 0.0], vec![1.0, 0.0]],
+            "embedder",
+        )
+        .remove(0);
+        add_image_faces(&root, "other.jpg", &[vec![0.8, 0.2]], "embedder");
+        let report = crate::face_search::search_indexed_face(
+            std::slice::from_ref(&root),
+            &root,
+            &query_face,
+            crate::face_search::IndexedFaceSearchOptions {
+                min_similarity: 0.0,
+                limit: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(report.matches.len(), 1);
+        assert_eq!(report.matches[0].image_path, root.join("other.jpg"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

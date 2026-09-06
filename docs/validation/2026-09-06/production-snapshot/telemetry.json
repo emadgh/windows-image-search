@@ -1,0 +1,108 @@
+{
+  "gate": "v0.2-representative-library",
+  "generated_at": "2026-09-06T12:23:23.4328845+03:30",
+  "gate_started_at": "2026-09-06T11:53:36.8940808+03:30",
+  "gate_wall_time_seconds": 1786.539,
+  "sample_counts": {
+    "ann_queries": 50,
+    "preview_samples": 50,
+    "runtime_samples": 50,
+    "image_model_queries": 50,
+    "texture_samples": 50
+  },
+  "memory_sampling": {
+    "process_poll_interval_ms": 200,
+    "gpu_poll_interval_seconds": 1,
+    "working_set": "Process.WorkingSet64/PeakWorkingSet64",
+    "private_memory": "sampled Process.PrivateMemorySize64",
+    "gpu_memory": "Windows GPU Process Memory performance counters when available"
+  },
+  "executable_sha256": "d3b46b52e78c435c8cc7a9238cb9558f224746619a2912918f88a3812fcadcfc",
+  "benchmark_results": [
+    {
+      "name": "library-profile",
+      "started_at": "2026-09-06T11:53:40.5656675+03:30",
+      "finished_at": "2026-09-06T11:53:41.5779534+03:30",
+      "wall_time_seconds": 1.012,
+      "exit_code": 0,
+      "peak_working_set_mib": 3.73,
+      "sampled_peak_private_memory_mib": 1.93,
+      "gpu_process_memory_counter_available": true,
+      "gpu_process_sample_found": false,
+      "sampled_peak_gpu_dedicated_mib": null,
+      "sampled_peak_gpu_shared_mib": null,
+      "gpu_counter_error": null
+    },
+    {
+      "name": "ann",
+      "started_at": "2026-09-06T11:53:41.5813833+03:30",
+      "finished_at": "2026-09-06T11:53:42.6018691+03:30",
+      "wall_time_seconds": 1.02,
+      "exit_code": 0,
+      "peak_working_set_mib": 3.54,
+      "sampled_peak_private_memory_mib": 1.81,
+      "gpu_process_memory_counter_available": true,
+      "gpu_process_sample_found": false,
+      "sampled_peak_gpu_dedicated_mib": null,
+      "sampled_peak_gpu_shared_mib": null,
+      "gpu_counter_error": null
+    },
+    {
+      "name": "clip-preview",
+      "started_at": "2026-09-06T11:53:42.6049999+03:30",
+      "finished_at": "2026-09-06T11:55:10.1056666+03:30",
+      "wall_time_seconds": 87.504,
+      "exit_code": 0,
+      "peak_working_set_mib": 2984.71,
+      "sampled_peak_private_memory_mib": 3010.94,
+      "gpu_process_memory_counter_available": true,
+      "gpu_process_sample_found": false,
+      "sampled_peak_gpu_dedicated_mib": null,
+      "sampled_peak_gpu_shared_mib": null,
+      "gpu_counter_error": null
+    },
+    {
+      "name": "clip-runtime",
+      "started_at": "2026-09-06T11:55:10.1081767+03:30",
+      "finished_at": "2026-09-06T12:17:32.8282180+03:30",
+      "wall_time_seconds": 1342.767,
+      "exit_code": 0,
+      "peak_working_set_mib": 4650.27,
+      "sampled_peak_private_memory_mib": 4678.04,
+      "gpu_process_memory_counter_available": false,
+      "gpu_process_sample_found": false,
+      "sampled_peak_gpu_dedicated_mib": null,
+      "sampled_peak_gpu_shared_mib": null,
+      "gpu_counter_error": "The data in one of the performance counter samples is not valid. View the Status property for each PerformanceCounterSample object to make sure it contains valid data."
+    },
+    {
+      "name": "image-models",
+      "started_at": "2026-09-06T12:17:32.8321388+03:30",
+      "finished_at": "2026-09-06T12:20:57.5304131+03:30",
+      "wall_time_seconds": 204.705,
+      "exit_code": 0,
+      "peak_working_set_mib": 4538.86,
+      "sampled_peak_private_memory_mib": 6122.53,
+      "gpu_process_memory_counter_available": false,
+      "gpu_process_sample_found": false,
+      "sampled_peak_gpu_dedicated_mib": null,
+      "sampled_peak_gpu_shared_mib": null,
+      "gpu_counter_error": "The data in one of the performance counter samples is not valid. View the Status property for each PerformanceCounterSample object to make sure it contains valid data."
+    },
+    {
+      "name": "material-texture",
+      "started_at": "2026-09-06T12:20:57.5335130+03:30",
+      "finished_at": "2026-09-06T12:23:23.4304033+03:30",
+      "wall_time_seconds": 145.902,
+      "exit_code": 0,
+      "peak_working_set_mib": 1143.34,
+      "sampled_peak_private_memory_mib": 1139.57,
+      "gpu_process_memory_counter_available": false,
+      "gpu_process_sample_found": false,
+      "sampled_peak_gpu_dedicated_mib": null,
+      "sampled_peak_gpu_shared_mib": null,
+      "gpu_counter_error": "The data in one of the performance counter samples is not valid. View the Status property for each PerformanceCounterSample object to make sure it contains valid data."
+    }
+  ],
+  "interpretation": "Process exit 0 in the initial runner did not imply all model comparisons succeeded: 4 model downloads failed. Wrapper exited 1 after reporting because LASTEXITCODE was unset. Both reporting/exit issues are corrected in final source."
+}

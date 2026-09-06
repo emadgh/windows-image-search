@@ -1,5 +1,6 @@
 mod collections;
 mod collections_window;
+mod duplicate_review;
 mod face_runtime;
 mod face_search_panel;
 mod inspector;
@@ -59,6 +60,7 @@ impl AppearanceMode {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum SearchMode {
     Text,
+    Semantic,
     SimilarImage,
     Face,
 }
@@ -155,6 +157,7 @@ enum StartupMessage {
 }
 
 pub struct ImageSearchApp {
+    duplicate_ui: duplicate_review::DuplicateUi,
     pub(super) db_path: PathBuf,
     embedding_service: EmbeddingService,
     fs_watch_service: FsWatchService,
@@ -166,6 +169,12 @@ pub struct ImageSearchApp {
     pub(super) similarity_results: Option<Vec<ImageSummary>>,
     pub(super) query_image: Option<PathBuf>,
     pub(super) similarity_settings: indexer::SimilaritySettings,
+    pub(super) similarity_semantic_unavailable: Option<String>,
+    pub(super) similarity_details: HashMap<PathBuf, crate::visual_query::ScoreBreakdown>,
+    pub(super) similarity_timings: Option<crate::visual_query::SearchTimings>,
+    pub(super) semantic_description: String,
+    pub(super) query_region: crate::visual_query::QueryRegion,
+    pub(super) query_region_enabled: bool,
     pub(super) indexing_settings: IndexingSettings,
     settings_path: PathBuf,
     pub(super) update_settings: UpdateSettings,
@@ -215,6 +224,7 @@ pub struct ImageSearchApp {
     index_control: Option<indexer::IndexControl>,
     index_paused: bool,
     searching: bool,
+    visual_search_session: crate::search_request::SearchSession,
     current_file: Option<String>,
     root_counts: HashMap<PathBuf, (usize, usize)>,
     pub(super) busy: bool,
@@ -314,9 +324,16 @@ impl ImageSearchApp {
             fs_watch_service,
             pending_fs_paths: HashSet::new(),
             watcher_reconcile_required: None,
+            duplicate_ui: Default::default(),
             similarity_results: None,
             query_image: None,
             similarity_settings: indexer::SimilaritySettings::default(),
+            similarity_semantic_unavailable: None,
+            similarity_details: HashMap::new(),
+            similarity_timings: None,
+            semantic_description: String::new(),
+            query_region: Default::default(),
+            query_region_enabled: false,
             indexing_settings,
             settings_path,
             update_settings,
@@ -366,6 +383,7 @@ impl ImageSearchApp {
             index_control: None,
             index_paused: false,
             searching: false,
+            visual_search_session: Default::default(),
             current_file: None,
             root_counts: HashMap::new(),
             busy: true,
@@ -428,7 +446,11 @@ impl ImageSearchApp {
     fn process_worker_messages(&mut self) {
         while let Ok(message) = self.rx.try_recv() {
             match message {
-                WorkerMessage::Status(status) => self.status = status,
+                WorkerMessage::Status(status) => {
+                    if !self.searching && !self.face_search_running() {
+                        self.status = status;
+                    }
+                }
                 WorkerMessage::CurrentFile(file_name) => self.current_file = Some(file_name),
                 WorkerMessage::Progress { done, total } => self.progress = Some((done, total)),
                 WorkerMessage::IndexedBatch(records) => {
@@ -456,12 +478,39 @@ impl ImageSearchApp {
                     self.root_counts = db::load_root_counts(&self.db_path).unwrap_or_default();
                     self.refresh_text_search_after_data_change();
                 }
-                WorkerMessage::SimilarityResults(results) => {
-                    self.similarity_results_revision =
-                        self.similarity_results_revision.wrapping_add(1);
-                    self.similarity_results = Some(results);
-                    if !self.indexing {
-                        self.progress = None;
+                WorkerMessage::VisualSearch { id, event } => {
+                    if !self.visual_search_session.accepts(id) {
+                        continue;
+                    }
+                    match event {
+                        indexer::VisualSearchEvent::Status(status) => self.status = status,
+                        indexer::VisualSearchEvent::Finished(result) => {
+                            self.visual_search_session.finish(id);
+                            self.searching = false;
+                            self.busy = self.indexing || self.face_search_running();
+                            match result {
+                                Ok(results) => {
+                                    self.status = format!(
+                                        "Hybrid visual search complete: {} matches",
+                                        results.images.len()
+                                    );
+                                    self.similarity_results_revision =
+                                        self.similarity_results_revision.wrapping_add(1);
+                                    self.similarity_semantic_unavailable =
+                                        results.semantic_unavailable;
+                                    self.similarity_details = results.details;
+                                    self.similarity_timings = Some(results.timings);
+                                    self.similarity_results = Some(results.images);
+                                }
+                                Err(error) => {
+                                    self.status = error.clone();
+                                    self.last_error = Some(error);
+                                }
+                            }
+                            if !self.indexing {
+                                self.progress = None;
+                            }
+                        }
                     }
                 }
                 WorkerMessage::RootCounts(counts) => {
@@ -477,10 +526,6 @@ impl ImageSearchApp {
                     self.last_error = Some(error.clone());
                     self.status = error;
                 }
-                WorkerMessage::SearchIdle => {
-                    self.searching = false;
-                    self.busy = self.indexing;
-                }
                 WorkerMessage::Idle => {
                     self.indexing = false;
                     self.index_paused = false;
@@ -488,7 +533,7 @@ impl ImageSearchApp {
                     self.current_file = None;
                     self.progress = None;
                     self.close_confirmation_open = false;
-                    self.busy = self.searching;
+                    self.busy = self.searching || self.face_search_running();
                     self.schedule_face_pipeline_after_base_index();
                 }
             }
@@ -790,8 +835,21 @@ impl ImageSearchApp {
 
     fn can_run_similarity_search(&self) -> bool {
         !self.searching
+            && !self.text_search_pending
+            && self.search_text == self.text_search_observed
+            && !self.people_filter_work_pending()
             && !self.images.is_empty()
-            && ((!self.busy && !self.indexing) || (self.indexing && self.index_paused))
+            && !self.face_search_running()
+            && (!self.busy || self.indexing)
+    }
+
+    pub(super) fn cancel_visual_search(&mut self) {
+        self.visual_search_session.cancel();
+        if self.searching {
+            self.searching = false;
+            self.busy = self.indexing || self.face_search_running();
+            self.status = "Visual search cancelled".to_owned();
+        }
     }
 
     fn choose_similarity_image(&mut self) {
@@ -804,6 +862,7 @@ impl ImageSearchApp {
         else {
             return;
         };
+        self.query_region_enabled = false;
         self.run_similarity_search(path);
     }
 
@@ -814,27 +873,87 @@ impl ImageSearchApp {
     }
 
     fn run_similarity_search(&mut self, path: PathBuf) {
-        if self.searching || (self.indexing && !self.index_paused) || (!self.indexing && self.busy)
-        {
+        self.run_visual_query(path, None);
+    }
+
+    pub(super) fn run_description_search(&mut self) {
+        self.run_visual_query(PathBuf::new(), Some(self.semantic_description.clone()));
+    }
+
+    pub(super) fn search_eligibility(&self) -> Option<HashSet<PathBuf>> {
+        let filtered = self.collection_filter_chip().is_some()
+            || self.people_filter_selected_count() > 0
+            || self.color_enabled
+            || !self.search_text.trim().is_empty();
+        filtered.then(|| {
+            self.images
+                .iter()
+                .filter(|record| {
+                    self.collection_filter_matches(&record.path)
+                        && self.people_filter_matches(&record.path)
+                        && (self.search_text.trim().is_empty()
+                            || self
+                                .text_search_matches
+                                .as_ref()
+                                .is_some_and(|paths| paths.contains(&record.path)))
+                        && (!self.color_enabled
+                            || views::color_distance(record.dominant, self.target_color)
+                                <= self.color_tolerance)
+                })
+                .map(|record| record.path.clone())
+                .collect()
+        })
+    }
+
+    fn run_visual_query(&mut self, path: PathBuf, description: Option<String>) {
+        if !self.can_run_similarity_search() {
             return;
         }
-        let allow_descriptor_backfill = !self.indexing;
+        let request = self.visual_search_session.start();
         self.clear_face_search_result_state();
-        self.search_mode = SearchMode::SimilarImage;
-        self.search_text.clear();
+        self.search_mode = if description.is_some() {
+            SearchMode::Semantic
+        } else {
+            SearchMode::SimilarImage
+        };
         self.searching = true;
         self.busy = true;
         self.last_error = None;
-        self.query_image = Some(path.clone());
+        self.query_image = description.is_none().then(|| path.clone());
         self.selected_paths.clear();
         self.status = "Starting image search with current controls…".into();
+        self.similarity_results = None;
+        self.similarity_semantic_unavailable = None;
+        self.similarity_details.clear();
+        self.similarity_timings = None;
+        let region =
+            (description.is_none() && self.query_region_enabled).then_some(self.query_region);
+        let settings = if description.is_some() {
+            indexer::SimilaritySettings {
+                color_distribution_weight: 0.0,
+                texture_weight: 0.0,
+                clip_weight: 100.0,
+                dominant_color_weight: 0.0,
+                strict_color_rejection: false,
+                ..self.similarity_settings
+            }
+        } else {
+            self.similarity_settings
+        };
+        let options = crate::visual_query::VisualQueryOptions {
+            region,
+            description,
+            eligible_paths: self.search_eligibility(),
+        };
         indexer::spawn_similarity_search(
             self.db_path.clone(),
             path,
-            self.similarity_settings,
+            settings,
             self.indexing_settings,
             self.embedding_service.clone(),
-            allow_descriptor_backfill,
+            request,
+            self.indexing,
+            options,
             self.tx.clone(),
         );
     }
@@ -1167,6 +1286,9 @@ impl eframe::App for ImageSearchApp {
                 {
                     self.open_people_manager();
                 }
+                if ui.button("Duplicates").clicked() {
+                    self.duplicate_ui.open = true;
+                }
                 ui.separator();
                 if ui
                     .add_enabled(
@@ -1194,6 +1316,7 @@ impl eframe::App for ImageSearchApp {
         self.show_collections_workspace(ctx);
         self.show_settings_window(ctx);
         self.show_people_manager_window(ctx);
+        self.show_duplicate_review(ctx);
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.set_min_height(theme::STATUS_BAR_HEIGHT);
@@ -1213,12 +1336,10 @@ impl eframe::App for ImageSearchApp {
                     if self.indexing && self.index_control.is_some() {
                         let label = if self.index_paused { "Resume" } else { "Pause" };
                         if ui
-                            .add_enabled(!self.searching, egui::Button::new(label))
-                            .on_hover_text(if self.searching {
-                                "Finish the paused-index image search before resuming indexing"
-                            } else {
-                                "Pause or resume indexing"
-                            })
+                            .button(label)
+                            .on_hover_text(
+                                "Pause or resume indexing; visual search stays available",
+                            )
                             .clicked()
                         {
                             self.toggle_index_pause();

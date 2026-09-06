@@ -1,6 +1,6 @@
 # Face Search validation
 
-Use this checklist for the v0.3 face-search workflow after configuring external YuNet and SFace ONNX models.
+Use this checklist for the v0.3 face-search workflow after configuring managed or external YuNet and SFace ONNX models.
 
 1. Enable **Detect faces** for at least one collection and run the face pipeline.
 2. Open **Face Search** and confirm searchable database faces appear as cropped face cards.
@@ -11,4 +11,7 @@ Use this checklist for the v0.3 face-search workflow after configuring external 
 7. Verify no-face external images report no detected faces without changing the existing index.
 8. Verify missing/unavailable YuNet or SFace model paths produce a clear error instead of blocking the UI.
 
-Database face suggestions are face instances until issue #59 adds persistent People clustering and unique-person representatives.
+9. Verify People representatives and manual names after clustering/corrections. Without People suggestions, verify the searchable face-instance fallback.
+10. Verify similarity scores are presented as ranking scores, not identity probabilities.
+11. Cancel external face preparation and immediately choose another image. Verify the earlier completion cannot replace the new face choices or show an old error.
+12. Cancel indexed/external face search or switch to Text/Similar Image before completion. Verify late face results do not switch the mode back or overwrite current results.

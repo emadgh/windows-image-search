@@ -1,0 +1,76 @@
+{
+  "captured_at": "2026-09-06T11:53:38.0557085+03:30",
+  "windows": {
+    "caption": "Microsoft Windows 10 Enterprise",
+    "version": "10.0.19045",
+    "build_number": "19045",
+    "architecture": "64-bit"
+  },
+  "computer": {
+    "manufacturer": "System manufacturer",
+    "model": "System Product Name",
+    "total_physical_memory_bytes": 34273951744,
+    "total_physical_memory_gib": 31.92
+  },
+  "cpu": [
+    {
+      "name": "Intel(R) Core(TM) i9-9900K CPU @ 3.60GHz",
+      "cores": 8,
+      "logical_processors": 16,
+      "max_clock_mhz": 3600
+    }
+  ],
+  "gpu": [
+    {
+      "name": "NVIDIA GeForce GTX 1660",
+      "video_processor": "NVIDIA GeForce GTX 1660",
+      "driver_version": "32.0.15.8108",
+      "adapter_ram_reported_bytes": 4293918720,
+      "adapter_ram_reported_gib": 4.0
+    }
+  ],
+  "disk": [
+    {
+      "model": "USB DISK 2.0 USB Device",
+      "media_type": "Removable Media",
+      "interface_type": "USB",
+      "size_bytes": 31033981440,
+      "size_gib": 28.9
+    },
+    {
+      "model": "WDC WD40EZRZ-00GXCB0",
+      "media_type": "Fixed hard disk media",
+      "interface_type": "IDE",
+      "size_bytes": 4000784417280,
+      "size_gib": 3726.02
+    },
+    {
+      "model": "WD My Passport 2627 USB Device",
+      "media_type": "External hard disk media",
+      "interface_type": "USB",
+      "size_bytes": 5000945564160,
+      "size_gib": 4657.49
+    },
+    {
+      "model": "WDC WD4005FZBX-00K5WB0",
+      "media_type": "Fixed hard disk media",
+      "interface_type": "IDE",
+      "size_bytes": 4000784417280,
+      "size_gib": 3726.02
+    },
+    {
+      "model": "WDC WD20EZRX-00D8PB0",
+      "media_type": "Fixed hard disk media",
+      "interface_type": "IDE",
+      "size_bytes": 2000396321280,
+      "size_gib": 1863.01
+    },
+    {
+      "model": "Samsung SSD 860 EVO 500GB",
+      "media_type": "Fixed hard disk media",
+      "interface_type": "IDE",
+      "size_bytes": 1000202273280,
+      "size_gib": 931.51
+    }
+  ]
+}

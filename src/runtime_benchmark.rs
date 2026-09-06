@@ -85,7 +85,7 @@ pub fn benchmark(db_path: &Path, model_cache: &Path, requested_samples: usize) -
             .collect::<Vec<_>>()
             .join(",")
     )?;
-    writeln!(report, "production_backend=cpu")?;
+    writeln!(report, "production_backend=user_configured_not_measured")?;
     writeln!(report, "production_behavior_changed=false")?;
     append_backend_report(&mut report, &cpu, samples.len())?;
 
@@ -107,7 +107,7 @@ pub fn benchmark(db_path: &Path, model_cache: &Path, requested_samples: usize) -
 
     writeln!(
         report,
-        "notes=Each backend is initialized once, warmed up once, then the same sampled image set is embedded three times per batch size; median wall time is reported. DirectML failure is diagnostic only and never changes the production CPU path."
+        "notes=Each backend is initialized once, warmed up once, then the same sampled image set is embedded three times per batch size; median wall time includes decoding/preprocessing. DirectML failure is diagnostic only and never changes production settings."
     )?;
     Ok(report)
 }
@@ -127,7 +127,8 @@ fn benchmark_backend(
         Backend::DirectMl => ImageInitOptions::new(ImageEmbeddingModel::ClipVitB32)
             .with_cache_dir(model_cache.to_path_buf())
             .with_show_download_progress(true)
-            .with_execution_providers(vec![DirectML::default().into()]),
+            .with_intra_threads(cpu_threads)
+            .with_execution_providers(vec![DirectML::default().build().error_on_failure()]),
     };
     let mut model = ImageEmbedding::try_new(options)
         .with_context(|| format!("initializing {} CLIP runtime", backend.label()))?;

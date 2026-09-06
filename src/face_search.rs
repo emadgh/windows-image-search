@@ -308,14 +308,43 @@ pub fn search_indexed_face(
     face_id: &str,
     options: IndexedFaceSearchOptions,
 ) -> Result<IndexedFaceSearchReport> {
+    search_indexed_face_cancellable(roots, query_root, face_id, options, None)
+}
+
+pub fn search_indexed_face_cancellable(
+    roots: &[PathBuf],
+    query_root: &Path,
+    face_id: &str,
+    options: IndexedFaceSearchOptions,
+    request: Option<&crate::search_request::SearchRequest>,
+) -> Result<IndexedFaceSearchReport> {
+    search_indexed_face_scoped(roots, query_root, face_id, options, request, None)
+}
+
+pub fn search_indexed_face_scoped(
+    roots: &[PathBuf],
+    query_root: &Path,
+    face_id: &str,
+    options: IndexedFaceSearchOptions,
+    request: Option<&crate::search_request::SearchRequest>,
+    eligible: Option<&std::collections::HashSet<PathBuf>>,
+) -> Result<IndexedFaceSearchReport> {
+    if let Some(request) = request {
+        request.check()?;
+    }
     if face_id.trim().is_empty() {
         bail!("face id cannot be empty");
     }
     let query = face_similarity::load_query(query_root, face_id)?;
     let query_image = portable::absolute_source_path(query_root, &query.relative_image_path)?;
-    let mut report = search_embedding_query(roots, &query, options)?;
-    exclude_query_parent_image(&mut report.matches, &query_image);
-    Ok(report)
+    search_embedding_query_scoped_excluding(
+        roots,
+        &query,
+        options,
+        request,
+        eligible,
+        Some(&query_image),
+    )
 }
 
 pub fn search_embedding_query(
@@ -323,14 +352,47 @@ pub fn search_embedding_query(
     query: &FaceSimilarityQuery,
     options: IndexedFaceSearchOptions,
 ) -> Result<IndexedFaceSearchReport> {
+    search_embedding_query_cancellable(roots, query, options, None)
+}
+
+pub fn search_embedding_query_cancellable(
+    roots: &[PathBuf],
+    query: &FaceSimilarityQuery,
+    options: IndexedFaceSearchOptions,
+    request: Option<&crate::search_request::SearchRequest>,
+) -> Result<IndexedFaceSearchReport> {
+    search_embedding_query_scoped(roots, query, options, request, None)
+}
+
+pub fn search_embedding_query_scoped(
+    roots: &[PathBuf],
+    query: &FaceSimilarityQuery,
+    options: IndexedFaceSearchOptions,
+    request: Option<&crate::search_request::SearchRequest>,
+    eligible: Option<&std::collections::HashSet<PathBuf>>,
+) -> Result<IndexedFaceSearchReport> {
+    search_embedding_query_scoped_excluding(roots, query, options, request, eligible, None)
+}
+
+fn search_embedding_query_scoped_excluding(
+    roots: &[PathBuf],
+    query: &FaceSimilarityQuery,
+    options: IndexedFaceSearchOptions,
+    request: Option<&crate::search_request::SearchRequest>,
+    eligible: Option<&std::collections::HashSet<PathBuf>>,
+    excluded_image: Option<&Path>,
+) -> Result<IndexedFaceSearchReport> {
     let options = options.sanitized();
-    let report = face_similarity::search_available_roots(
+    let report = face_similarity::search_available_roots_scoped_excluding(
         roots,
         query,
         FaceSimilarityOptions {
             limit: options.limit,
             collapse_same_image: true,
         },
+        request,
+        eligible,
+        excluded_image,
     )?;
     let matches = report
         .matches
@@ -354,6 +416,7 @@ pub fn search_embedding_query(
     })
 }
 
+#[cfg(test)]
 fn exclude_query_parent_image(matches: &mut Vec<IndexedFaceSearchHit>, query_image: &Path) {
     matches.retain(|item| item.image_path != query_image);
 }

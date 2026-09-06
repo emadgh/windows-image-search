@@ -4,7 +4,7 @@ use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct ManualPersonRow {
     manual_person_id: String,
     display_name: String,
@@ -13,7 +13,7 @@ struct ManualPersonRow {
     updated_at: i64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct ManualOverrideRow {
     library_id: String,
     face_id: String,
@@ -23,11 +23,98 @@ struct ManualOverrideRow {
     updated_at: i64,
 }
 
+/// Versioned corrections only: never embeds source photos or derived face vectors.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManualSnapshot {
+    version: u32,
+    people: Vec<ManualPersonRow>,
+    overrides: Vec<ManualOverrideRow>,
+}
+
+pub fn capture_manual_snapshot(conn: &Connection) -> Result<ManualSnapshot> {
+    Ok(ManualSnapshot {
+        version: 1,
+        people: load_manual_person_rows(conn)?,
+        overrides: load_manual_override_rows(conn)?,
+    })
+}
+
+pub fn save_manual_backup(conn: &Connection, path: &std::path::Path) -> Result<()> {
+    use std::io::Write;
+    let bytes = serde_json::to_vec_pretty(&capture_manual_snapshot(conn)?)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .context("choose a new backup filename; existing backups are never overwritten")?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+pub fn read_manual_backup(path: &std::path::Path) -> Result<ManualSnapshot> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(16 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > 16 * 1024 * 1024 {
+        bail!("People backup exceeds 16 MiB");
+    }
+    let snapshot: ManualSnapshot = serde_json::from_slice(&bytes)?;
+    validate_manual_snapshot(&snapshot)?;
+    Ok(snapshot)
+}
+
+fn validate_manual_snapshot(snapshot: &ManualSnapshot) -> Result<()> {
+    if snapshot.version != 1 {
+        bail!("unsupported People backup version");
+    }
+    let validation = Connection::open_in_memory()?;
+    validation.execute_batch("PRAGMA foreign_keys=ON")?;
+    replace_manual_rows_local(&validation, &snapshot.people, &snapshot.overrides)?;
+    Ok(())
+}
+
+pub fn restore_manual_snapshot(conn: &Connection, snapshot: &ManualSnapshot) -> Result<()> {
+    validate_manual_snapshot(snapshot)?;
+    mark_manual_sync_pending(conn)?;
+    let current = capture_manual_snapshot(conn)?;
+    let timestamp = current
+        .people
+        .iter()
+        .chain(snapshot.people.iter())
+        .map(|p| p.updated_at)
+        .chain(
+            current
+                .overrides
+                .iter()
+                .chain(snapshot.overrides.iter())
+                .map(|p| p.updated_at),
+        )
+        .max()
+        .unwrap_or(0)
+        .max(chrono::Utc::now().timestamp())
+        .checked_add(1)
+        .context("People backup timestamp cannot be advanced")?;
+    let mut restored = snapshot.clone();
+    for row in &mut restored.people {
+        row.updated_at = timestamp;
+    }
+    for row in &mut restored.overrides {
+        row.updated_at = timestamp;
+    }
+    replace_manual_rows_local(conn, &restored.people, &restored.overrides)?;
+    sync_manual_cache_to_portable_roots(conn)
+}
+
 pub fn materialize_effective_person(
     conn: &Connection,
     effective_person_id: &str,
     display_name: Option<&str>,
 ) -> Result<String> {
+    mark_manual_sync_pending(conn)?;
     let catalog = people_effective::load(conn)?;
     let person = catalog
         .people
@@ -118,6 +205,7 @@ pub fn merge_effective_people(
         .cloned()
         .context("People merge produced no manual Person")?;
     let merge = manual_ids.iter().skip(1).cloned().collect::<Vec<_>>();
+    mark_manual_sync_pending(conn)?;
     people_overrides::merge_people(conn, &keep, &merge)?;
     if let Some(name) = display_name {
         people_overrides::rename_person(conn, &keep, name)?;
@@ -132,6 +220,7 @@ pub fn move_face_to_person(
     face_id: &str,
     manual_person_id: &str,
 ) -> Result<()> {
+    mark_manual_sync_pending(conn)?;
     people_overrides::assign_face(conn, library_id, face_id, manual_person_id)?;
     sync_manual_cache_to_portable_roots(conn)
 }
@@ -142,6 +231,7 @@ pub fn split_face_to_new_person(
     face_id: &str,
     display_name: &str,
 ) -> Result<String> {
+    mark_manual_sync_pending(conn)?;
     let person = people_overrides::create_person(conn, display_name, library_id, face_id)?;
     people_overrides::assign_face(conn, library_id, face_id, &person.manual_person_id)?;
     people_overrides::set_representative(conn, &person.manual_person_id, library_id, face_id)?;
@@ -150,16 +240,19 @@ pub fn split_face_to_new_person(
 }
 
 pub fn detach_face(conn: &Connection, library_id: &str, face_id: &str) -> Result<()> {
+    mark_manual_sync_pending(conn)?;
     people_overrides::detach_face(conn, library_id, face_id)?;
     sync_manual_cache_to_portable_roots(conn)
 }
 
 pub fn ignore_face(conn: &Connection, library_id: &str, face_id: &str) -> Result<()> {
+    mark_manual_sync_pending(conn)?;
     people_overrides::ignore_face(conn, library_id, face_id)?;
     sync_manual_cache_to_portable_roots(conn)
 }
 
 pub fn restore_automatic_face(conn: &Connection, library_id: &str, face_id: &str) -> Result<bool> {
+    mark_manual_sync_pending(conn)?;
     let changed = people_overrides::clear_face_override(conn, library_id, face_id)?;
     sync_manual_cache_to_portable_roots(conn)?;
     Ok(changed)
@@ -171,6 +264,7 @@ pub fn set_person_representative(
     library_id: &str,
     face_id: &str,
 ) -> Result<()> {
+    mark_manual_sync_pending(conn)?;
     // Do not downgrade an existing cluster anchor merely because it became the representative.
     let already_assigned_to_person = people_overrides::load_face_overrides(conn)?
         .into_iter()
@@ -188,9 +282,44 @@ pub fn set_person_representative(
 }
 
 pub fn delete_manual_person(conn: &Connection, manual_person_id: &str) -> Result<bool> {
+    mark_manual_sync_pending(conn)?;
     let changed = people_overrides::delete_person(conn, manual_person_id)?;
     sync_manual_cache_to_portable_roots(conn)?;
     Ok(changed)
+}
+
+#[derive(Clone, Debug)]
+pub enum BulkCorrection {
+    Assign(String),
+    Ignore,
+    Detach,
+    Restore,
+}
+
+pub fn correct_faces(
+    conn: &Connection,
+    faces: &[(String, String)],
+    correction: &BulkCorrection,
+) -> Result<()> {
+    if faces.is_empty() {
+        bail!("select at least one face");
+    }
+    mark_manual_sync_pending(conn)?;
+    let transaction = conn.unchecked_transaction()?;
+    for (library, face) in faces {
+        match correction {
+            BulkCorrection::Assign(person) => {
+                people_overrides::assign_face(&transaction, library, face, person)?
+            }
+            BulkCorrection::Ignore => people_overrides::ignore_face(&transaction, library, face)?,
+            BulkCorrection::Detach => people_overrides::detach_face(&transaction, library, face)?,
+            BulkCorrection::Restore => {
+                people_overrides::clear_face_override(&transaction, library, face)?;
+            }
+        }
+    }
+    transaction.commit()?;
+    sync_manual_cache_to_portable_roots(conn)
 }
 
 /// Rebuild the disposable session copy of manual People edits from all currently
@@ -201,8 +330,40 @@ pub fn refresh_manual_cache_from_portable_roots(conn: &Connection) -> Result<()>
     }
     people_overrides::ensure_schema(conn)?;
 
-    let mut people = HashMap::<String, ManualPersonRow>::new();
-    let mut overrides = HashMap::<(String, String), ManualOverrideRow>::new();
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS people_manual_sync_pending(library_id TEXT PRIMARY KEY NOT NULL);
+        DELETE FROM people_manual_sync_pending WHERE NOT EXISTS (
+            SELECT 1 FROM portable_root_registry registry JOIN roots ON roots.path=registry.root_path COLLATE NOCASE
+            WHERE registry.library_id=people_manual_sync_pending.library_id
+        );")?;
+    flush_pending_manual_sync(conn)?;
+    let attached = {
+        let mut statement = conn.prepare("SELECT registry.library_id FROM portable_root_registry registry JOIN roots ON roots.path=registry.root_path COLLATE NOCASE")?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<HashSet<_>>>()?;
+        ids
+    };
+    let available: HashSet<String> = attached_portable_roots(conn)?
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    let mut overrides: HashMap<(String, String), ManualOverrideRow> =
+        load_manual_override_rows(conn)?
+            .into_iter()
+            .filter(|row| {
+                attached.contains(&row.library_id) && !available.contains(&row.library_id)
+            })
+            .map(|row| ((row.library_id.clone(), row.face_id.clone()), row))
+            .collect();
+    let retained_people: HashSet<String> = overrides
+        .values()
+        .filter_map(|row| row.manual_person_id.clone())
+        .collect();
+    let mut people: HashMap<String, ManualPersonRow> = load_manual_person_rows(conn)?
+        .into_iter()
+        .filter(|row| retained_people.contains(&row.manual_person_id))
+        .map(|row| (row.manual_person_id.clone(), row))
+        .collect();
 
     for (library_id, root) in attached_portable_roots(conn)? {
         let db_path = portable::index_db_path(&root);
@@ -229,7 +390,18 @@ pub fn refresh_manual_cache_from_portable_roots(conn: &Connection) -> Result<()>
                 continue;
             }
             match people.get(&item.manual_person_id) {
-                Some(existing) if existing.updated_at > item.updated_at => {}
+                Some(existing)
+                    if (
+                        existing.updated_at,
+                        &existing.display_name,
+                        &existing.representative_library_id,
+                        &existing.representative_face_id,
+                    ) >= (
+                        item.updated_at,
+                        &item.display_name,
+                        &item.representative_library_id,
+                        &item.representative_face_id,
+                    ) => {}
                 _ => {
                     people.insert(item.manual_person_id.clone(), item);
                 }
@@ -238,7 +410,18 @@ pub fn refresh_manual_cache_from_portable_roots(conn: &Connection) -> Result<()>
         for item in root_overrides {
             let key = (item.library_id.clone(), item.face_id.clone());
             match overrides.get(&key) {
-                Some(existing) if existing.updated_at > item.updated_at => {}
+                Some(existing)
+                    if (
+                        existing.updated_at,
+                        &existing.disposition,
+                        &existing.manual_person_id,
+                        existing.propagates_cluster,
+                    ) >= (
+                        item.updated_at,
+                        &item.disposition,
+                        &item.manual_person_id,
+                        item.propagates_cluster,
+                    ) => {}
                 _ => {
                     overrides.insert(key, item);
                 }
@@ -263,15 +446,38 @@ pub fn refresh_manual_cache_from_portable_roots(conn: &Connection) -> Result<()>
     )
 }
 
-fn sync_manual_cache_to_portable_roots(conn: &Connection) -> Result<()> {
+fn mark_manual_sync_pending(conn: &Connection) -> Result<()> {
     if !is_session_connection(conn)? {
         return Ok(());
     }
     people_overrides::ensure_schema(conn)?;
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS people_manual_sync_pending(library_id TEXT PRIMARY KEY NOT NULL);
+        INSERT OR IGNORE INTO people_manual_sync_pending SELECT registry.library_id FROM portable_root_registry registry JOIN roots ON roots.path=registry.root_path COLLATE NOCASE;")?;
+    Ok(())
+}
+
+fn sync_manual_cache_to_portable_roots(conn: &Connection) -> Result<()> {
+    if !is_session_connection(conn)? {
+        return Ok(());
+    }
+    mark_manual_sync_pending(conn)?;
+    flush_pending_manual_sync(conn)
+}
+
+fn flush_pending_manual_sync(conn: &Connection) -> Result<()> {
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS people_manual_sync_pending(library_id TEXT PRIMARY KEY NOT NULL)")?;
     let people = load_manual_person_rows(conn)?;
     let overrides = load_manual_override_rows(conn)?;
 
     for (library_id, root) in attached_portable_roots(conn)? {
+        let pending: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM people_manual_sync_pending WHERE library_id=?1)",
+            [&library_id],
+            |row| row.get(0),
+        )?;
+        if !pending {
+            continue;
+        }
         let db_path = portable::index_db_path(&root);
         if !db_path.is_file() {
             continue;
@@ -296,6 +502,10 @@ fn sync_manual_cache_to_portable_roots(conn: &Connection) -> Result<()> {
         })?;
         people_overrides::ensure_schema(&root_conn)?;
         replace_manual_rows_local(&root_conn, &local_people, &local_overrides)?;
+        conn.execute(
+            "DELETE FROM people_manual_sync_pending WHERE library_id=?1",
+            [&library_id],
+        )?;
     }
     Ok(())
 }
@@ -445,6 +655,176 @@ fn is_session_connection(conn: &Connection) -> Result<bool> {
 mod tests {
     use super::*;
     use crate::people_store;
+
+    #[test]
+    fn bulk_corrections_roll_back_every_member_when_one_key_is_invalid() {
+        let conn = Connection::open_in_memory().unwrap();
+        people_overrides::ignore_face(&conn, "lib", "first").unwrap();
+        let before = capture_manual_snapshot(&conn).unwrap();
+        let invalid = vec![("lib".into(), "first".into()), ("lib".into(), "".into())];
+        assert!(correct_faces(&conn, &invalid, &BulkCorrection::Detach).is_err());
+        assert_eq!(capture_manual_snapshot(&conn).unwrap(), before);
+        let valid = vec![
+            ("lib".into(), "first".into()),
+            ("lib".into(), "second".into()),
+        ];
+        correct_faces(&conn, &valid, &BulkCorrection::Detach).unwrap();
+        let after = capture_manual_snapshot(&conn).unwrap();
+        assert_eq!(after.overrides.len(), 2);
+        assert!(after
+            .overrides
+            .iter()
+            .all(|row| row.disposition == "detached"));
+    }
+
+    #[test]
+    fn equal_timestamp_metadata_winner_does_not_depend_on_shard_order() {
+        let base = std::env::temp_dir().join(format!("wis-people-tie-{}", std::process::id()));
+        let session = Connection::open_in_memory().unwrap();
+        session.execute_batch("CREATE TABLE roots(path TEXT PRIMARY KEY); CREATE TABLE portable_root_registry(library_id TEXT PRIMARY KEY, root_path TEXT);").unwrap();
+        let mut shards = Vec::new();
+        for (library, name) in [("a", "Zeta"), ("b", "Alpha")] {
+            let root = base.join(library);
+            std::fs::create_dir_all(portable::index_db_path(&root).parent().unwrap()).unwrap();
+            let shard = db::open(&portable::index_db_path(&root)).unwrap();
+            replace_manual_rows_local(
+                &shard,
+                &[ManualPersonRow {
+                    manual_person_id: "shared".into(),
+                    display_name: name.into(),
+                    representative_library_id: None,
+                    representative_face_id: None,
+                    updated_at: 42,
+                }],
+                &[ManualOverrideRow {
+                    library_id: library.into(),
+                    face_id: "face".into(),
+                    disposition: "assigned".into(),
+                    manual_person_id: Some("shared".into()),
+                    propagates_cluster: false,
+                    updated_at: 42,
+                }],
+            )
+            .unwrap();
+            session
+                .execute(
+                    "INSERT INTO roots VALUES(?1)",
+                    [root.to_string_lossy().as_ref()],
+                )
+                .unwrap();
+            session
+                .execute(
+                    "INSERT INTO portable_root_registry VALUES(?1,?2)",
+                    params![library, root.to_string_lossy().as_ref()],
+                )
+                .unwrap();
+            shards.push(shard);
+        }
+        refresh_manual_cache_from_portable_roots(&session).unwrap();
+        assert_eq!(
+            capture_manual_snapshot(&session).unwrap().people[0].display_name,
+            "Zeta"
+        );
+        shards[0]
+            .execute("UPDATE people_manual_persons SET display_name='Alpha'", [])
+            .unwrap();
+        shards[1]
+            .execute("UPDATE people_manual_persons SET display_name='Zeta'", [])
+            .unwrap();
+        refresh_manual_cache_from_portable_roots(&session).unwrap();
+        assert_eq!(
+            capture_manual_snapshot(&session).unwrap().people[0].display_name,
+            "Zeta"
+        );
+        drop(shards);
+        drop(session);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn backup_restore_validates_before_replacing_and_advances_future_timestamps() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+        people_overrides::ignore_face(&conn, "lib", "face").unwrap();
+        conn.execute(
+            "UPDATE people_manual_face_overrides SET updated_at=9000000000",
+            [],
+        )
+        .unwrap();
+        let before = capture_manual_snapshot(&conn).unwrap();
+        let encoded = serde_json::to_vec(&before).unwrap();
+        let snapshot: ManualSnapshot = serde_json::from_slice(&encoded).unwrap();
+        people_overrides::clear_face_override(&conn, "lib", "face").unwrap();
+        restore_manual_snapshot(&conn, &snapshot).unwrap();
+        let restored = capture_manual_snapshot(&conn).unwrap();
+        assert_eq!(restored.overrides.len(), 1);
+        assert_eq!(restored.overrides[0].updated_at, 9000000001);
+        let mut corrupt = snapshot.clone();
+        corrupt.overrides[0].disposition = "assigned".into();
+        corrupt.overrides[0].manual_person_id = Some("missing".into());
+        assert!(restore_manual_snapshot(&conn, &corrupt).is_err());
+        assert_eq!(capture_manual_snapshot(&conn).unwrap(), restored);
+        let empty = ManualSnapshot {
+            version: 1,
+            people: vec![],
+            overrides: vec![],
+        };
+        restore_manual_snapshot(&conn, &empty).unwrap();
+        assert!(capture_manual_snapshot(&conn).unwrap().overrides.is_empty());
+    }
+
+    #[test]
+    fn pending_offline_corrections_survive_refresh_then_replay_after_reconnect() {
+        let base = std::env::temp_dir().join(format!("wis-people-replay-{}", std::process::id()));
+        let root = base.join("offline");
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE roots(path TEXT PRIMARY KEY); CREATE TABLE portable_root_registry(library_id TEXT PRIMARY KEY, root_path TEXT);").unwrap();
+        conn.execute(
+            "INSERT INTO roots VALUES(?1)",
+            [root.to_string_lossy().as_ref()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO portable_root_registry VALUES('lib',?1)",
+            [root.to_string_lossy().as_ref()],
+        )
+        .unwrap();
+        ignore_face(&conn, "lib", "face").unwrap();
+        refresh_manual_cache_from_portable_roots(&conn).unwrap();
+        assert_eq!(capture_manual_snapshot(&conn).unwrap().overrides.len(), 1);
+        std::fs::create_dir_all(portable::index_db_path(&root).parent().unwrap()).unwrap();
+        let shard = db::open(&portable::index_db_path(&root)).unwrap();
+        refresh_manual_cache_from_portable_roots(&conn).unwrap();
+        assert_eq!(capture_manual_snapshot(&shard).unwrap().overrides.len(), 1);
+        let pending: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM people_manual_sync_pending",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending, 0);
+        // A committed shard with an uncleared journal is safe to replay.
+        mark_manual_sync_pending(&conn).unwrap();
+        refresh_manual_cache_from_portable_roots(&conn).unwrap();
+        assert_eq!(capture_manual_snapshot(&shard).unwrap().overrides.len(), 1);
+        // A detached root must not later replay a stale empty session over its shard.
+        mark_manual_sync_pending(&conn).unwrap();
+        conn.execute("DELETE FROM roots", []).unwrap();
+        refresh_manual_cache_from_portable_roots(&conn).unwrap();
+        assert!(capture_manual_snapshot(&conn).unwrap().overrides.is_empty());
+        conn.execute(
+            "INSERT INTO roots VALUES(?1)",
+            [root.to_string_lossy().as_ref()],
+        )
+        .unwrap();
+        refresh_manual_cache_from_portable_roots(&conn).unwrap();
+        assert_eq!(capture_manual_snapshot(&shard).unwrap().overrides.len(), 1);
+        assert_eq!(capture_manual_snapshot(&conn).unwrap().overrides.len(), 1);
+        drop(shard);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(base);
+    }
 
     fn state() -> people_store::PeopleClusterState {
         people_store::PeopleClusterState {

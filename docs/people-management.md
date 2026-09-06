@@ -41,4 +41,11 @@ The desktop UI exposes a dedicated `People` window from the main toolbar.
 - Reverting a manual Person requires an explicit confirmation; the derived automatic cluster data remains untouched.
 - Every correction refreshes both the effective People catalog and Face Search suggestions so the two surfaces stay consistent.
 
+The expanded manager also supports face selection for transactional bulk
+corrections, representative-versus-selected previews, unassigned faces,
+versioned JSON backup/restore and session Undo. Pending portable writes survive
+interruption and unavailable attached roots; explicit detach removes the local
+view and stale replay markers. See [recovery workflow](search-workflows.md#people-recovery-and-bulk-review)
+for limits, including simultaneous edits on multiple computers.
+
 The management window intentionally operates on the effective catalog instead of editing HNSW/automatic clustering state directly. Windows validation covers formatting, all-target compilation, the full test suite, and the release build for the combined Face Search + People stack.

@@ -4,6 +4,13 @@ param(
     [string]$Executable = ".\windows-image-search.exe",
 
     [Parameter()]
+    [string]$BenchmarkWorkspace = "",
+
+    [Parameter()]
+    [ValidateSet('library-profile', 'ann', 'clip-preview', 'clip-runtime', 'image-models', 'material-texture', 'preview-vector-bank')]
+    [string[]]$OnlyBenchmarks = @(),
+
+    [Parameter()]
     [string]$OutputDirectory = ".\benchmark-results",
 
     [Parameter()]
@@ -45,6 +52,8 @@ if ([string]::IsNullOrWhiteSpace($MaterialEvalManifest)) {
 
 $gateParameters = @{
     Executable = $Executable
+    BenchmarkWorkspace = $BenchmarkWorkspace
+    OnlyBenchmarks = $OnlyBenchmarks
     OutputDirectory = $OutputDirectory
     AnnQueries = $annQueries
     PreviewSamples = $previewSamples

@@ -1,0 +1,1 @@
+YuNet ONNX benchmark failed: configuring DirectML for YuNet: D:\a\ort-artifacts\ort-artifacts\onnxruntime\onnxruntime\core\providers\dml\dml_provider_factory.cc(551)\windows-image-search.exe!00007FF721382775: (caller: 00007FF721382E4C) Exception(1) tid(6aa4) 887A0004 The specified device interface or feature level is not supported on this system.

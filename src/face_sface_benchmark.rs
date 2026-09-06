@@ -14,6 +14,7 @@ struct FaceCase {
 
 #[derive(Clone, Debug)]
 struct RunnerManifest {
+    evaluation: face_benchmark::EvaluationMode,
     model: face_sface_adapter::SFaceModelMetadata,
     provider: face_sface_adapter::SFaceExecutionProvider,
     faces: Vec<FaceCase>,
@@ -23,7 +24,7 @@ pub fn benchmark(path: &Path) -> Result<String> {
     let manifest = load_runner_manifest(path)?;
     manifest.model.validate_external()?;
     if manifest.faces.len() < 2 {
-        bail!("SFace benchmark needs at least two labeled face rows");
+        bail!("SFace benchmark needs at least two face rows");
     }
 
     let mut adapter =
@@ -55,17 +56,19 @@ pub fn benchmark(path: &Path) -> Result<String> {
         aligned_faces.push(aligned);
     }
 
-    let evaluator_manifest = build_evaluator_manifest(&manifest, &embeddings)?;
-    let temp_path = temporary_evaluator_path(path);
-    std::fs::write(&temp_path, &evaluator_manifest).with_context(|| {
-        format!(
-            "writing temporary face evaluator manifest {}",
-            temp_path.display()
-        )
+    let evaluated = manifest.evaluation.evaluate(|| {
+        let evaluator_manifest = build_evaluator_manifest(&manifest, &embeddings)?;
+        let temp_path = temporary_evaluator_path(path);
+        std::fs::write(&temp_path, &evaluator_manifest).with_context(|| {
+            format!(
+                "writing temporary face evaluator manifest {}",
+                temp_path.display()
+            )
+        })?;
+        let evaluated = face_benchmark::benchmark(&temp_path);
+        let _ = std::fs::remove_file(&temp_path);
+        evaluated
     })?;
-    let evaluated = face_benchmark::benchmark(&temp_path);
-    let _ = std::fs::remove_file(&temp_path);
-    let evaluated = evaluated?;
 
     let mut report = String::new();
     writeln!(report, "Windows Image Search SFace ONNX Benchmark")?;
@@ -119,6 +122,7 @@ fn load_runner_manifest(path: &Path) -> Result<RunnerManifest> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("reading SFace runner manifest {}", path.display()))?;
     let base = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut evaluation = None;
     let mut model: Option<face_sface_adapter::SFaceModelMetadata> = None;
     let mut provider = None;
     let mut faces = Vec::new();
@@ -137,6 +141,12 @@ fn load_runner_manifest(path: &Path) -> Result<RunnerManifest> {
             .to_ascii_lowercase()
             .as_str()
         {
+            "evaluation" => {
+                if evaluation.is_some() {
+                    bail!("line {line}: duplicate evaluation row");
+                }
+                evaluation = Some(face_benchmark::EvaluationMode::parse(&columns)?);
+            }
             "model" => {
                 if columns.len() != 7 {
                     bail!("line {line}: model row requires 7 tab-separated columns");
@@ -204,6 +214,7 @@ fn load_runner_manifest(path: &Path) -> Result<RunnerManifest> {
         }
     }
     Ok(RunnerManifest {
+        evaluation: evaluation.unwrap_or_default(),
         model,
         provider,
         faces,
@@ -440,6 +451,7 @@ mod tests {
         let model_path = root.join("fake-sface-model.onnx");
         std::fs::write(&model_path, b"fake-model").unwrap();
         let manifest = RunnerManifest {
+            evaluation: face_benchmark::EvaluationMode::Labeled,
             model: face_sface_adapter::SFaceModelMetadata {
                 model_path: model_path.clone(),
                 source: "user-supplied".into(),
