@@ -79,8 +79,16 @@ impl YuNetOnnxAdapter {
         let mut builder = match provider {
             YuNetExecutionProvider::Cpu => builder,
             YuNetExecutionProvider::DirectMl => builder
-                .with_execution_providers([DirectML::default().build()])
-                .map_err(|err| anyhow::anyhow!("configuring DirectML for YuNet: {err}"))?,
+                .with_execution_providers([DirectML::default().build().error_on_failure()])
+                .map_err(|err| anyhow::anyhow!("configuring DirectML for YuNet: {err}"))?
+                .with_memory_pattern(false)
+                .map_err(|err| {
+                    anyhow::anyhow!("disabling DirectML memory patterns for YuNet: {err}")
+                })?
+                .with_parallel_execution(false)
+                .map_err(|err| {
+                    anyhow::anyhow!("configuring sequential DirectML execution for YuNet: {err}")
+                })?,
         };
         let session = builder
             .commit_from_file(model_path)

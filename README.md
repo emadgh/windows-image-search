@@ -2,7 +2,7 @@
 
 A native, local-first image index and visual search application for Windows, written in Rust.
 
-## v0.2.x features
+## Current features (v0.3 alpha)
 
 - Configure one or more folders to index recursively.
 - Portable per-root indexes under `<root>/.imagesearch`, suitable for external/removable drives and drive-letter changes.
@@ -12,16 +12,22 @@ A native, local-first image index and visual search application for Windows, wri
 - Indexed FTS5 text search across filename, path, EXIF/XMP description and keywords.
 - Search/filter by dominant color with adjustable tolerance.
 - Hybrid image similarity using color distribution, texture/dHash, CLIP semantic similarity and dominant color.
+- Explicit natural-language search with the matching CLIP text encoder, temporary region queries, component score explanations, and query-stage timings.
+- Duplicate review with full-file SHA-256 groups and separate approximate visual groups; side-by-side previews and no automatic deletion.
 - Two-stage candidate generation for large libraries, with persisted HNSW semantic retrieval and exact hybrid reranking.
 - Persistent portable thumbnail disk cache, viewport-priority loading and bounded GPU/UI texture residency.
 - Collections for grouping indexed folders/files.
+- Face search from indexed faces or an external image with a multi-face chooser.
+- People grouping, naming, merging, and per-face corrections separate from automatic clusters.
+- People bulk assignment/ignore/restore, unassigned-face review, correction backups, session Undo, and retryable portable synchronization.
+- Managed YuNet/SFace model setup and CPU/DirectML inference options.
 - Switch between a resizable thumbnail grid and an Explorer-style detailed list.
 - Double-click to open an image; context menu can open its containing folder or copy its path.
 
 ## First run and portable indexes
 
 1. Start `windows-image-search.exe`.
-2. Open **Settings** and add one or more indexed folders.
+2. Open **Preferences → Collections**, create/select a Collection, and add folders. New roots are scheduled for indexing automatically.
 3. A new folder gets a `.imagesearch` directory and can then be populated with **Rescan**. If the folder already contains a valid `.imagesearch/index.sqlite3`, the existing portable index is attached and reused without decoding/rescanning the source images.
 4. Metadata, color/texture descriptors, cached thumbnail previews and CLIP embeddings are committed incrementally.
 5. The CLIP model is downloaded on its first use and cached under the Windows user's local application-data directory. After it is cached, similarity search can run offline.
@@ -58,6 +64,24 @@ Enable the explicit color filter, choose a target color and adjust tolerance. Co
 ### Similar image
 
 Click **Search by image**, choose a query image, and use the similarity sliders to control color distribution, texture/pattern, CLIP semantic and dominant-color influence. Large libraries use bounded candidate generation and HNSW semantic retrieval before exact hybrid reranking.
+
+The Similar Image sidebar provides named presets: **Material / texture** preserves the existing default; **General appearance** and **Possible duplicates** are experimental starting points pending labeled evaluation. Editing controls shows **Custom**. Preset changes take effect on the next search; use **Re-run search** to apply them to the current query.
+
+Scores are ranking similarities, not probabilities or guarantees that files are duplicates. If the semantic model fails, a persistent notice explains that results use texture/color only. Similar Image search remains available during active indexing, using a consistent committed snapshot. Re-run to include newly committed images. Pause/resume remains available while searching.
+
+Use **Cancel search** or the face-search cancellation button to stop a query; switching search modes also cancels it. Cancelled results cannot replace a newer query. An in-flight decoder/model operation can finish before its worker stops. Missing visual descriptors are repaired by **Rescan**, not by running a query.
+
+Interactive CLIP queries are prioritized between indexing batches on the existing single model worker. Queue sizes are bounded; after four queued queries, a waiting indexing batch gets a turn. During active indexing, semantic candidates use exact snapshot retrieval instead of rebuilding a changing ANN cache; this can use more time/memory on large libraries. Face preparation/search and face maintenance retain their separate busy-state restrictions.
+
+### Faces and People
+
+Enable **Detect faces** for participating Collections and set up YuNet/SFace in Preferences. Face Search offers People representatives when available and falls back to indexed face instances. Choose **Face from file…** to select a face from an external image. The People manager supports names, merges, splits, assignments, and representative selection without rewriting automatic clustering state. See [Face Search](docs/face-search.md) and [People management](docs/people-management.md).
+
+See [search workflows](docs/search-workflows.md) for description/region search, duplicate review, and People recovery. The [local People evaluation](docs/people-collection-evaluation.md) records the available corpus and ANN gate results.
+
+### Improvement roadmap
+
+Implementation and validation status is tracked in the [project improvement checklist](docs/improvement-checklist.md).
 
 ## Diagnostic benchmarks
 
@@ -194,6 +218,9 @@ To print the application version:
 
 ## Development
 
+For tests on an existing collection, use an [isolated benchmark workspace](docs/isolated-benchmarks.md).
+The runner checks that the executable honors isolation before starting diagnostics.
+
 ```powershell
 cargo fmt --all -- --check
 cargo check --all-targets
@@ -205,4 +232,4 @@ Windows CI reads the package version from `Cargo.toml` and uploads a versioned a
 
 ## Privacy
 
-The application is designed for local indexing and local inference. Network access is only required when an embedding model has not yet been cached and must be downloaded.
+Image indexing and inference run locally. Network access is used for uncached CLIP models, managed face-model downloads, and GitHub update checks/downloads. Automatic update checking and downloading are enabled by default and can be disabled in update settings. After required models are cached, search can run offline.

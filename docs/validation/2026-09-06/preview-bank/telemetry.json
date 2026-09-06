@@ -1,0 +1,60 @@
+{
+  "gate": "v0.2-representative-library",
+  "gate_started_at": "2026-09-06T12:39:50.4845066+03:30",
+  "generated_at": "2026-09-06T12:44:23.3685441+03:30",
+  "gate_wall_time_seconds": 272.884,
+  "selected_benchmarks": [
+    "preview-vector-bank",
+    "ann"
+  ],
+  "sample_counts": {
+    "ann_queries": 50,
+    "preview_samples": 64,
+    "runtime_samples": 64,
+    "image_model_queries": 24,
+    "texture_samples": 24
+  },
+  "memory_sampling": {
+    "process_poll_interval_ms": 200,
+    "sampling_note": "Nominal interval; synchronous GPU counter collection may delay polling. Short-lived process peaks may be missed.",
+    "gpu_poll_interval_seconds": 1,
+    "working_set": "Process.WorkingSet64/PeakWorkingSet64",
+    "private_memory": "sampled Process.PrivateMemorySize64",
+    "gpu_memory": "Windows GPU Process Memory performance counters when available"
+  },
+  "executable_sha256": "dee5ec2eb040555dc2b8641c71e9e5af1e78f5459b75e9ac44bb24735c768441",
+  "benchmark_results": [
+    {
+      "name": "preview-vector-bank",
+      "provider": null,
+      "started_at": "2026-09-06T12:39:53.7086609+03:30",
+      "finished_at": "2026-09-06T12:44:17.9323899+03:30",
+      "wall_time_seconds": 264.233,
+      "exit_code": 0,
+      "peak_working_set_mib": 538.69,
+      "sampled_peak_private_memory_mib": 545.18,
+      "gpu_process_memory_counter_available": true,
+      "gpu_process_sample_found": false,
+      "sampled_peak_gpu_dedicated_mib": null,
+      "sampled_peak_gpu_shared_mib": null,
+      "gpu_counter_error": null,
+      "succeeded": true
+    },
+    {
+      "name": "ann",
+      "provider": null,
+      "started_at": "2026-09-06T12:44:17.9362818+03:30",
+      "finished_at": "2026-09-06T12:44:23.3661359+03:30",
+      "wall_time_seconds": 5.43,
+      "exit_code": 0,
+      "peak_working_set_mib": 89.68,
+      "sampled_peak_private_memory_mib": 83.91,
+      "gpu_process_memory_counter_available": true,
+      "gpu_process_sample_found": false,
+      "sampled_peak_gpu_dedicated_mib": null,
+      "sampled_peak_gpu_shared_mib": null,
+      "gpu_counter_error": null,
+      "succeeded": true
+    }
+  ]
+}

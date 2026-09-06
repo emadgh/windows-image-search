@@ -319,10 +319,7 @@ impl ImageSearchApp {
             }
             if self.indexing && self.index_control.is_some() {
                 let label = if self.index_paused { "Resume" } else { "Pause" };
-                if ui
-                    .add_enabled(!self.searching, egui::Button::new(label))
-                    .clicked()
-                {
+                if ui.button(label).clicked() {
                     self.toggle_index_pause();
                 }
             }

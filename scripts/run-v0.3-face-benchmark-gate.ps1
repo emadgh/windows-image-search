@@ -3,6 +3,9 @@ param(
     [Parameter()]
     [string]$Executable = ".\windows-image-search.exe",
 
+    [Parameter()]
+    [string]$BenchmarkWorkspace = "",
+
     [Parameter(Mandatory = $true)]
     [string]$YuNetManifest,
 
@@ -155,7 +158,7 @@ function New-ProviderManifest {
     foreach ($line in $lines) {
         $current = $line
         if (-not $replaced -and $line -match '^\s*model\t') {
-            $columns = @($line -split "`t", -1)
+            $columns = @($line -split "`t")
             if ($columns.Count -lt 3) {
                 throw "Model row in $resolved does not contain a provider column."
             }
@@ -187,6 +190,9 @@ function Invoke-FaceBenchmark {
         [Parameter(Mandatory = $true)][string]$Provider
     )
 
+    if (-not [string]::IsNullOrWhiteSpace($BenchmarkWorkspace) -and $Name -ne "isolation-probe") {
+        $Arguments = @("--benchmark-workspace", $BenchmarkWorkspace) + $Arguments
+    }
     $stdoutPath = Join-Path $ResultDirectory "$Name.stdout.txt"
     $stderrPath = Join-Path $ResultDirectory "$Name.stderr.txt"
     $combinedPath = Join-Path $ResultDirectory "$Name.txt"
@@ -305,8 +311,19 @@ $gateStartedAt = Get-Date
 $systemInfo = Get-SystemSnapshot
 $systemInfo | ConvertTo-Json -Depth 8 | Set-Content -Path (Join-Path $resultDirectory "system-info.json") -Encoding utf8
 
-$versionLines = @(& $executablePath --version 2>&1)
-$versionExitCode = $LASTEXITCODE
+if (-not [string]::IsNullOrWhiteSpace($BenchmarkWorkspace)) {
+    $BenchmarkWorkspace = (Resolve-Path -LiteralPath $BenchmarkWorkspace -ErrorAction Stop).Path
+    $invalidWorkspace = Join-Path $resultDirectory "nonexistent-isolation-probe"
+    $probe = Invoke-FaceBenchmark -Provider "preflight" -Name "isolation-probe" -Arguments @("--version", "--benchmark-workspace", $invalidWorkspace) -ExecutablePath $executablePath -ResultDirectory $resultDirectory
+    $probeText = Get-Content -LiteralPath (Join-Path $resultDirectory "isolation-probe.stderr.txt") -Raw
+    if ($probe.exit_code -eq 0 -or $probeText -notmatch "Benchmark isolation") {
+        throw "Executable did not enforce benchmark isolation. No benchmark was started."
+    }
+}
+$versionResult = Invoke-FaceBenchmark -Provider "preflight" -Name "version" -Arguments @("--version") -ExecutablePath $executablePath -ResultDirectory $resultDirectory
+$versionExitCode = $versionResult.exit_code
+if ($versionExitCode -ne 0) { throw "Version/isolation preflight failed" }
+$versionLines = @(Get-Content -LiteralPath (Join-Path $resultDirectory "version.stdout.txt"))
 $versionLines | Set-Content -Path (Join-Path $resultDirectory "version.txt") -Encoding utf8
 $appVersion = if ($versionLines.Count -gt 0) { [string]$versionLines[0] } else { "unknown" }
 
@@ -374,6 +391,7 @@ $manifest = [pscustomobject]@{
     generated_at = $gateFinishedAt.ToString("o")
     gate_started_at = $gateStartedAt.ToString("o")
     gate_wall_time_seconds = [math]::Round(($gateFinishedAt - $gateStartedAt).TotalSeconds, 3)
+    benchmark_workspace = $BenchmarkWorkspace
     executable = $executablePath
     application_version = $appVersion
     version_exit_code = $versionExitCode
@@ -384,6 +402,7 @@ $manifest = [pscustomobject]@{
     directml_required = [bool]$RequireDirectML
     memory_sampling = [pscustomobject]@{
         process_poll_interval_ms = 200
+        sampling_note = 'Nominal interval; synchronous GPU counter collection may delay polling. Short-lived process peaks may be missed.'
         gpu_poll_interval_seconds = 1
         working_set = "Process.WorkingSet64/PeakWorkingSet64"
         private_memory = "sampled Process.PrivateMemorySize64"
@@ -409,8 +428,9 @@ foreach ($result in $results) {
 }
 $summaryLines += @(
     "",
-    "Each model is evaluated through the same labeled manifest twice: CPU and DirectML.",
-    "The model-adapter reports contain detector/identity quality metrics, init latency and persistent-session inference throughput.",
+    "Each model runs with the same input manifest on CPU and DirectML.",
+    "Runtime-only manifests report quality_status=not_evaluated; independent labels are required for detector/identity quality metrics.",
+    "Model-adapter reports include init latency and persistent-session inference throughput.",
     "Peak working set is process-level RAM; private and GPU memory are sampled while each child benchmark runs.",
     "A DirectML failure is recorded as unavailable unless -RequireDirectML is supplied."
 )
@@ -435,3 +455,4 @@ Write-Host "Face ANN index benchmark succeeded: $($indexFailures.Count -eq 0)"
 if ($versionExitCode -ne 0 -or $cpuFailures.Count -gt 0 -or $indexFailures.Count -gt 0 -or ($RequireDirectML -and $directMlFailures.Count -gt 0)) {
     exit 1
 }
+exit 0

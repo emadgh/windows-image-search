@@ -73,7 +73,8 @@ impl ImageSearchApp {
                     ui.label(format!("Modified {}", modified.format("%Y-%m-%d %H:%M")));
                 }
                 if let Some(score) = record.score {
-                    ui.label(format!("Similarity {:.1}%", score * 100.0));
+                    ui.label(format!("Similarity score {:.3}", score))
+                        .on_hover_text("A ranking score, not a probability of identity or an exact duplicate guarantee.");
                 }
 
                 ui.horizontal(|ui| {
@@ -85,6 +86,24 @@ impl ImageSearchApp {
                     ui.label(format!("Dominant #{r:02X}{g:02X}{b:02X}"));
                 });
 
+                if matches!(self.search_mode, super::SearchMode::SimilarImage | super::SearchMode::Semantic) {
+                    if let Some(detail) = self.similarity_details.get(&record.path) {
+                        ui.separator();
+                        ui.strong("Why this result");
+                        if detail.exact_source {
+                            ui.small("This is the original indexed query image; its score is pinned to 1.");
+                        } else {
+                            let total: f32 = detail.values.iter().zip(detail.weights).filter_map(|(value,weight)| value.map(|_| weight.max(0.0))).sum();
+                            for (index,label) in ["Color distribution","Texture / layout","Semantic","Dominant color"].iter().enumerate() {
+                                if detail.weights[index] <= 0.0 { continue; }
+                                if let Some(value) = detail.values[index] {
+                                    let share = if total > 0.0 {detail.weights[index]/total} else {0.0};
+                                    ui.small(format!("{label}: {value:.3} · {:.0}% of mix · contribution {:.3}",share*100.0,value*share));
+                                } else { ui.small(format!("{label}: unavailable, excluded from mix")); }
+                            }
+                        }
+                    }
+                }
                 if !record.keywords.trim().is_empty() || !record.description.trim().is_empty() {
                     ui.add_space(10.0);
                     ui.separator();

@@ -1,0 +1,43 @@
+{
+  "gate": "v0.2-representative-library",
+  "gate_started_at": "2026-09-06T12:32:17.3440000+03:30",
+  "generated_at": "2026-09-06T12:33:28.9000461+03:30",
+  "gate_wall_time_seconds": 71.556,
+  "selected_benchmarks": [
+    "clip-preview"
+  ],
+  "sample_counts": {
+    "ann_queries": 32,
+    "preview_samples": 54,
+    "runtime_samples": 64,
+    "image_model_queries": 24,
+    "texture_samples": 24
+  },
+  "memory_sampling": {
+    "process_poll_interval_ms": 200,
+    "sampling_note": "Nominal interval; synchronous GPU counter collection may delay polling. Short-lived process peaks may be missed.",
+    "gpu_poll_interval_seconds": 1,
+    "working_set": "Process.WorkingSet64/PeakWorkingSet64",
+    "private_memory": "sampled Process.PrivateMemorySize64",
+    "gpu_memory": "Windows GPU Process Memory performance counters when available"
+  },
+  "executable_sha256": "dee5ec2eb040555dc2b8641c71e9e5af1e78f5459b75e9ac44bb24735c768441",
+  "benchmark_results": [
+    {
+      "name": "clip-preview",
+      "provider": null,
+      "started_at": "2026-09-06T12:32:20.5277992+03:30",
+      "finished_at": "2026-09-06T12:33:28.8968277+03:30",
+      "wall_time_seconds": 68.371,
+      "exit_code": 0,
+      "peak_working_set_mib": 2379.56,
+      "sampled_peak_private_memory_mib": 2402.7,
+      "gpu_process_memory_counter_available": true,
+      "gpu_process_sample_found": false,
+      "sampled_peak_gpu_dedicated_mib": null,
+      "sampled_peak_gpu_shared_mib": null,
+      "gpu_counter_error": null,
+      "succeeded": true
+    }
+  ]
+}

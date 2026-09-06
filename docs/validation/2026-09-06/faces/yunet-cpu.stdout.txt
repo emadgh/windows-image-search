@@ -1,0 +1,56 @@
+Windows Image Search YuNet ONNX Benchmark
+application_version=v0.3.0-alpha.6
+model_file=face_detection_yunet_2026may.onnx
+model_source=user-supplied-local-model
+model_license=external-review
+model_redistributable=false
+model_commercial_use=false
+model_source_mode=external
+provider=cpu
+model_bytes=229738
+model_fingerprint_fnv1a64=4b624cc14e1e8d5a
+images=118
+ground_truth_faces=unlabeled
+score_threshold=0.6000
+nms_threshold=0.3000
+top_k=5000
+init_ms=41.256
+inference_mean_ms=118.336
+inference_p50_ms=39.192
+inference_p95_ms=288.414
+inference_images_per_second=8.451
+batch_probe_image_id=image-0000
+batch_sweep_begin
+batch_sweep_iterations=5
+batch_1_supported=true
+batch_1_warmup_ms=23.780
+batch_1_input=1088x1376
+batch_1_measured_iterations=5
+batch_1_measurement_succeeded=true
+batch_1_mean_ms=23.352
+batch_1_p50_ms=23.312
+batch_1_images_per_second=42.824
+batch_1_output_shapes_valid=true
+batch_1_input_geometry_stable=true
+batch_2_supported=false
+batch_2_measurement_succeeded=false
+batch_2_measured_iterations=0
+batch_2_error=running batched YuNet ONNX inference: Got invalid dimensions for input: input for the following indices  index: 0 Got: 2 Expected: 1  Please fix either the inputs/outputs or the model.
+batch_4_supported=false
+batch_4_measurement_succeeded=false
+batch_4_measured_iterations=0
+batch_4_error=running batched YuNet ONNX inference: Got invalid dimensions for input: input for the following indices  index: 0 Got: 4 Expected: 1  Please fix either the inputs/outputs or the model.
+batch_8_supported=false
+batch_8_measurement_succeeded=false
+batch_8_measured_iterations=0
+batch_8_error=running batched YuNet ONNX inference: Got invalid dimensions for input: input for the following indices  index: 0 Got: 8 Expected: 1  Please fix either the inputs/outputs or the model.
+batch_16_supported=false
+batch_16_measurement_succeeded=false
+batch_16_measured_iterations=0
+batch_16_error=running batched YuNet ONNX inference: Got invalid dimensions for input: input for the following indices  index: 0 Got: 16 Expected: 1  Please fix either the inputs/outputs or the model.
+batch_sweep_end
+
+shared_evaluator_begin
+quality_status=not_evaluated
+quality_reason=no_independent_labels
+shared_evaluator_end

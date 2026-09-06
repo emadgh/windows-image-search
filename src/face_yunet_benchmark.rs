@@ -27,6 +27,7 @@ struct ImageCase {
 
 #[derive(Clone, Debug)]
 struct RunnerManifest {
+    evaluation: face_benchmark::EvaluationMode,
     model: ModelConfig,
     score_threshold: f32,
     nms_threshold: f32,
@@ -71,17 +72,20 @@ pub fn benchmark(path: &Path) -> Result<String> {
         predictions.insert(image.image_id.clone(), detected);
     }
 
-    let evaluator_manifest = build_evaluator_manifest(&manifest, &predictions, model_fingerprint)?;
-    let temp_path = temporary_evaluator_path(path);
-    std::fs::write(&temp_path, &evaluator_manifest).with_context(|| {
-        format!(
-            "writing temporary YuNet evaluator manifest {}",
-            temp_path.display()
-        )
+    let evaluated = manifest.evaluation.evaluate(|| {
+        let evaluator_manifest =
+            build_evaluator_manifest(&manifest, &predictions, model_fingerprint)?;
+        let temp_path = temporary_evaluator_path(path);
+        std::fs::write(&temp_path, &evaluator_manifest).with_context(|| {
+            format!(
+                "writing temporary YuNet evaluator manifest {}",
+                temp_path.display()
+            )
+        })?;
+        let evaluated = face_benchmark::benchmark(&temp_path);
+        let _ = std::fs::remove_file(&temp_path);
+        evaluated
     })?;
-    let evaluated = face_benchmark::benchmark(&temp_path);
-    let _ = std::fs::remove_file(&temp_path);
-    let evaluated = evaluated?;
 
     let model_bytes = std::fs::metadata(&manifest.model.model_path)
         .with_context(|| {
@@ -114,11 +118,15 @@ pub fn benchmark(path: &Path) -> Result<String> {
     writeln!(report, "model_bytes={model_bytes}")?;
     writeln!(report, "model_fingerprint_fnv1a64={model_fingerprint:016x}")?;
     writeln!(report, "images={}", manifest.images.len())?;
-    writeln!(
-        report,
-        "ground_truth_faces={}",
-        manifest.ground_truth.values().map(Vec::len).sum::<usize>()
-    )?;
+    if manifest.evaluation == face_benchmark::EvaluationMode::Labeled {
+        writeln!(
+            report,
+            "ground_truth_faces={}",
+            manifest.ground_truth.values().map(Vec::len).sum::<usize>()
+        )?;
+    } else {
+        writeln!(report, "ground_truth_faces=unlabeled")?;
+    }
     writeln!(report, "score_threshold={:.4}", manifest.score_threshold)?;
     writeln!(report, "nms_threshold={:.4}", manifest.nms_threshold)?;
     writeln!(report, "top_k={}", manifest.top_k)?;
@@ -155,6 +163,7 @@ fn load_runner_manifest(path: &Path) -> Result<RunnerManifest> {
         .with_context(|| format!("reading YuNet runner manifest {}", path.display()))?;
     let base = path.parent().unwrap_or_else(|| Path::new("."));
 
+    let mut evaluation = None;
     let mut model: Option<ModelConfig> = None;
     let mut settings_seen = false;
     let mut score_threshold = DEFAULT_SCORE_THRESHOLD;
@@ -178,6 +187,12 @@ fn load_runner_manifest(path: &Path) -> Result<RunnerManifest> {
             .to_ascii_lowercase()
             .as_str()
         {
+            "evaluation" => {
+                if evaluation.is_some() {
+                    bail!("line {line}: duplicate evaluation row");
+                }
+                evaluation = Some(face_benchmark::EvaluationMode::parse(&columns)?);
+            }
             "model" => {
                 expect_columns(&columns, 7, line, "model")?;
                 if model.is_some() {
@@ -257,6 +272,7 @@ fn load_runner_manifest(path: &Path) -> Result<RunnerManifest> {
     }
 
     Ok(RunnerManifest {
+        evaluation: evaluation.unwrap_or_default(),
         model,
         score_threshold,
         nms_threshold,
@@ -552,6 +568,7 @@ mod tests {
     #[test]
     fn evaluator_manifest_contains_detector_rows() {
         let manifest = RunnerManifest {
+            evaluation: face_benchmark::EvaluationMode::Labeled,
             model: ModelConfig {
                 model_path: PathBuf::from("model.onnx"),
                 provider: YuNetExecutionProvider::Cpu,

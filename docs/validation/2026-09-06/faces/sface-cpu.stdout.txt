@@ -1,0 +1,50 @@
+Windows Image Search SFace ONNX Benchmark
+application_version=v0.3.0-alpha.6
+model_file=face_recognition_sface_2021dec.onnx
+model_source=user-supplied-local-model
+model_license=external-review
+model_redistributable=false
+model_commercial_use=false
+model_source_mode=external
+provider=cpu
+model_bytes=38696353
+model_fingerprint_fnv1a64=57da50d32f48e81a
+faces=167
+embedding_dimension=128
+init_ms=68.024
+inference_mean_ms=7.698
+inference_p50_ms=7.597
+inference_p95_ms=8.899
+inference_faces_per_second=129.911
+batch_sweep_begin
+batch_sweep_iterations=5
+batch_1_supported=true
+batch_1_warmup_ms=7.593
+batch_1_measured_iterations=5
+batch_1_measurement_succeeded=true
+batch_1_mean_ms=6.249
+batch_1_p50_ms=6.534
+batch_1_faces_per_second=160.033
+batch_1_dimensions_ok=true
+batch_2_supported=false
+batch_2_measurement_succeeded=false
+batch_2_measured_iterations=0
+batch_2_error=running batched SFace ONNX inference: Got invalid dimensions for input: data for the following indices  index: 0 Got: 2 Expected: 1  Please fix either the inputs/outputs or the model.
+batch_4_supported=false
+batch_4_measurement_succeeded=false
+batch_4_measured_iterations=0
+batch_4_error=running batched SFace ONNX inference: Got invalid dimensions for input: data for the following indices  index: 0 Got: 4 Expected: 1  Please fix either the inputs/outputs or the model.
+batch_8_supported=false
+batch_8_measurement_succeeded=false
+batch_8_measured_iterations=0
+batch_8_error=running batched SFace ONNX inference: Got invalid dimensions for input: data for the following indices  index: 0 Got: 8 Expected: 1  Please fix either the inputs/outputs or the model.
+batch_16_supported=false
+batch_16_measurement_succeeded=false
+batch_16_measured_iterations=0
+batch_16_error=running batched SFace ONNX inference: Got invalid dimensions for input: data for the following indices  index: 0 Got: 16 Expected: 1  Please fix either the inputs/outputs or the model.
+batch_sweep_end
+
+shared_evaluator_begin
+quality_status=not_evaluated
+quality_reason=no_independent_labels
+shared_evaluator_end

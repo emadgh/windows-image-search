@@ -8,6 +8,10 @@ The opt-in `--benchmark-face-ann` diagnostic measures the current persisted face
 
 The optional number is the deterministic query sample count per measured corpus size. The default is 32.
 
+Use `--benchmark-face-ann-root <root>` to run 32 queries against one portable
+folder without initializing the session database. This variant prints its
+report to stdout; redirect it to a local file to retain the measurements.
+
 ## Revision isolation
 
 The benchmark reads only current, normalized face embeddings whose detector/source state still matches the current `faces`, `face_detection_state`, and `images` records. Vectors are grouped by the same embedding revision fields used by production Face Search: model id, model version, model cache revision, embedding schema version, alignment revision, and dimension. Different revision groups are never inserted into the same HNSW graph.

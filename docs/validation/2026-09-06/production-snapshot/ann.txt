@@ -1,0 +1,20 @@
+Windows Image Search ANN Benchmark
+application_version=v0.3.0-alpha.6
+vectors=864
+queries=50
+hnsw_rebuilt=true
+index_prepare_ms=76.713
+index_load_ms=4.045
+hnsw_m=24
+hnsw_ef_construction=200
+hnsw_ef_search=612
+ann_avg_ms=0.630
+ann_p50_ms=0.630
+ann_p95_ms=0.648
+bruteforce_avg_ms=0.363
+bruteforce_p50_ms=0.360
+bruteforce_p95_ms=0.374
+warm_query_speedup=0.58x
+recall@10=99.20%
+recall@50=99.20%
+recall@100=99.20%

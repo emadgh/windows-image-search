@@ -184,8 +184,25 @@ pub fn open(db_path: &Path) -> Result<Connection> {
         [],
     )?;
     ensure_text_search_index(&conn)?;
+    // Random revisions also distinguish divergent copies of a portable database.
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS search_catalog_revision (
+        id INTEGER PRIMARY KEY CHECK(id=1), token TEXT NOT NULL);
+        INSERT OR IGNORE INTO search_catalog_revision VALUES(1, hex(randomblob(16)));
+        CREATE TRIGGER IF NOT EXISTS search_revision_insert AFTER INSERT ON images BEGIN
+            UPDATE search_catalog_revision SET token=hex(randomblob(16)) WHERE id=1; END;
+        CREATE TRIGGER IF NOT EXISTS search_revision_update AFTER UPDATE ON images BEGIN
+            UPDATE search_catalog_revision SET token=hex(randomblob(16)) WHERE id=1; END;
+        CREATE TRIGGER IF NOT EXISTS search_revision_delete AFTER DELETE ON images BEGIN
+            UPDATE search_catalog_revision SET token=hex(randomblob(16)) WHERE id=1; END;")?;
 
     Ok(conn)
+}
+
+pub fn search_catalog_revision(conn: &Connection) -> Result<Option<String>> {
+    let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='search_catalog_revision')", [], |row|row.get(0))?;
+    if !exists { return Ok(None); }
+    use rusqlite::OptionalExtension;
+    Ok(conn.query_row("SELECT token FROM search_catalog_revision WHERE id=1", [], |row|row.get(0)).optional()?)
 }
 
 fn ensure_text_search_index(conn: &Connection) -> Result<()> {
@@ -310,6 +327,10 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, declaration: &str
 
 pub fn load_roots(db_path: &Path) -> Result<Vec<PathBuf>> {
     let conn = open(db_path)?;
+    load_roots_from_connection(&conn)
+}
+
+pub fn load_roots_from_connection(conn: &Connection) -> Result<Vec<PathBuf>> {
     let mut stmt = conn.prepare("SELECT path FROM roots ORDER BY path COLLATE NOCASE")?;
     let roots = stmt
         .query_map([], |row| row.get::<_, String>(0))?
@@ -962,17 +983,46 @@ pub struct AnnEmbedding {
 
 pub fn load_search_images(db_path: &Path) -> Result<Vec<ImageRecord>> {
     let conn = open(db_path)?;
-    let mut stmt = conn.prepare(
-        r#"
+    load_search_images_from_connection(&conn)
+}
+
+/// Open an existing catalog without running migrations or acquiring write locks.
+pub fn open_search_reader(db_path: &Path) -> Result<Connection> {
+    let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("opening search catalog {}", db_path.display()))?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    Ok(conn)
+}
+
+/// Pin descriptors and embeddings to one committed WAL snapshot. Dropping the
+/// connection releases it, including error/cancellation paths.
+pub fn open_search_snapshot(db_path: &Path) -> Result<Connection> {
+    let conn = open_search_reader(db_path)?;
+    conn.execute_batch("BEGIN DEFERRED")?;
+    Ok(conn)
+}
+
+pub fn load_search_images_from_connection(conn: &Connection) -> Result<Vec<ImageRecord>> {
+    load_search_rows(conn, true)
+}
+
+/// Ranking does not need potentially large descriptions or keyword strings.
+pub fn load_retrieval_images(conn: &Connection) -> Result<Vec<ImageRecord>> {
+    load_search_rows(conn, false)
+}
+
+fn load_search_rows(conn: &Connection, include_metadata: bool) -> Result<Vec<ImageRecord>> {
+    let metadata = if include_metadata { "description, keywords" } else { "'', ''" };
+    let sql = format!(r#"
         SELECT path, root, file_name, extension, size, modified, width, height,
-               description, keywords, dominant_r, dominant_g, dominant_b,
+               {metadata}, dominant_r, dominant_g, dominant_b,
                visual_hash, color_histogram, color_histogram_dim,
                embedding_normalized, rowid,
                material_texture, material_texture_dim, material_texture_version
         FROM images
         ORDER BY file_name COLLATE NOCASE
-        "#,
-    )?;
+        "#);
+    let mut stmt = conn.prepare(&sql)?;
 
     let rows = stmt.query_map([], |row| {
         let histogram_blob: Option<Vec<u8>> = row.get(14)?;
@@ -1013,7 +1063,26 @@ pub fn load_search_images(db_path: &Path) -> Result<Vec<ImageRecord>> {
             score: None,
         })
     })?;
-    Ok(rows.filter_map(|row| row.ok()).collect())
+    rows.collect::<rusqlite::Result<Vec<_>>>().context("loading search descriptors")
+}
+
+/// Call on the ranking snapshot to prevent row-id reuse or metadata changes
+/// from mixing a later catalog version into completed results.
+pub fn load_result_metadata(
+    conn: &Connection,
+    rowids: &HashSet<usize>,
+    request: &crate::search_request::SearchRequest,
+) -> Result<HashMap<usize, (String, String)>> {
+    let mut output = HashMap::with_capacity(rowids.len());
+    let ids: Vec<_> = rowids.iter().copied().collect();
+    for chunk in ids.chunks(500) {
+        request.check()?;
+        let placeholders = std::iter::repeat_n("?", chunk.len()).collect::<Vec<_>>().join(",");
+        let mut stmt = conn.prepare(&format!("SELECT rowid, description, keywords FROM images WHERE rowid IN ({placeholders})"))?;
+        let rows = stmt.query_map(params_from_iter(chunk.iter()), |row| Ok((row.get::<_,i64>(0)? as usize, (row.get::<_,String>(1)?, row.get::<_,String>(2)?))))?;
+        for row in rows { let (id, metadata) = row?; output.insert(id, metadata); }
+    }
+    Ok(output)
 }
 
 pub fn load_embeddings_for_rowids(
@@ -1024,6 +1093,13 @@ pub fn load_embeddings_for_rowids(
         return Ok(HashMap::new());
     }
     let conn = open(db_path)?;
+    load_embeddings_for_rowids_from_connection(&conn, rowids)
+}
+
+pub fn load_embeddings_for_rowids_from_connection(
+    conn: &Connection,
+    rowids: &HashSet<usize>,
+) -> Result<HashMap<usize, (Vec<f32>, bool)>> {
     let mut output = HashMap::with_capacity(rowids.len());
     let mut ids: Vec<usize> = rowids.iter().copied().collect();
     ids.sort_unstable();
@@ -1205,6 +1281,57 @@ mod tests {
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(format!("{}-wal", db_path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", db_path.display()));
+    }
+
+    #[test]
+    fn search_snapshot_keeps_descriptors_and_chunked_embeddings_consistent_during_commit() {
+        let path = temp_db_path("search-snapshot");
+        let root = std::env::temp_dir().join("search-snapshot-images");
+        {
+            let mut conn = open(&path).unwrap();
+            let tx = conn.transaction().unwrap();
+            for index in 0..501 {
+                let name = format!("{index}.jpg");
+                let image = root.join(&name);
+                upsert_image(&tx, &image, &root, &name, "jpg", 100, 200, 32, 32,
+                    "original-description", "original-keywords", [1, 2, 3], 7, &[1.0, 0.0]).unwrap();
+                set_embedding(&tx, &image, &[1.0, 0.0]).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        let snapshot = open_search_snapshot(&path).unwrap();
+        let images = load_retrieval_images(&snapshot).unwrap();
+        assert!(images.iter().all(|image| image.description.is_empty() && image.keywords.is_empty()));
+        let rowids = images.iter().map(|image| image.rowid).collect();
+        let writer_path = path.clone();
+        std::thread::spawn(move || {
+            let mut conn = open(&writer_path).unwrap();
+            let tx = conn.transaction().unwrap();
+            tx.execute("UPDATE images SET description = 'new-description', keywords = 'new-keywords', width = 64, embedding = ?1", params![encode_f32_vec(&[0.0, 1.0])]).unwrap();
+            tx.commit().unwrap();
+        }).join().unwrap();
+        let old_vectors = load_embeddings_for_rowids_from_connection(&snapshot, &rowids).unwrap();
+        assert_eq!(old_vectors.len(), 501);
+        assert!(images.iter().all(|image| image.width == 32));
+        assert!(old_vectors.values().all(|(vector, _)| vector == &[1.0, 0.0]));
+        let mut session = crate::search_request::SearchSession::default();
+        let request = session.start();
+        let metadata = load_result_metadata(&snapshot, &rowids, &request).unwrap();
+        assert_eq!(metadata.len(), 501);
+        assert!(metadata.values().all(|(description, keywords)| description == "original-description" && keywords == "original-keywords"));
+        let selected = HashSet::from([images[0].rowid]);
+        assert_eq!(load_result_metadata(&snapshot, &selected, &request).unwrap().len(), 1);
+        session.cancel();
+        assert!(load_result_metadata(&snapshot, &rowids, &request).is_err());
+        assert!(snapshot.execute("DELETE FROM images", []).is_err());
+        drop(snapshot);
+        let fresh = open_search_snapshot(&path).unwrap();
+        assert!(load_search_images_from_connection(&fresh).unwrap().iter().all(|image| image.width == 64));
+        assert!(load_embeddings_for_rowids_from_connection(&fresh, &rowids).unwrap().values().all(|(vector, _)| vector == &[0.0, 1.0]));
+        drop(fresh);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
     }
 
     #[test]

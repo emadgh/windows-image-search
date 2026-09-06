@@ -92,7 +92,8 @@ impl ImageSearchApp {
                 swatch(ui, record.dominant);
                 ui.small(format!("{}×{}", record.width, record.height));
                 if let Some(score) = record.score {
-                    ui.small(format!("{:.1}%", score * 100.0));
+                    ui.small(format!("Similarity {:.3}", score))
+                        .on_hover_text("Ranking score, not a probability.");
                 }
             });
         });
@@ -195,7 +196,7 @@ impl ImageSearchApp {
 
                         let score = record
                             .score
-                            .map(|score| format!("{:.2}%", score * 100.0))
+                            .map(|score| format!("{:.3}", score))
                             .unwrap_or_else(|| "—".to_owned());
                         ui.add_sized(
                             [widths.score, 56.0],

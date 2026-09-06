@@ -8,7 +8,7 @@ People clustering is a derived, central catalog built from authoritative face em
 - Automatic People clusters live in the central session database so one identity may span multiple roots.
 - A face is addressed by `(library_id, face_id)` rather than an absolute path.
 - Automatic clustering tables are disposable/rebuildable derived state.
-- Future user edits from issue #60 (names, manual merges/splits, ignored faces, representative overrides) must be stored separately and must not be deleted by an automatic rebuild.
+- User edits (names, manual merges/splits, ignored faces, representative overrides) are stored separately and must not be deleted by an automatic rebuild. See `people-management.md` for implemented correction semantics.
 
 ## Clustering behavior
 
@@ -59,4 +59,4 @@ The People tests include in-memory clustering/reconciliation cases plus persiste
 ## Remaining #59 work
 
 1. Record practical clustering quality/performance evidence on a real multi-person library before closing #59.
-2. Build manual People management/overrides in #60 without mutating automatic clustering state.
+2. Validate the implemented manual People management and portable overrides alongside automatic rebuilds; see `people-management.md`.

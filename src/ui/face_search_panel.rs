@@ -1,51 +1,40 @@
 use super::photo_grid::{self, PhotoGridSpec, PhotoTileMode};
 use super::{ImageSearchApp, SearchMode};
-use crate::face_detection::{
-    self, yunet_production::YuNetProductionDetector, yunet_settings::FaceDetectorSettings, FaceBox,
-    FaceDetector,
-};
-use crate::face_embedding::{self, FaceEmbedder};
+use crate::external_face_query::{prepare_external_faces, ExternalFaceChoice};
+use crate::face_detection::FaceBox;
 use crate::face_search::{
     self, IndexedFaceSearchOptions, IndexedFaceSearchReport, IndexedFaceSuggestion,
 };
-use crate::face_settings::FaceEmbeddingSettings;
-use crate::face_sface_production::SFaceProductionEmbedder;
-use crate::face_similarity::{FaceEmbeddingRevision, FaceSimilarityQuery};
-use anyhow::{bail, Context, Result};
+use anyhow::Result;
 use eframe::egui;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 
 const DEFAULT_SUGGESTION_LIMIT: usize = 240;
-
-#[derive(Clone, Debug)]
-struct ExternalFaceChoice {
-    image_path: PathBuf,
-    ordinal: usize,
-    confidence: f32,
-    bbox: FaceBox,
-    query: FaceSimilarityQuery,
-}
 
 #[derive(Debug)]
 enum FaceSearchUiMessage {
     Suggestions(Result<(Vec<IndexedFaceSuggestion>, HashMap<String, String>), String>),
     ExternalPrepared {
+        id: u64,
         path: PathBuf,
         result: Result<Vec<ExternalFaceChoice>, String>,
     },
     SearchFinished {
+        id: u64,
         query: IndexedFaceSuggestion,
         report: Result<IndexedFaceSearchReport, String>,
     },
     ExternalSearchFinished {
+        id: u64,
         query: ExternalFaceChoice,
         report: Result<IndexedFaceSearchReport, String>,
     },
 }
 
 pub(super) struct FaceSearchUiState {
+    session: crate::search_request::SearchSession,
     suggestions: Vec<IndexedFaceSuggestion>,
     suggestion_names: HashMap<String, String>,
     filter_text: String,
@@ -69,6 +58,7 @@ impl Default for FaceSearchUiState {
     fn default() -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         Self {
+            session: Default::default(),
             suggestions: Vec::new(),
             suggestion_names: HashMap::new(),
             filter_text: String::new(),
@@ -92,8 +82,8 @@ impl Default for FaceSearchUiState {
 
 impl ImageSearchApp {
     pub(super) fn open_face_search(&mut self) {
+        self.cancel_visual_search();
         if self.search_mode != SearchMode::Face {
-            self.search_text.clear();
             self.similarity_results = None;
             self.query_image = None;
             self.clear_face_search_result_state();
@@ -107,6 +97,20 @@ impl ImageSearchApp {
 
     pub(super) fn face_search_active(&self) -> bool {
         self.face_search_ui.active
+    }
+
+    pub(super) fn face_search_running(&self) -> bool {
+        self.face_search_ui.searching || self.face_search_ui.external_loading
+    }
+
+    pub(super) fn cancel_face_search(&mut self) {
+        self.face_search_ui.session.cancel();
+        if self.face_search_running() {
+            self.face_search_ui.searching = false;
+            self.face_search_ui.external_loading = false;
+            self.busy = self.indexing || self.searching;
+            self.status = "Face search cancelled".to_owned();
+        }
     }
 
     pub(super) fn face_match_box(&self, path: &PathBuf) -> Option<FaceBox> {
@@ -160,8 +164,12 @@ impl ImageSearchApp {
                         }
                     }
                 }
-                FaceSearchUiMessage::ExternalPrepared { path, result } => {
+                FaceSearchUiMessage::ExternalPrepared { id, path, result } => {
+                    if !self.face_search_ui.session.finish(id) {
+                        continue;
+                    }
                     self.face_search_ui.external_loading = false;
+                    self.busy = self.indexing || self.searching;
                     self.face_search_ui.external_source = Some(path.clone());
                     self.face_search_ui.selected_external_ordinal = None;
                     match result {
@@ -187,7 +195,10 @@ impl ImageSearchApp {
                         }
                     }
                 }
-                FaceSearchUiMessage::SearchFinished { query, report } => {
+                FaceSearchUiMessage::SearchFinished { id, query, report } => {
+                    if !self.face_search_ui.session.finish(id) {
+                        continue;
+                    }
                     self.face_search_ui.searching = false;
                     self.busy = self.indexing || self.searching;
                     match report {
@@ -200,7 +211,10 @@ impl ImageSearchApp {
                         }
                     }
                 }
-                FaceSearchUiMessage::ExternalSearchFinished { query, report } => {
+                FaceSearchUiMessage::ExternalSearchFinished { id, query, report } => {
+                    if !self.face_search_ui.session.finish(id) {
+                        continue;
+                    }
                     self.face_search_ui.searching = false;
                     self.busy = self.indexing || self.searching;
                     match report {
@@ -258,9 +272,11 @@ impl ImageSearchApp {
         };
 
         let detector_settings = self.face_detector_settings_snapshot();
+        let request = self.face_search_ui.session.start();
         let embedding_settings = self.face_embedding_settings.clone();
         let tx = self.face_search_ui.tx.clone();
         self.face_search_ui.external_loading = true;
+        self.busy = true;
         self.face_search_ui.external_source = Some(path.clone());
         self.face_search_ui.external_faces.clear();
         self.face_search_ui.selected_external_ordinal = None;
@@ -268,21 +284,33 @@ impl ImageSearchApp {
         self.status = format!("Detecting faces in external query {}…", path.display());
 
         std::thread::spawn(move || {
-            let result = prepare_external_faces(&path, detector_settings, embedding_settings)
-                .map_err(|err| format!("{err:#}"));
-            let _ = tx.send(FaceSearchUiMessage::ExternalPrepared { path, result });
+            let result =
+                prepare_external_faces(&path, detector_settings, embedding_settings, &request)
+                    .map_err(|err| format!("{err:#}"));
+            let _ = tx.send(FaceSearchUiMessage::ExternalPrepared {
+                id: request.id,
+                path,
+                result,
+            });
         });
     }
 
     fn start_indexed_face_search(&mut self, query: IndexedFaceSuggestion) {
-        if self.busy || self.face_search_ui.searching {
+        if self.busy
+            || self.face_search_ui.searching
+            || self.text_search_pending
+            || self.search_text != self.text_search_observed
+            || self.people_filter_work_pending()
+        {
             return;
         }
         let roots = self.roots.clone();
         let query_root = query.root.clone();
         let face_id = query.face_id.clone();
+        let eligible = self.search_eligibility();
         let options = self.face_search_ui.options.sanitized();
         let tx = self.face_search_ui.tx.clone();
+        let request = self.face_search_ui.session.start();
 
         self.face_search_ui.searching = true;
         self.busy = true;
@@ -290,20 +318,38 @@ impl ImageSearchApp {
         self.status = "Searching indexed face identities…".to_owned();
 
         std::thread::spawn(move || {
-            let report = face_search::search_indexed_face(&roots, &query_root, &face_id, options)
-                .map_err(|err| format!("{err:#}"));
-            let _ = tx.send(FaceSearchUiMessage::SearchFinished { query, report });
+            let report = face_search::search_indexed_face_scoped(
+                &roots,
+                &query_root,
+                &face_id,
+                options,
+                Some(&request),
+                eligible.as_ref(),
+            )
+            .map_err(|err| format!("{err:#}"));
+            let _ = tx.send(FaceSearchUiMessage::SearchFinished {
+                id: request.id,
+                query,
+                report,
+            });
         });
     }
 
     fn start_external_face_search(&mut self, query: ExternalFaceChoice) {
-        if self.busy || self.face_search_ui.searching {
+        if self.busy
+            || self.face_search_ui.searching
+            || self.text_search_pending
+            || self.search_text != self.text_search_observed
+            || self.people_filter_work_pending()
+        {
             return;
         }
         let roots = self.roots.clone();
         let similarity_query = query.query.clone();
+        let eligible = self.search_eligibility();
         let options = self.face_search_ui.options.sanitized();
         let tx = self.face_search_ui.tx.clone();
+        let request = self.face_search_ui.session.start();
 
         self.face_search_ui.searching = true;
         self.busy = true;
@@ -314,9 +360,19 @@ impl ImageSearchApp {
         );
 
         std::thread::spawn(move || {
-            let report = face_search::search_embedding_query(&roots, &similarity_query, options)
-                .map_err(|err| format!("{err:#}"));
-            let _ = tx.send(FaceSearchUiMessage::ExternalSearchFinished { query, report });
+            let report = face_search::search_embedding_query_scoped(
+                &roots,
+                &similarity_query,
+                options,
+                Some(&request),
+                eligible.as_ref(),
+            )
+            .map_err(|err| format!("{err:#}"));
+            let _ = tx.send(FaceSearchUiMessage::ExternalSearchFinished {
+                id: request.id,
+                query,
+                report,
+            });
         });
     }
 
@@ -364,7 +420,6 @@ impl ImageSearchApp {
         self.face_search_ui.match_boxes = match_boxes;
         self.face_search_ui.last_rows_considered = report.rows_considered;
         self.similarity_results_revision = self.similarity_results_revision.wrapping_add(1);
-        self.similarity_results_revision = self.similarity_results_revision.wrapping_add(1);
         self.similarity_results = Some(results);
         self.query_image = Some(query_image);
         self.selected_paths.clear();
@@ -378,6 +433,9 @@ impl ImageSearchApp {
     }
 
     pub(super) fn show_face_search_sidebar(&mut self, ui: &mut egui::Ui) {
+        if self.face_search_running() && ui.button("Cancel face search / preparation").clicked() {
+            self.cancel_face_search();
+        }
         ui.horizontal_wrapped(|ui| {
             if ui
                 .add_enabled(
@@ -639,83 +697,6 @@ impl ImageSearchApp {
             ));
         }
     }
-}
-
-fn prepare_external_faces(
-    path: &Path,
-    detector_settings: FaceDetectorSettings,
-    embedding_settings: FaceEmbeddingSettings,
-) -> Result<Vec<ExternalFaceChoice>> {
-    if !path.is_file() {
-        bail!("external query image is unavailable: {}", path.display());
-    }
-    if !detector_settings.configured() || !detector_settings.model_path.is_file() {
-        bail!("configure an available YuNet model in Settings before using Face from file");
-    }
-    if !embedding_settings.configured() || !embedding_settings.model_path.is_file() {
-        bail!("configure an available SFace model in Settings before using Face from file");
-    }
-
-    let image = face_detection::decode_oriented(path)
-        .with_context(|| format!("decoding external face query {}", path.display()))?;
-    let mut detector = YuNetProductionDetector::load(&detector_settings)
-        .context("loading YuNet for external face query")?;
-    let detections = detector
-        .detect(&image)
-        .context("detecting faces in external query image")?;
-    if detections.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut embedder = SFaceProductionEmbedder::load(&embedding_settings)
-        .context("loading SFace for external face query")?;
-    let revision = FaceEmbeddingRevision {
-        model_id: embedder.model_id().to_owned(),
-        model_version: embedder.model_version().to_owned(),
-        model_cache_revision: embedder.cache_revision(),
-        schema_version: face_embedding::SCHEMA_VERSION,
-        alignment_revision: embedder.alignment_revision(),
-        dimension: embedder.embedding_dimension(),
-    };
-
-    let detected_count = detections.len();
-    let mut output = Vec::with_capacity(detected_count);
-    for (ordinal, face) in detections.into_iter().enumerate() {
-        let aligned = match embedder.align_face(&image, face.bbox, &face.landmarks) {
-            Ok(aligned) => aligned,
-            Err(_) => continue,
-        };
-        let raw = match embedder.embed(&aligned) {
-            Ok(raw) => raw,
-            Err(_) => continue,
-        };
-        let values = match face_embedding::normalize_embedding(raw, revision.dimension) {
-            Ok(values) => values,
-            Err(_) => continue,
-        };
-        let query = FaceSimilarityQuery {
-            root: PathBuf::new(),
-            library_id: "external-query".to_owned(),
-            face_id: format!("external-face-{ordinal}"),
-            relative_image_path: path.to_path_buf(),
-            revision: revision.clone(),
-            values,
-        };
-        output.push(ExternalFaceChoice {
-            image_path: path.to_path_buf(),
-            ordinal,
-            confidence: face.confidence,
-            bbox: face.bbox,
-            query,
-        });
-    }
-
-    if output.is_empty() {
-        bail!(
-            "YuNet detected {detected_count} face(s), but SFace could not create a searchable embedding for any of them"
-        );
-    }
-    Ok(output)
 }
 
 fn truncate(value: &str, max_chars: usize) -> String {

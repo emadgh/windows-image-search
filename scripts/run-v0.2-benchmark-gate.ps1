@@ -4,6 +4,13 @@ param(
     [string]$Executable = ".\windows-image-search.exe",
 
     [Parameter()]
+    [string]$BenchmarkWorkspace = "",
+
+    [Parameter()]
+    [ValidateSet('library-profile', 'ann', 'clip-preview', 'clip-runtime', 'image-models', 'material-texture', 'preview-vector-bank')]
+    [string[]]$OnlyBenchmarks = @(),
+
+    [Parameter()]
     [string]$OutputDirectory = ".\benchmark-results",
 
     [Parameter()]
@@ -205,6 +212,9 @@ function Invoke-DiagnosticBenchmark {
         [string]$ResultDirectory
     )
 
+    if (-not [string]::IsNullOrWhiteSpace($BenchmarkWorkspace) -and $Name -ne "isolation-probe") {
+        $Arguments = @("--benchmark-workspace", $BenchmarkWorkspace) + $Arguments
+    }
     $stdoutPath = Join-Path $ResultDirectory "$Name.stdout.txt"
     $stderrPath = Join-Path $ResultDirectory "$Name.stderr.txt"
     $combinedPath = Join-Path $ResultDirectory "$Name.txt"
@@ -346,8 +356,19 @@ $gateStartedAt = Get-Date
 $systemInfo = Get-SystemSnapshot
 $systemInfo | ConvertTo-Json -Depth 8 | Set-Content -Path (Join-Path $resultDirectory "system-info.json") -Encoding utf8
 
-$versionLines = @(& $executablePath --version 2>&1)
-$versionExitCode = $LASTEXITCODE
+if (-not [string]::IsNullOrWhiteSpace($BenchmarkWorkspace)) {
+    $BenchmarkWorkspace = (Resolve-Path -LiteralPath $BenchmarkWorkspace -ErrorAction Stop).Path
+    $invalidWorkspace = Join-Path $resultDirectory "nonexistent-isolation-probe"
+    $probe = Invoke-DiagnosticBenchmark -Name "isolation-probe" -Arguments @("--version", "--benchmark-workspace", $invalidWorkspace) -ExecutablePath $executablePath -ResultDirectory $resultDirectory
+    $probeText = Get-Content -LiteralPath (Join-Path $resultDirectory "isolation-probe.stderr.txt") -Raw
+    if ($probe.exit_code -eq 0 -or $probeText -notmatch "Benchmark isolation") {
+        throw "Executable did not enforce benchmark isolation. No benchmark was started."
+    }
+}
+$versionResult = Invoke-DiagnosticBenchmark -Name "version" -Arguments @("--version") -ExecutablePath $executablePath -ResultDirectory $resultDirectory
+$versionExitCode = $versionResult.exit_code
+if ($versionExitCode -ne 0) { throw "Version/isolation preflight failed" }
+$versionLines = @(Get-Content -LiteralPath (Join-Path $resultDirectory "version.stdout.txt"))
 $versionLines | Set-Content -Path (Join-Path $resultDirectory "version.txt") -Encoding utf8
 $appVersion = if ($versionLines.Count -gt 0) { [string]$versionLines[0] } else { "unknown" }
 
@@ -359,6 +380,16 @@ $benchmarks = @(
     [pscustomobject]@{ Name = "image-models"; Arguments = @("--benchmark-image-models", [string]$ImageModelQueries) },
     [pscustomobject]@{ Name = "material-texture"; Arguments = @("--benchmark-material-texture", [string]$TextureSamples) }
 )
+
+if ($OnlyBenchmarks -contains 'preview-vector-bank') {
+    if ([string]::IsNullOrWhiteSpace($BenchmarkWorkspace)) {
+        throw 'Preview vector bank requires an isolated BenchmarkWorkspace.'
+    }
+    $benchmarks = @([pscustomobject]@{ Name = 'preview-vector-bank'; Arguments = @('--benchmark-build-preview-vectors') }) + $benchmarks
+}
+if ($OnlyBenchmarks.Count -gt 0) {
+    $benchmarks = @($benchmarks | Where-Object { $OnlyBenchmarks -contains $_.Name })
+}
 
 $materialEvalRequested = -not [string]::IsNullOrWhiteSpace($MaterialEvalManifest)
 $resolvedMaterialEvalManifest = $null
@@ -417,6 +448,8 @@ $manifest = [pscustomobject]@{
     generated_at = $gateFinishedAt.ToString("o")
     gate_started_at = $gateStartedAt.ToString("o")
     gate_wall_time_seconds = [math]::Round(($gateFinishedAt - $gateStartedAt).TotalSeconds, 3)
+    benchmark_workspace = $BenchmarkWorkspace
+    selected_benchmarks = @($benchmarks | ForEach-Object { $_.Name })
     executable = $executablePath
     application_version = $appVersion
     version_exit_code = $versionExitCode
@@ -427,6 +460,7 @@ $manifest = [pscustomobject]@{
     }
     memory_sampling = [pscustomobject]@{
         process_poll_interval_ms = 200
+        sampling_note = 'Nominal interval; synchronous GPU counter collection may delay polling. Short-lived process peaks may be missed.'
         gpu_poll_interval_seconds = 1
         working_set = "Process.WorkingSet64/PeakWorkingSet64"
         private_memory = "sampled Process.PrivateMemorySize64"
@@ -489,3 +523,4 @@ Write-Host "Succeeded: $($results.Count - $failed.Count)/$($results.Count)"
 if ($versionExitCode -ne 0 -or $failed.Count -gt 0) {
     exit 1
 }
+exit 0

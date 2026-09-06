@@ -221,6 +221,11 @@ pub fn benchmark(db_path: &Path, model_cache: &Path, requested_queries: usize) -
     writeln!(report, "successful_models={successful_models}")?;
     writeln!(
         report,
+        "model_comparison_complete={}",
+        successful_models == MODELS.len()
+    )?;
+    writeln!(
+        report,
         "model_cache_bytes_after={}",
         directory_size(model_cache)
     )?;
