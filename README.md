@@ -2,7 +2,9 @@
 
 A native, local-first image index and visual search application for Windows, written in Rust.
 
-## Current features (v0.3 alpha)
+> **v0.3.0-beta.1 — Beta / testing preview.** Validation is incomplete and tests are not final. Manual UI acceptance, labeled material/face quality evaluation, and some hardware/model gates remain outstanding. See [beta release notes](docs/releases/v0.3.0-beta.1.md).
+
+## Current features (v0.3 beta)
 
 - Configure one or more folders to index recursively.
 - Portable per-root indexes under `<root>/.imagesearch`, suitable for external/removable drives and drive-letter changes.

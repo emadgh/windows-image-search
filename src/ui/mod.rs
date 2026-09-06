@@ -1,3 +1,4 @@
+mod collection_statistics;
 mod collections;
 mod collections_window;
 mod duplicate_review;
