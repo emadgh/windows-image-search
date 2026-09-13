@@ -1,14 +1,22 @@
 use crate::{portable, thumbnail_cache};
 use anyhow::{bail, Context, Result};
 use image::codecs::jpeg::JpegEncoder;
-use image::{DynamicImage, GrayImage, RgbImage};
+use image::{DynamicImage, GrayImage, ImageFormat, RgbImage};
 use jpeg_decoder::{Decoder, PixelFormat};
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "libvips-backend")]
+use std::sync::OnceLock;
 use std::time::UNIX_EPOCH;
+
+#[cfg(feature = "libvips-backend")]
+use rs_vips::{
+    voption::{Setter, VOption},
+    Vips, VipsImage,
+};
 
 pub const PREVIEW_EDGE: u32 = 2048;
 pub const PREVIEW_REVISION: i64 = 1;
@@ -17,6 +25,21 @@ const JPEG_QUALITY: u8 = 88;
 const MAX_DECODED_BYTES: usize = 96 * 1024 * 1024;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoundedBackend {
+    JpegScaledDecoder,
+    Libvips,
+}
+
+impl BoundedBackend {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::JpegScaledDecoder => "scaled JPEG decoder",
+            Self::Libvips => "libvips",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct PreviewAsset {
     pub path: PathBuf,
@@ -24,6 +47,7 @@ pub struct PreviewAsset {
     pub source_width: u32,
     pub source_height: u32,
     pub reused: bool,
+    pub backend: Option<BoundedBackend>,
 }
 
 pub fn cache_dir(root: &Path) -> PathBuf {
@@ -43,8 +67,7 @@ pub fn load_or_build(
     source_size: u64,
     source_modified: i64,
 ) -> Result<PreviewAsset> {
-    ensure_jpeg(source)?;
-    let (source_width, source_height) = jpeg_dimensions(source)?;
+    let (source_width, source_height) = source_dimensions(source)?;
     let expected = cache_path_for_state(root, source, source_size, source_modified)?;
 
     if let Some(image) = load_valid_derivative(&expected) {
@@ -56,11 +79,21 @@ pub fn load_or_build(
             source_width,
             source_height,
             reused: true,
+            backend: None,
         });
     }
 
-    let image = decode_jpeg_bounded(source)?;
-    let bounded = DynamicImage::ImageRgb8(image.thumbnail(PREVIEW_EDGE, PREVIEW_EDGE).to_rgb8());
+    let backend = bounded_backend_for(source)?;
+    let image = decode_bounded(source, backend)?;
+    if image.width() > PREVIEW_EDGE || image.height() > PREVIEW_EDGE {
+        bail!(
+            "{} returned an image larger than the {} px preview ceiling for {}",
+            backend.label(),
+            PREVIEW_EDGE,
+            source.display()
+        );
+    }
+    let bounded = DynamicImage::ImageRgb8(image.to_rgb8());
     write_derivative(&expected, &bounded)?;
     seed_ui_thumbnail(root, source, &bounded);
     cleanup_source_dir_except(&expected)?;
@@ -71,6 +104,7 @@ pub fn load_or_build(
         source_width,
         source_height,
         reused: false,
+        backend: Some(backend),
     })
 }
 
@@ -98,19 +132,52 @@ pub fn remove_source_cache(root: &Path, source: &Path) -> Result<()> {
     Ok(())
 }
 
-fn ensure_jpeg(source: &Path) -> Result<()> {
-    let extension = source
+pub fn bounded_backend_for(source: &Path) -> Result<BoundedBackend> {
+    match source_extension(source).as_str() {
+        "jpg" | "jpeg" => Ok(BoundedBackend::JpegScaledDecoder),
+        "png" | "tif" | "tiff" => {
+            #[cfg(feature = "libvips-backend")]
+            {
+                Ok(BoundedBackend::Libvips)
+            }
+            #[cfg(not(feature = "libvips-backend"))]
+            {
+                bail!(
+                    "bounded preview for {} requires the libvips-backend feature; refusing unsafe full-resolution decode",
+                    source.display()
+                )
+            }
+        }
+        extension => bail!(
+            "bounded preview does not support .{} sources: {}",
+            if extension.is_empty() { "<none>" } else { extension },
+            source.display()
+        ),
+    }
+}
+
+fn source_extension(source: &Path) -> String {
+    source
         .extension()
         .and_then(|value| value.to_str())
         .unwrap_or_default()
-        .to_ascii_lowercase();
-    if extension != "jpg" && extension != "jpeg" {
-        bail!(
-            "bounded oversized preview is currently supported for JPEG only; refusing full decode of {}",
-            source.display()
-        );
+        .to_ascii_lowercase()
+}
+
+fn source_dimensions(source: &Path) -> Result<(u32, u32)> {
+    match source_extension(source).as_str() {
+        "jpg" | "jpeg" => jpeg_dimensions(source),
+        "png" | "tif" | "tiff" => image::image_dimensions(source)
+            .with_context(|| format!("reading image header dimensions {}", source.display())),
+        _ => bail!("unsupported oversized image format: {}", source.display()),
     }
-    Ok(())
+}
+
+fn decode_bounded(source: &Path, backend: BoundedBackend) -> Result<DynamicImage> {
+    match backend {
+        BoundedBackend::JpegScaledDecoder => decode_jpeg_bounded(source),
+        BoundedBackend::Libvips => decode_with_libvips(source),
+    }
 }
 
 fn jpeg_dimensions(source: &Path) -> Result<(u32, u32)> {
@@ -165,6 +232,60 @@ fn decode_jpeg_bounded(source: &Path) -> Result<DynamicImage> {
             "bounded oversized JPEG pixel format {other:?} is not supported; refusing unsafe fallback"
         ),
     }
+}
+
+#[cfg(feature = "libvips-backend")]
+fn decode_with_libvips(source: &Path) -> Result<DynamicImage> {
+    ensure_libvips()?;
+    let filename = source
+        .to_str()
+        .with_context(|| format!("libvips requires a UTF-8 source path: {}", source.display()))?;
+    let edge = i32::try_from(PREVIEW_EDGE).context("preview edge exceeds libvips integer range")?;
+    let thumbnail = VipsImage::thumbnail_with_opts(
+        filename,
+        edge,
+        VOption::new().set("height", edge),
+    )
+    .with_context(|| format!("libvips bounded thumbnail failed for {}", source.display()))?;
+    let width = thumbnail.get_width();
+    let height = thumbnail.get_height();
+    if width <= 0 || height <= 0 {
+        bail!("libvips returned invalid thumbnail dimensions {width}x{height}");
+    }
+    if width > edge || height > edge {
+        bail!(
+            "libvips returned {width}x{height}, above the {PREVIEW_EDGE}px bounded-preview ceiling"
+        );
+    }
+    let encoded = thumbnail
+        .jpegsave_buffer_with_opts(VOption::new().set("q", JPEG_QUALITY as i32))
+        .with_context(|| format!("encoding libvips thumbnail for {}", source.display()))?;
+    image::load_from_memory_with_format(&encoded, ImageFormat::Jpeg)
+        .with_context(|| format!("decoding bounded libvips output for {}", source.display()))
+}
+
+#[cfg(feature = "libvips-backend")]
+fn ensure_libvips() -> Result<()> {
+    static INITIALIZED: OnceLock<std::result::Result<(), String>> = OnceLock::new();
+    let result = INITIALIZED.get_or_init(|| {
+        Vips::init("windows-image-search")
+            .map(|_| {
+                Vips::concurrency_set(2);
+            })
+            .map_err(|err| err.to_string())
+    });
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => bail!("libvips initialization failed: {error}"),
+    }
+}
+
+#[cfg(not(feature = "libvips-backend"))]
+fn decode_with_libvips(source: &Path) -> Result<DynamicImage> {
+    bail!(
+        "libvips backend is unavailable for {}; rebuild with --features libvips-backend",
+        source.display()
+    )
 }
 
 fn load_valid_derivative(path: &Path) -> Option<DynamicImage> {
@@ -312,9 +433,11 @@ mod tests {
 
         let first = load_or_build(&root, &source, 640_000_000, 100).unwrap();
         assert!(!first.reused);
+        assert_eq!(first.backend, Some(BoundedBackend::JpegScaledDecoder));
         assert!(first.path.is_file());
         let second = load_or_build(&root, &source, 640_000_000, 100).unwrap();
         assert!(second.reused);
+        assert_eq!(second.backend, None);
         assert_eq!(first.path, second.path);
 
         let third = load_or_build(&root, &source, 640_000_001, 101).unwrap();
@@ -325,18 +448,52 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_oversized_format_fails_without_fallback() {
-        let root = temp_root("unsupported");
-        std::fs::create_dir_all(&root).unwrap();
-        let source = root.join("large.png");
-        DynamicImage::ImageRgb8(ImageBuffer::from_pixel(8, 8, Rgb([1, 2, 3])))
+    fn jpeg_keeps_existing_scaled_decoder_backend() {
+        assert_eq!(
+            bounded_backend_for(Path::new("large.JPEG")).unwrap(),
+            BoundedBackend::JpegScaledDecoder
+        );
+    }
+
+    #[cfg(not(feature = "libvips-backend"))]
+    #[test]
+    fn png_and_tiff_fail_closed_without_libvips_feature() {
+        for source in ["large.png", "large.tif", "large.tiff"] {
+            let err = bounded_backend_for(Path::new(source))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("libvips-backend"));
+            assert!(err.contains("refusing unsafe full-resolution decode"));
+        }
+    }
+
+    #[cfg(feature = "libvips-backend")]
+    #[test]
+    fn png_and_tiff_select_libvips_backend() {
+        for source in ["large.png", "large.tif", "large.tiff"] {
+            assert_eq!(
+                bounded_backend_for(Path::new(source)).unwrap(),
+                BoundedBackend::Libvips
+            );
+        }
+    }
+
+    #[cfg(feature = "libvips-backend")]
+    #[test]
+    fn libvips_builds_bounded_png_preview_and_thumbnail_cache() {
+        let root = temp_root("libvips-png");
+        std::fs::create_dir_all(root.join("images")).unwrap();
+        let source = root.join("images").join("large.png");
+        DynamicImage::ImageRgb8(ImageBuffer::from_pixel(3000, 1500, Rgb([20, 40, 60])))
             .save(&source)
             .unwrap();
-        let err = load_or_build(&root, &source, 640_000_000, 1)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("JPEG only"));
-        assert!(err.contains("refusing full decode"));
+        let meta = std::fs::metadata(&source).unwrap();
+        let asset = load_or_build(&root, &source, meta.len(), modified_seconds(&meta)).unwrap();
+        assert_eq!(asset.backend, Some(BoundedBackend::Libvips));
+        assert!(asset.image.width() <= PREVIEW_EDGE);
+        assert!(asset.image.height() <= PREVIEW_EDGE);
+        assert!(asset.path.is_file());
+        assert!(thumbnail_cache::load_cached_for_root(&root, &source).is_some());
         let _ = std::fs::remove_dir_all(root);
     }
 
