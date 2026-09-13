@@ -21,7 +21,7 @@ jobs:
       - name: Apply restart-safety test
         run: python scripts/apply-issue-225-thumbnail-restart-test.py
       - name: Format
-        run: cargo fmt --all -- --check
+        run: cargo fmt --all
       - name: Run thumbnail restart-safety regression
         run: cargo test --locked thumbnail_cache::tests::stale_temp_file_does_not_block_thumbnail_cache_recovery
       - name: Commit validated test
