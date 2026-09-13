@@ -1,0 +1,38 @@
+name: Issue 225 cache fixes
+
+on:
+  push:
+    branches: [feat/225-libvips-bounded-previews]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/225-libvips-bounded-previews
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply bounded JPEG and cache fixes
+        run: python scripts/apply-issue-225-cache-fixes.py
+      - name: Format
+        run: cargo fmt --all
+      - name: Check default configuration
+        run: cargo check --all-targets --locked
+      - name: Run affected default tests
+        run: cargo test --locked oversized_preview::tests::valid_derivative_is_reused_and_changed_state_invalidates_old_asset ui::image_preview::tests::bounded_preview_can_be_built_on_demand_off_the_ui_path thumbnail_cache::tests::decoded_image_can_seed_and_reload_512px_cache
+      - name: Commit fixes
+        shell: bash
+        run: |
+          if ! git diff --quiet -- src/oversized_preview.rs src/thumbnail_cache.rs src/ui/image_preview.rs; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add src/oversized_preview.rs src/thumbnail_cache.rs src/ui/image_preview.rs
+            git commit -m "Fix bounded JPEG resize and atomic cache commits"
+            git push origin HEAD:feat/225-libvips-bounded-previews
+          fi
