@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   LIBVIPS_VERSION: 8.18.6
@@ -20,6 +20,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref }}
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -87,6 +89,17 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Cargo check without libvips
         run: cargo check --all-targets
+      - name: Commit normalization to draft branch
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        shell: bash
+        run: |
+          if ! git diff --quiet -- Cargo.lock src/oversized_preview.rs src/thumbnail_cache.rs src/ui/image_preview.rs; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add Cargo.lock src/oversized_preview.rs src/thumbnail_cache.rs src/ui/image_preview.rs
+            git commit -m "Normalize issue 225 Rust sources and lockfile"
+            git push origin HEAD:${GITHUB_HEAD_REF}
+          fi
       - name: Upload normalized sources and lockfile
         if: always()
         uses: actions/upload-artifact@v4
