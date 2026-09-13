@@ -47,22 +47,29 @@ jobs:
         shell: pwsh
         run: |
           $env:PATH = "$env:VIPS_BIN_DIR;$env:PATH"
+          if (-not (Test-Path (Join-Path $env:VIPS_BIN_DIR 'libvips-42.dll'))) { throw 'libvips-42.dll missing from VIPS_BIN_DIR' }
+          where.exe libvips-42.dll
           cargo check --all-targets --locked --features libvips-backend
       - name: Libvips bounded PNG and TIFF regression
         shell: pwsh
         run: |
           $env:PATH = "$env:VIPS_BIN_DIR;$env:PATH"
-          cargo test --locked --features libvips-backend oversized_preview::tests::feature_builds_bounded_png_and_tiff_previews
+          if (-not (Test-Path (Join-Path $env:VIPS_BIN_DIR 'libvips-42.dll'))) { throw 'libvips-42.dll missing from VIPS_BIN_DIR' }
+          where.exe libvips-42.dll
+          Get-ChildItem -LiteralPath $env:VIPS_BIN_DIR -File -Filter '*.dll' | Select-Object -First 20 -ExpandProperty Name
+          cargo test --locked --features libvips-backend oversized_preview::tests::libvips_builds_bounded_png_and_tiff_previews -- --exact --nocapture
       - name: Libvips decode failure regression
         shell: pwsh
         run: |
           $env:PATH = "$env:VIPS_BIN_DIR;$env:PATH"
-          cargo test --locked --features libvips-backend oversized_preview::tests::corrupt_png_returns_error_without_committing_derivative
+          where.exe libvips-42.dll
+          cargo test --locked --features libvips-backend oversized_preview::tests::corrupt_png_returns_error_without_committing_derivative -- --exact --nocapture
       - name: Libvips JPEG orientation regression
         shell: pwsh
         run: |
           $env:PATH = "$env:VIPS_BIN_DIR;$env:PATH"
-          cargo test --locked --features libvips-backend oversized_preview::tests::bounded_jpeg_applies_exif_orientation_without_full_decode
+          where.exe libvips-42.dll
+          cargo test --locked --features libvips-backend oversized_preview::tests::bounded_jpeg_applies_exif_orientation_without_full_decode -- --exact --nocapture
       - name: Commit validated source
         shell: bash
         run: |
