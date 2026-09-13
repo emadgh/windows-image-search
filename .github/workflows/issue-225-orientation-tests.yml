@@ -1,0 +1,58 @@
+name: Issue 225 orientation validation
+
+on:
+  push:
+    branches: [feat/225-libvips-bounded-previews]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  LIBVIPS_VERSION: 8.18.6
+
+jobs:
+  apply:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/225-libvips-bounded-previews
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply orientation/test migration
+        run: python scripts/apply-issue-225-orientation-tests.py
+      - name: Format
+        run: cargo fmt --all
+      - name: Check default configuration
+        run: cargo check --all-targets --locked
+      - name: JPEG orientation test
+        run: cargo test --locked oversized_preview::tests::bounded_jpeg_applies_exif_orientation_without_full_decode
+      - name: Install libvips
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'libvips.zip'
+          $root = Join-Path $env:RUNNER_TEMP 'libvips'
+          $url = "https://github.com/libvips/build-win64-mxe/releases/download/v$env:LIBVIPS_VERSION/vips-dev-x64-web-$env:LIBVIPS_VERSION.zip"
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          Expand-Archive -LiteralPath $archive -DestinationPath $root -Force
+          $importLibrary = Get-ChildItem -LiteralPath $root -Recurse -File -Filter 'libvips.lib' | Select-Object -First 1
+          $runtimeDll = Get-ChildItem -LiteralPath $root -Recurse -File -Filter 'libvips-42.dll' | Select-Object -First 1
+          if (-not $importLibrary -or -not $runtimeDll) { throw 'libvips files not found' }
+          "VIPS_LIB_DIR=$($importLibrary.Directory.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $runtimeDll.Directory.FullName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Check and test with libvips
+        run: |
+          cargo check --all-targets --locked --features libvips-backend
+          cargo test --locked --features libvips-backend oversized_preview::tests::corrupt_png_returns_error_without_committing_derivative
+      - name: Commit validated source
+        shell: bash
+        run: |
+          if ! git diff --quiet -- src/oversized_preview.rs; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add src/oversized_preview.rs
+            git commit -m "Apply EXIF orientation in bounded JPEG previews"
+            git push origin HEAD:feat/225-libvips-bounded-previews
+          fi
