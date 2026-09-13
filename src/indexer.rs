@@ -1660,7 +1660,7 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("resized preview is mandatory"));
+        assert!(err.contains("bounded preview is mandatory"));
         assert!(!err.contains("opening"));
     }
 
