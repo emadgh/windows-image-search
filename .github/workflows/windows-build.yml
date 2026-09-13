@@ -81,10 +81,24 @@ jobs:
               throw "$file uses ProcessStartInfo.ArgumentList, which is unavailable on Windows PowerShell 5.1."
             }
           }
+      - name: Normalize Rust formatting for draft validation
+        run: cargo fmt --all
       - name: Format check
         run: cargo fmt --all -- --check
       - name: Cargo check without libvips
         run: cargo check --all-targets
+      - name: Upload normalized sources and lockfile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-225-normalized-${{ github.sha }}
+          path: |
+            Cargo.lock
+            src/oversized_preview.rs
+            src/thumbnail_cache.rs
+            src/ui/image_preview.rs
+          if-no-files-found: error
+          retention-days: 3
       - name: Tests without libvips
         run: cargo test --all-targets
       - name: Install libvips runtime and import library
