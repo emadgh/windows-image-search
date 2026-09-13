@@ -134,6 +134,29 @@ jobs:
           Copy-Item README.md artifact/
           Copy-Item LICENSE artifact/
           git rev-parse HEAD | Set-Content artifact/COMMIT.txt -Encoding ascii
+          if (-not (Test-Path 'artifact/libvips-42.dll')) {
+            throw 'Windows test bundle is missing libvips-42.dll.'
+          }
+      - name: Smoke test bundled runtime without external libvips
+        shell: pwsh
+        run: |
+          $bundleDir = (Resolve-Path -LiteralPath artifact).Path
+          $externalVips = (Resolve-Path -LiteralPath $env:VIPS_BIN_DIR).Path.TrimEnd('\')
+          $env:PATH = (($env:PATH -split ';') | Where-Object {
+            $_ -and $_.TrimEnd('\') -ne $externalVips
+          }) -join ';'
+          if (($env:PATH -split ';') | Where-Object { $_.TrimEnd('\') -eq $externalVips }) {
+            throw 'External libvips directory is still present in PATH during bundle smoke test.'
+          }
+          Push-Location $bundleDir
+          try {
+            & .\windows-image-search.exe --version
+            if ($LASTEXITCODE -ne 0) {
+              throw "Bundled executable failed without external libvips PATH (exit $LASTEXITCODE)."
+            }
+          } finally {
+            Pop-Location
+          }
       - name: Upload Windows test bundle
         uses: actions/upload-artifact@v4
         with:
