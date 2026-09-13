@@ -41,15 +41,28 @@ jobs:
           $runtimeDll = Get-ChildItem -LiteralPath $root -Recurse -File -Filter 'libvips-42.dll' | Select-Object -First 1
           if (-not $importLibrary -or -not $runtimeDll) { throw 'libvips files not found' }
           "VIPS_LIB_DIR=$($importLibrary.Directory.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "VIPS_BIN_DIR=$($runtimeDll.Directory.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           $runtimeDll.Directory.FullName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
       - name: Check libvips configuration
-        run: cargo check --all-targets --locked --features libvips-backend
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:VIPS_BIN_DIR;$env:PATH"
+          cargo check --all-targets --locked --features libvips-backend
       - name: Libvips bounded PNG and TIFF regression
-        run: cargo test --locked --features libvips-backend oversized_preview::tests::libvips_backed_png_and_tiff_are_bounded
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:VIPS_BIN_DIR;$env:PATH"
+          cargo test --locked --features libvips-backend oversized_preview::tests::feature_builds_bounded_png_and_tiff_previews
       - name: Libvips decode failure regression
-        run: cargo test --locked --features libvips-backend oversized_preview::tests::corrupt_png_returns_error_without_committing_derivative
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:VIPS_BIN_DIR;$env:PATH"
+          cargo test --locked --features libvips-backend oversized_preview::tests::corrupt_png_returns_error_without_committing_derivative
       - name: Libvips JPEG orientation regression
-        run: cargo test --locked --features libvips-backend oversized_preview::tests::bounded_jpeg_applies_exif_orientation_without_full_decode
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:VIPS_BIN_DIR;$env:PATH"
+          cargo test --locked --features libvips-backend oversized_preview::tests::bounded_jpeg_applies_exif_orientation_without_full_decode
       - name: Commit validated source
         shell: bash
         run: |
