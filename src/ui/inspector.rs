@@ -14,7 +14,10 @@ impl ImageSearchApp {
             .min_width(theme::INSPECTOR_MIN)
             .max_width(theme::INSPECTOR_MAX)
             .show(ctx, |ui| {
-                ui.heading("Inspector");
+                ui.horizontal(|ui| {
+                    ui.heading("Inspector");
+                    ui.weak("Shift+Space");
+                });
                 ui.separator();
 
                 if self.selected_paths.len() > 1 {

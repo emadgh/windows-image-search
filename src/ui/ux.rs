@@ -4,6 +4,19 @@ use std::path::PathBuf;
 
 impl ImageSearchApp {
     pub(super) fn handle_result_shortcuts(&mut self, ctx: &egui::Context) {
+        if self.preview_open() {
+            match ctx.input(preview_shortcut) {
+                Some(PreviewShortcut::Close) => self.close_image_preview(),
+                Some(PreviewShortcut::Previous) => self.navigate_image_preview(-1, ctx),
+                Some(PreviewShortcut::Next) => self.navigate_image_preview(1, ctx),
+                Some(PreviewShortcut::ToggleInspector) => {
+                    self.inspector_open = !self.inspector_open;
+                }
+                None => {}
+            }
+            return;
+        }
+
         if ctx.wants_keyboard_input()
             || self.settings_open
             || self.collections_open
@@ -37,9 +50,33 @@ impl ImageSearchApp {
             return;
         }
 
-        if ctx.input(|input| input.key_pressed(egui::Key::Space)) {
-            if !self.selected_paths.is_empty() {
-                self.inspector_open = !self.inspector_open;
+        if ctx.input(|input| {
+            input.modifiers.shift
+                && !input.modifiers.ctrl
+                && !input.modifiers.alt
+                && !input.modifiers.command
+                && input.key_pressed(egui::Key::Space)
+        }) {
+            self.inspector_open = !self.inspector_open;
+            return;
+        }
+
+        if ctx.input(|input| {
+            !input.modifiers.shift
+                && !input.modifiers.ctrl
+                && !input.modifiers.alt
+                && !input.modifiers.command
+                && input.key_pressed(egui::Key::Space)
+        }) {
+            let visible = self.visible_result_paths();
+            let target = self
+                .focused_result
+                .as_ref()
+                .filter(|path| visible.contains(path))
+                .cloned()
+                .or_else(|| self.selected_path().filter(|path| visible.contains(path)));
+            if let Some(path) = target {
+                self.open_image_preview(path, ctx);
             }
             return;
         }
@@ -298,7 +335,7 @@ impl ImageSearchApp {
     }
 }
 
-fn navigation_target(current: Option<usize>, delta: isize, len: usize) -> Option<usize> {
+pub(super) fn navigation_target(current: Option<usize>, delta: isize, len: usize) -> Option<usize> {
     if len == 0 {
         return None;
     }
@@ -308,9 +345,43 @@ fn navigation_target(current: Option<usize>, delta: isize, len: usize) -> Option
     Some((current as isize + delta).clamp(0, len as isize - 1) as usize)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PreviewShortcut {
+    Close,
+    Previous,
+    Next,
+    ToggleInspector,
+}
+
+fn preview_shortcut(input: &egui::InputState) -> Option<PreviewShortcut> {
+    if input.key_pressed(egui::Key::Space)
+        && input.modifiers.shift
+        && !input.modifiers.ctrl
+        && !input.modifiers.alt
+        && !input.modifiers.command
+    {
+        Some(PreviewShortcut::ToggleInspector)
+    } else if input.key_pressed(egui::Key::Escape)
+        || (input.key_pressed(egui::Key::Space)
+            && !input.modifiers.shift
+            && !input.modifiers.ctrl
+            && !input.modifiers.alt
+            && !input.modifiers.command)
+    {
+        Some(PreviewShortcut::Close)
+    } else if input.key_pressed(egui::Key::ArrowLeft) {
+        Some(PreviewShortcut::Previous)
+    } else if input.key_pressed(egui::Key::ArrowRight) {
+        Some(PreviewShortcut::Next)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::navigation_target;
+    use super::{navigation_target, preview_shortcut, PreviewShortcut};
+    use eframe::egui;
 
     #[test]
     fn first_arrow_focuses_first_result() {
@@ -326,5 +397,43 @@ mod tests {
         assert_eq!(navigation_target(Some(3), 4, 8), Some(7));
         assert_eq!(navigation_target(Some(3), -4, 8), Some(0));
         assert_eq!(navigation_target(Some(0), 1, 0), None);
+    }
+
+    #[test]
+    fn preview_keys_close_and_navigate_without_shift_space_collision() {
+        let mut input = egui::InputState::default();
+        input.events.push(egui::Event::Key {
+            key: egui::Key::ArrowLeft,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        assert_eq!(preview_shortcut(&input), Some(PreviewShortcut::Previous));
+
+        input.events.clear();
+        input.modifiers = egui::Modifiers::SHIFT;
+        input.events.push(egui::Event::Key {
+            key: egui::Key::Space,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::SHIFT,
+        });
+        assert_eq!(
+            preview_shortcut(&input),
+            Some(PreviewShortcut::ToggleInspector)
+        );
+
+        input.events.clear();
+        input.modifiers = egui::Modifiers::NONE;
+        input.events.push(egui::Event::Key {
+            key: egui::Key::Space,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        assert_eq!(preview_shortcut(&input), Some(PreviewShortcut::Close));
     }
 }
