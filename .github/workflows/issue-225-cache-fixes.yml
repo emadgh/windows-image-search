@@ -25,7 +25,14 @@ jobs:
       - name: Check default configuration
         run: cargo check --all-targets --locked
       - name: Run affected default tests
-        run: cargo test --locked oversized_preview::tests::valid_derivative_is_reused_and_changed_state_invalidates_old_asset ui::image_preview::tests::bounded_preview_can_be_built_on_demand_off_the_ui_path thumbnail_cache::tests::decoded_image_can_seed_and_reload_512px_cache
+        shell: pwsh
+        run: |
+          cargo test --locked oversized_preview::tests::valid_derivative_is_reused_and_changed_state_invalidates_old_asset
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked ui::image_preview::tests::bounded_preview_can_be_built_on_demand_off_the_ui_path
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked thumbnail_cache::tests::decoded_image_can_seed_and_reload_512px_cache
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Commit fixes
         shell: bash
         run: |
