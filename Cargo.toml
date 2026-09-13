@@ -7,6 +7,10 @@ license = "MIT"
 repository = "https://github.com/emadgh/windows-image-search"
 default-run = "windows-image-search"
 
+[features]
+default = []
+libvips-backend = ["dep:rs-vips"]
+
 [dependencies]
 anyhow = "1"
 chrono = { version = "0.4", default-features = true }
@@ -23,6 +27,7 @@ open = "5"
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["directml"] }
 rayon = "1.10"
 rfd = "0.15"
+rs-vips = { version = "0.7", optional = true }
 rusqlite = { version = "0.37", features = ["bundled"] }
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
