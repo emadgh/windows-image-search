@@ -273,12 +273,8 @@ fn decode_preview(path: &Path, roots: &[PathBuf]) -> Result<DecodedPreview> {
         .with_context(|| format!("reading image metadata {}", path.display()))?;
     let dimensions = image::image_dimensions(path)
         .with_context(|| format!("reading image dimensions {}", path.display()))?;
-    let decoded_bytes = u64::from(dimensions.0)
-        .saturating_mul(u64::from(dimensions.1))
-        // Some supported inputs decode to 16-bit RGBA before conversion.
-        .saturating_mul(8);
-    let direct = metadata.len() <= settings::DIRECT_DECODE_MAX_FILE_SIZE_BYTES
-        && decoded_bytes <= MAX_DIRECT_DECODE_BYTES;
+    let direct =
+        !oversized_preview::requires_bounded_dimensions(metadata.len(), dimensions.0, dimensions.1);
 
     let (image, quality) = if direct {
         let (image, _) = face_detection::decode_oriented_with_orientation(path)?;

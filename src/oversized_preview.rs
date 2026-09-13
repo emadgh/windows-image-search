@@ -1,4 +1,4 @@
-use crate::{portable, thumbnail_cache};
+use crate::{portable, settings, thumbnail_cache};
 use anyhow::{bail, Context, Result};
 use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, GrayImage, ImageFormat, RgbImage};
@@ -22,6 +22,8 @@ pub const PREVIEW_EDGE: u32 = 2048;
 pub const PREVIEW_REVISION: i64 = 1;
 pub const CACHE_DIR_NAME: &str = "oversized-previews";
 const JPEG_QUALITY: u8 = 88;
+pub const MAX_DIRECT_DECODE_BYTES: u64 = 256 * 1024 * 1024;
+const ESTIMATED_DECODE_BYTES_PER_PIXEL: u64 = 8;
 const MAX_DECODED_BYTES: usize = 96 * 1024 * 1024;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -130,6 +132,25 @@ pub fn remove_source_cache(root: &Path, source: &Path) -> Result<()> {
             .with_context(|| format!("removing oversized preview cache {}", path.display()))?;
     }
     Ok(())
+}
+
+pub fn estimated_decode_bytes(width: u32, height: u32) -> u64 {
+    u64::from(width)
+        .saturating_mul(u64::from(height))
+        .saturating_mul(ESTIMATED_DECODE_BYTES_PER_PIXEL)
+}
+
+pub fn requires_bounded_dimensions(source_size: u64, width: u32, height: u32) -> bool {
+    source_size > settings::DIRECT_DECODE_MAX_FILE_SIZE_BYTES
+        || estimated_decode_bytes(width, height) > MAX_DIRECT_DECODE_BYTES
+}
+
+pub fn requires_bounded_decode(source: &Path, source_size: u64) -> Result<bool> {
+    if source_size > settings::DIRECT_DECODE_MAX_FILE_SIZE_BYTES {
+        return Ok(true);
+    }
+    let (width, height) = source_dimensions(source)?;
+    Ok(requires_bounded_dimensions(source_size, width, height))
 }
 
 pub fn bounded_backend_for(source: &Path) -> Result<BoundedBackend> {
@@ -448,6 +469,18 @@ mod tests {
         assert!(!first.path.exists());
         assert!(third.path.exists());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn decoded_memory_ceiling_routes_highly_compressed_sources_to_bounded_decode() {
+        assert!(!requires_bounded_dimensions(8 * 1024 * 1024, 3_000, 2_000));
+        assert!(requires_bounded_dimensions(8 * 1024 * 1024, 10_000, 10_000));
+        assert!(requires_bounded_dimensions(
+            settings::DIRECT_DECODE_MAX_FILE_SIZE_BYTES + 1,
+            100,
+            100
+        ));
+        assert_eq!(estimated_decode_bytes(u32::MAX, u32::MAX), u64::MAX);
     }
 
     #[test]
