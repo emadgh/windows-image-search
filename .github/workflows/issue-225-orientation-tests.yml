@@ -42,10 +42,14 @@ jobs:
           if (-not $importLibrary -or -not $runtimeDll) { throw 'libvips files not found' }
           "VIPS_LIB_DIR=$($importLibrary.Directory.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           $runtimeDll.Directory.FullName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-      - name: Check and test with libvips
-        run: |
-          cargo check --all-targets --locked --features libvips-backend
-          cargo test --locked --features libvips-backend oversized_preview::tests::corrupt_png_returns_error_without_committing_derivative
+      - name: Check libvips configuration
+        run: cargo check --all-targets --locked --features libvips-backend
+      - name: Libvips bounded PNG and TIFF regression
+        run: cargo test --locked --features libvips-backend oversized_preview::tests::libvips_backed_png_and_tiff_are_bounded
+      - name: Libvips decode failure regression
+        run: cargo test --locked --features libvips-backend oversized_preview::tests::corrupt_png_returns_error_without_committing_derivative
+      - name: Libvips JPEG orientation regression
+        run: cargo test --locked --features libvips-backend oversized_preview::tests::bounded_jpeg_applies_exif_orientation_without_full_decode
       - name: Commit validated source
         shell: bash
         run: |
