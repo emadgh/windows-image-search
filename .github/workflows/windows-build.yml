@@ -12,6 +12,9 @@ on:
 permissions:
   contents: read
 
+env:
+  LIBVIPS_VERSION: 8.18.6
+
 jobs:
   build:
     runs-on: windows-latest
@@ -80,22 +83,48 @@ jobs:
           }
       - name: Format check
         run: cargo fmt --all -- --check
-      - name: Cargo check
+      - name: Cargo check without libvips
         run: cargo check --all-targets
-      - name: Tests
+      - name: Tests without libvips
         run: cargo test --all-targets
+      - name: Install libvips runtime and import library
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'libvips.zip'
+          $root = Join-Path $env:RUNNER_TEMP 'libvips'
+          $url = "https://github.com/libvips/build-win64-mxe/releases/download/v$env:LIBVIPS_VERSION/vips-dev-x64-web-$env:LIBVIPS_VERSION.zip"
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          Expand-Archive -LiteralPath $archive -DestinationPath $root -Force
+
+          $importLibrary = Get-ChildItem -LiteralPath $root -Recurse -File -Filter 'libvips.lib' | Select-Object -First 1
+          $runtimeDll = Get-ChildItem -LiteralPath $root -Recurse -File -Filter 'libvips-42.dll' | Select-Object -First 1
+          if (-not $importLibrary) {
+            throw 'libvips.lib was not found in the downloaded Windows bundle.'
+          }
+          if (-not $runtimeDll) {
+            throw 'libvips-42.dll was not found in the downloaded Windows bundle.'
+          }
+
+          "VIPS_LIB_DIR=$($importLibrary.Directory.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "VIPS_BIN_DIR=$($runtimeDll.Directory.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $runtimeDll.Directory.FullName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Cargo check with libvips
+        run: cargo check --all-targets --features libvips-backend
+      - name: Tests with libvips
+        run: cargo test --all-targets --features libvips-backend
       - name: Benchmark workspace isolation regression
         run: python scripts/test-benchmark-workspace.py
       - name: Face benchmark provider manifest regression
         shell: powershell
         run: ./scripts/test-benchmark-runners.ps1
-      - name: Release build
-        run: cargo build --release
+      - name: Release build with libvips
+        run: cargo build --release --features libvips-backend
       - name: Prepare Windows test bundle
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path artifact | Out-Null
           Copy-Item target/release/windows-image-search.exe artifact/
+          Copy-Item "$env:VIPS_BIN_DIR\*.dll" artifact/
           Copy-Item scripts/run-indexed-sample-benchmark.ps1 artifact/
           Copy-Item scripts/run-v0.2-benchmark-gate.ps1 artifact/
           Copy-Item scripts/run-v0.3-face-benchmark-gate.ps1 artifact/
@@ -108,7 +137,7 @@ jobs:
       - name: Upload Windows test bundle
         uses: actions/upload-artifact@v4
         with:
-          name: windows-image-search-pr133-test
+          name: windows-image-search-libvips-${{ github.sha }}
           path: artifact
           if-no-files-found: error
           retention-days: 14
