@@ -7,7 +7,9 @@ This branch introduces the first implementation slice for issue #225.
 - Routes bounded oversized PNG and TIFF generation through libvips when enabled.
 - Fails closed for unsafe PNG/TIFF sources when the feature is unavailable.
 - Reuses the existing portable oversized-preview and 512 px thumbnail cache layout.
-- Adds backend-selection and bounded PNG regression tests.
+- Builds a missing bounded preview derivative from the Preview background worker instead of requiring a rescan first.
+- Writes the 512 px thumbnail cache through a temporary file before committing the final cache path.
+- Adds backend-selection, cache reuse/invalidation, on-demand preview, and bounded PNG regression tests.
 - Adds Windows CI coverage that downloads the official libvips runtime, builds/tests the feature, and bundles the DLL set beside the executable.
 
-Still to complete before issue #225 can close: dimension-based unsafe routing during indexing for highly compressed sources, on-demand preview derivative creation, TIFF fixture coverage, atomic 512 px cache writes, Cargo.lock/release packaging, and clean-machine artifact validation.
+Still to complete before issue #225 can close: dimension-based unsafe routing during indexing for highly compressed sources, TIFF fixture coverage, final Cargo.lock/release packaging, and clean-machine artifact validation.
