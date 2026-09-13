@@ -159,6 +159,9 @@ fn load_cached_path(path: PathBuf) -> Option<DynamicImage> {
 }
 
 fn store_at_path(cache_path: PathBuf, image: &DynamicImage) -> Result<PathBuf> {
+    if load_cached_path(cache_path.clone()).is_some() {
+        return Ok(cache_path);
+    }
     let thumb = image.thumbnail(CACHE_EDGE, CACHE_EDGE).to_rgb8();
     write_rgb_thumbnail(&cache_path, &thumb)?;
     Ok(cache_path)
@@ -192,13 +195,15 @@ fn write_rgb_thumbnail(cache_path: &Path, thumb: &image::RgbImage) -> Result<()>
             .with_context(|| format!("encoding cached thumbnail {}", cache_path.display()))?;
         drop(encoder);
 
-        if cache_path.exists() {
-            std::fs::remove_file(cache_path)
-                .with_context(|| format!("replacing cached thumbnail {}", cache_path.display()))?;
+        match std::fs::rename(&temp, cache_path) {
+            Ok(()) => Ok(()),
+            Err(error) if cache_path.is_file() => {
+                let _ = std::fs::remove_file(&temp);
+                Ok(())
+            }
+            Err(error) => Err(error)
+                .with_context(|| format!("committing cached thumbnail {}", cache_path.display())),
         }
-        std::fs::rename(&temp, cache_path)
-            .with_context(|| format!("committing cached thumbnail {}", cache_path.display()))?;
-        Ok(())
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temp);

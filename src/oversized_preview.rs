@@ -1,7 +1,9 @@
 use crate::{portable, settings, thumbnail_cache};
 use anyhow::{bail, Context, Result};
 use image::codecs::jpeg::JpegEncoder;
-use image::{DynamicImage, GrayImage, ImageFormat, RgbImage};
+#[cfg(feature = "libvips-backend")]
+use image::ImageFormat;
+use image::{DynamicImage, GrayImage, RgbImage};
 use jpeg_decoder::{Decoder, PixelFormat};
 use sha2::{Digest, Sha256};
 use std::fs::File;
@@ -246,16 +248,26 @@ fn decode_jpeg_bounded(source: &Path) -> Result<DynamicImage> {
         );
     }
 
-    match info.pixel_format {
+    let decoded = match info.pixel_format {
         PixelFormat::RGB24 => RgbImage::from_raw(info.width as u32, info.height as u32, pixels)
             .map(DynamicImage::ImageRgb8)
-            .context("invalid RGB JPEG output buffer"),
+            .context("invalid RGB JPEG output buffer")?,
         PixelFormat::L8 => GrayImage::from_raw(info.width as u32, info.height as u32, pixels)
             .map(DynamicImage::ImageLuma8)
-            .context("invalid grayscale JPEG output buffer"),
+            .context("invalid grayscale JPEG output buffer")?,
         other => bail!(
             "bounded oversized JPEG pixel format {other:?} is not supported; refusing unsafe fallback"
         ),
+    };
+
+    // jpeg-decoder::scale() selects the nearest supported IDCT scale and can
+    // legitimately return one dimension above the requested edge. The buffer
+    // is still bounded by MAX_DECODED_BYTES, so finish the resize on that
+    // already-bounded allocation rather than falling back to a full decode.
+    if decoded.width() > PREVIEW_EDGE || decoded.height() > PREVIEW_EDGE {
+        Ok(decoded.thumbnail(PREVIEW_EDGE, PREVIEW_EDGE))
+    } else {
+        Ok(decoded)
     }
 }
 
@@ -317,16 +329,18 @@ fn load_valid_derivative(path: &Path) -> Option<DynamicImage> {
         return None;
     }
     let image = image::ImageReader::open(path)
-        .ok()?
-        .with_guessed_format()
-        .ok()?
-        .decode()
-        .ok()?;
-    if image.width() > PREVIEW_EDGE || image.height() > PREVIEW_EDGE {
-        let _ = std::fs::remove_file(path);
-        return None;
+        .ok()
+        .and_then(|reader| reader.with_guessed_format().ok())
+        .and_then(|reader| reader.decode().ok());
+    match image {
+        Some(image) if image.width() <= PREVIEW_EDGE && image.height() <= PREVIEW_EDGE => {
+            Some(image)
+        }
+        _ => {
+            let _ = std::fs::remove_file(path);
+            None
+        }
     }
-    Some(image)
 }
 
 fn write_derivative(path: &Path, image: &DynamicImage) -> Result<()> {
@@ -344,12 +358,17 @@ fn write_derivative(path: &Path, image: &DynamicImage) -> Result<()> {
         encoder
             .encode_image(image)
             .with_context(|| format!("encoding oversized preview {}", path.display()))?;
-        if path.exists() {
-            std::fs::remove_file(path)?;
+        match std::fs::rename(&temp, path) {
+            Ok(()) => Ok(()),
+            Err(error) if path.is_file() => {
+                // Another worker may have committed the same immutable cache
+                // key first. Keep that completed file and discard our temp.
+                let _ = std::fs::remove_file(&temp);
+                Ok(())
+            }
+            Err(error) => Err(error)
+                .with_context(|| format!("committing oversized preview {}", path.display())),
         }
-        std::fs::rename(&temp, path)
-            .with_context(|| format!("committing oversized preview {}", path.display()))?;
-        Ok(())
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temp);
@@ -516,21 +535,23 @@ mod tests {
 
     #[cfg(feature = "libvips-backend")]
     #[test]
-    fn libvips_builds_bounded_png_preview_and_thumbnail_cache() {
-        let root = temp_root("libvips-png");
-        std::fs::create_dir_all(root.join("images")).unwrap();
-        let source = root.join("images").join("large.png");
-        DynamicImage::ImageRgb8(ImageBuffer::from_pixel(3000, 1500, Rgb([20, 40, 60])))
-            .save(&source)
-            .unwrap();
-        let meta = std::fs::metadata(&source).unwrap();
-        let asset = load_or_build(&root, &source, meta.len(), modified_seconds(&meta)).unwrap();
-        assert_eq!(asset.backend, Some(BoundedBackend::Libvips));
-        assert!(asset.image.width() <= PREVIEW_EDGE);
-        assert!(asset.image.height() <= PREVIEW_EDGE);
-        assert!(asset.path.is_file());
-        assert!(thumbnail_cache::load_cached_for_root(&root, &source).is_some());
-        let _ = std::fs::remove_dir_all(root);
+    fn libvips_builds_bounded_png_and_tiff_previews_and_thumbnail_cache() {
+        for (label, extension) in [("png", "png"), ("tiff", "tiff")] {
+            let root = temp_root(&format!("libvips-{label}"));
+            std::fs::create_dir_all(root.join("images")).unwrap();
+            let source = root.join("images").join(format!("large.{extension}"));
+            DynamicImage::ImageRgb8(ImageBuffer::from_pixel(3000, 1500, Rgb([20, 40, 60])))
+                .save(&source)
+                .unwrap();
+            let meta = std::fs::metadata(&source).unwrap();
+            let asset = load_or_build(&root, &source, meta.len(), modified_seconds(&meta)).unwrap();
+            assert_eq!(asset.backend, Some(BoundedBackend::Libvips));
+            assert!(asset.image.width() <= PREVIEW_EDGE);
+            assert!(asset.image.height() <= PREVIEW_EDGE);
+            assert!(asset.path.is_file());
+            assert!(thumbnail_cache::load_cached_for_root(&root, &source).is_some());
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 
     #[test]

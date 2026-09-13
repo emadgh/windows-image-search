@@ -1,5 +1,5 @@
 use super::ImageSearchApp;
-use crate::{face_detection, oversized_preview, portable, settings, thumbnail_cache};
+use crate::{face_detection, oversized_preview, portable, thumbnail_cache};
 use anyhow::{bail, Context, Result};
 use eframe::egui;
 use image::{DynamicImage, GenericImageView};
