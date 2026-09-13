@@ -150,7 +150,11 @@ pub fn bounded_backend_for(source: &Path) -> Result<BoundedBackend> {
         }
         extension => bail!(
             "bounded preview does not support .{} sources: {}",
-            if extension.is_empty() { "<none>" } else { extension },
+            if extension.is_empty() {
+                "<none>"
+            } else {
+                extension
+            },
             source.display()
         ),
     }
@@ -241,12 +245,11 @@ fn decode_with_libvips(source: &Path) -> Result<DynamicImage> {
         .to_str()
         .with_context(|| format!("libvips requires a UTF-8 source path: {}", source.display()))?;
     let edge = i32::try_from(PREVIEW_EDGE).context("preview edge exceeds libvips integer range")?;
-    let thumbnail = VipsImage::thumbnail_with_opts(
-        filename,
-        edge,
-        VOption::new().set("height", edge),
-    )
-    .with_context(|| format!("libvips bounded thumbnail failed for {}", source.display()))?;
+    let thumbnail =
+        VipsImage::thumbnail_with_opts(filename, edge, VOption::new().set("height", edge))
+            .with_context(|| {
+                format!("libvips bounded thumbnail failed for {}", source.display())
+            })?;
     let width = thumbnail.get_width();
     let height = thumbnail.get_height();
     if width <= 0 || height <= 0 {

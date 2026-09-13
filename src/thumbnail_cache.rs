@@ -177,9 +177,7 @@ fn build_and_store(cache_path: PathBuf, source: &Path) -> Option<DynamicImage> {
 }
 
 fn write_rgb_thumbnail(cache_path: &Path, thumb: &image::RgbImage) -> Result<()> {
-    let parent = cache_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
+    let parent = cache_path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)
         .with_context(|| format!("creating thumbnail cache {}", parent.display()))?;
 
@@ -195,9 +193,8 @@ fn write_rgb_thumbnail(cache_path: &Path, thumb: &image::RgbImage) -> Result<()>
         drop(encoder);
 
         if cache_path.exists() {
-            std::fs::remove_file(cache_path).with_context(|| {
-                format!("replacing cached thumbnail {}", cache_path.display())
-            })?;
+            std::fs::remove_file(cache_path)
+                .with_context(|| format!("replacing cached thumbnail {}", cache_path.display()))?;
         }
         std::fs::rename(&temp, cache_path)
             .with_context(|| format!("committing cached thumbnail {}", cache_path.display()))?;
@@ -283,7 +280,10 @@ mod tests {
         assert!(std::fs::read_dir(&cache_dir)
             .unwrap()
             .flatten()
-            .all(|entry| !entry.file_name().to_string_lossy().starts_with(".thumbnail-")));
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".thumbnail-")));
         let _ = std::fs::remove_dir_all(dir);
     }
 

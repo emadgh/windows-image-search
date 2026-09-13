@@ -4418,6 +4418,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rs-vips"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52bff86a769bb29a4a68a54ca68dfb8e713aa5e6c6a380d26d6878393007528c"
+dependencies = [
+ "num-derive",
+ "num-traits",
+]
+
+[[package]]
 name = "rusqlite"
 version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6144,6 +6154,7 @@ dependencies = [
  "ort",
  "rayon",
  "rfd",
+ "rs-vips",
  "rusqlite",
  "serde",
  "serde_json",
