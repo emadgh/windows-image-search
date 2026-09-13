@@ -1,0 +1,36 @@
+name: Issue 225 routing migration
+
+on:
+  push:
+    branches: [feat/225-libvips-bounded-previews]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/225-libvips-bounded-previews
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply dimension-safe routing migration
+        run: python scripts/apply-issue-225-routing.py
+      - name: Normalize Rust sources
+        run: cargo fmt --all
+      - name: Resolve lockfile and compile default configuration
+        run: cargo check --all-targets
+      - name: Commit generated routing changes
+        shell: bash
+        run: |
+          if ! git diff --quiet -- Cargo.lock src/indexer.rs src/oversized_preview.rs src/ui/image_preview.rs; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add Cargo.lock src/indexer.rs src/oversized_preview.rs src/ui/image_preview.rs
+            git commit -m "Route memory-unsafe images through bounded previews"
+            git push origin HEAD:feat/225-libvips-bounded-previews
+          fi
