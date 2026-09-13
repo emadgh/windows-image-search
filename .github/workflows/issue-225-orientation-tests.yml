@@ -28,7 +28,7 @@ jobs:
       - name: Check default configuration
         run: cargo check --all-targets --locked
       - name: JPEG orientation test
-        run: cargo test --locked oversized_preview::tests::bounded_jpeg_applies_exif_orientation_without_full_decode
+        run: cargo test --locked oversized_preview::tests::bounded_jpeg_applies_exif_orientation_without_full_decode -- --exact --nocapture
       - name: Install libvips
         shell: pwsh
         run: |
@@ -57,7 +57,7 @@ jobs:
           if (-not (Test-Path (Join-Path $env:VIPS_BIN_DIR 'libvips-42.dll'))) { throw 'libvips-42.dll missing from VIPS_BIN_DIR' }
           where.exe libvips-42.dll
           Get-ChildItem -LiteralPath $env:VIPS_BIN_DIR -File -Filter '*.dll' | Select-Object -First 20 -ExpandProperty Name
-          cargo test --locked --features libvips-backend oversized_preview::tests::libvips_builds_bounded_png_and_tiff_previews -- --exact --nocapture
+          cargo test --locked --features libvips-backend oversized_preview::tests::libvips_builds_bounded_png_and_tiff_previews_and_thumbnail_cache -- --exact --nocapture
       - name: Libvips decode failure regression
         shell: pwsh
         run: |
