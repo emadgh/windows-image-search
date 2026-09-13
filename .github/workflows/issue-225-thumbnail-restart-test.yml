@@ -1,0 +1,36 @@
+name: Issue 225 thumbnail restart safety
+
+on:
+  push:
+    branches: [chore/225-thumbnail-restart-safety]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: chore/225-thumbnail-restart-safety
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply restart-safety test
+        run: python scripts/apply-issue-225-thumbnail-restart-test.py
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Run thumbnail restart-safety regression
+        run: cargo test --locked thumbnail_cache::tests::stale_temp_file_does_not_block_thumbnail_cache_recovery
+      - name: Commit validated test
+        shell: bash
+        run: |
+          if ! git diff --quiet -- src/thumbnail_cache.rs; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add src/thumbnail_cache.rs
+            git commit -m "Test thumbnail cache recovery after stale temp file"
+            git push origin HEAD:chore/225-thumbnail-restart-safety
+          fi
