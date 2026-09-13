@@ -70,6 +70,33 @@ jobs:
           if (-not (Test-Path 'dist/windows-image-search.exe')) {
             throw 'Release bundle is missing windows-image-search.exe.'
           }
+      - name: Smoke test extracted release without external libvips
+        shell: pwsh
+        run: |
+          $smokeDir = Join-Path $env:RUNNER_TEMP 'wis-clean-release-smoke'
+          if (Test-Path $smokeDir) {
+            Remove-Item -LiteralPath $smokeDir -Recurse -Force
+          }
+          Expand-Archive -LiteralPath 'windows-image-search-win64.zip' -DestinationPath $smokeDir -Force
+          if (-not (Test-Path (Join-Path $smokeDir 'libvips-42.dll'))) {
+            throw 'Extracted release is missing libvips-42.dll.'
+          }
+          $externalVips = (Resolve-Path -LiteralPath $env:VIPS_BIN_DIR).Path.TrimEnd('\')
+          $env:PATH = (($env:PATH -split ';') | Where-Object {
+            $_ -and $_.TrimEnd('\') -ne $externalVips
+          }) -join ';'
+          if (($env:PATH -split ';') | Where-Object { $_.TrimEnd('\') -eq $externalVips }) {
+            throw 'External libvips directory is still present in PATH during release smoke test.'
+          }
+          Push-Location $smokeDir
+          try {
+            & .\windows-image-search.exe --version
+            if ($LASTEXITCODE -ne 0) {
+              throw "Extracted release failed without external libvips PATH (exit $LASTEXITCODE)."
+            }
+          } finally {
+            Pop-Location
+          }
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
