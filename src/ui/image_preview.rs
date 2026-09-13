@@ -36,7 +36,7 @@ struct DecodedPreview {
 #[derive(Clone, Copy)]
 enum PreviewQuality {
     HighResolution,
-    ExistingDerivative,
+    BoundedDerivative,
     ExistingThumbnail,
 }
 
@@ -44,7 +44,7 @@ impl PreviewQuality {
     fn label(self) -> &'static str {
         match self {
             Self::HighResolution => "High-resolution preview",
-            Self::ExistingDerivative => "Bounded preview for a very large image",
+            Self::BoundedDerivative => "Bounded preview for a very large image",
             Self::ExistingThumbnail => "Thumbnail fallback for a very large image",
         }
     }
@@ -287,12 +287,12 @@ fn decode_preview(path: &Path, roots: &[PathBuf]) -> Result<DecodedPreview> {
             PreviewQuality::HighResolution,
         )
     } else {
-        load_existing_bounded_preview(path, roots)?
+        load_or_build_bounded_preview(path, roots)?
     };
     rgba_preview(image, quality)
 }
 
-fn load_existing_bounded_preview(
+fn load_or_build_bounded_preview(
     path: &Path,
     roots: &[PathBuf],
 ) -> Result<(DynamicImage, PreviewQuality)> {
@@ -304,18 +304,30 @@ fn load_existing_bounded_preview(
         .ok()
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0, |duration| duration.as_secs() as i64);
+
     if let Ok(candidate) =
         oversized_preview::cache_path_for_state(root, path, metadata.len(), modified)
     {
         if let Some(image) = decode_existing(&candidate) {
-            return Ok((image, PreviewQuality::ExistingDerivative));
+            return Ok((image, PreviewQuality::BoundedDerivative));
         }
     }
-    let thumbnail = thumbnail_cache::cache_path_for_root(root, path)?;
-    if let Some(image) = decode_existing(&thumbnail) {
-        return Ok((image, PreviewQuality::ExistingThumbnail));
+
+    match oversized_preview::load_or_build(root, path, metadata.len(), modified) {
+        Ok(asset) => return Ok((asset.image, PreviewQuality::BoundedDerivative)),
+        Err(build_error) => {
+            let thumbnail = thumbnail_cache::cache_path_for_root(root, path)?;
+            if let Some(image) = decode_existing(&thumbnail) {
+                return Ok((image, PreviewQuality::ExistingThumbnail));
+            }
+            return Err(build_error).with_context(|| {
+                format!(
+                    "no bounded derivative or safe thumbnail could be created for {}",
+                    path.display()
+                )
+            });
+        }
     }
-    bail!("no safe bounded preview exists for this very large image; rescan it first")
 }
 
 fn decode_existing(path: &Path) -> Option<DynamicImage> {
@@ -349,6 +361,17 @@ mod tests {
     use super::*;
     use image::{ImageBuffer, Rgb};
 
+    fn temp_root(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "wis-image-preview-{label}-{}-{nonce}",
+            std::process::id()
+        ))
+    }
+
     #[test]
     fn regular_preview_contains_the_whole_image_and_is_bounded() {
         let path = std::env::temp_dir().join(format!(
@@ -373,5 +396,23 @@ mod tests {
         let last = (preview.width * preview.height - 1) * 4;
         assert_eq!(&preview.rgba[last..last + 3], &[0, 0, 255]);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn bounded_preview_can_be_built_on_demand_off_the_ui_path() {
+        let root = temp_root("on-demand");
+        std::fs::create_dir_all(root.join("images")).unwrap();
+        let source = root.join("images").join("large.jpg");
+        DynamicImage::ImageRgb8(ImageBuffer::from_pixel(3200, 1800, Rgb([20, 40, 60])))
+            .save(&source)
+            .unwrap();
+
+        let (image, quality) =
+            load_or_build_bounded_preview(&source, std::slice::from_ref(&root)).unwrap();
+        assert!(matches!(quality, PreviewQuality::BoundedDerivative));
+        assert!(image.width() <= oversized_preview::PREVIEW_EDGE);
+        assert!(image.height() <= oversized_preview::PREVIEW_EDGE);
+        assert!(thumbnail_cache::load_cached_for_root(&root, &source).is_some());
+        let _ = std::fs::remove_dir_all(root);
     }
 }
