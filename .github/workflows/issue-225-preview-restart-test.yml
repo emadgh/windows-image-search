@@ -1,0 +1,38 @@
+name: Issue 225 preview restart safety
+
+on:
+  push:
+    branches: [chore/225-thumbnail-restart-safety]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: chore/225-thumbnail-restart-safety
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply oversized preview restart-safety patch
+        run: python scripts/apply-issue-225-preview-restart-safety.py
+      - name: Format
+        run: cargo fmt --all
+      - name: Run thumbnail restart-safety regression
+        run: cargo test --locked thumbnail_cache::tests::stale_temp_file_does_not_block_thumbnail_cache_recovery -- --exact --nocapture
+      - name: Run oversized preview restart-safety regression
+        run: cargo test --locked oversized_preview::tests::stale_preview_temp_does_not_block_or_get_deleted_by_cache_recovery -- --exact --nocapture
+      - name: Commit validated source
+        shell: bash
+        run: |
+          if ! git diff --quiet -- src/oversized_preview.rs; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add src/oversized_preview.rs
+            git commit -m "Preserve concurrent oversized preview temp files"
+            git push origin HEAD:chore/225-thumbnail-restart-safety
+          fi
