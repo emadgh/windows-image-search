@@ -1,8 +1,10 @@
+mod collection_statistics;
 mod collections;
 mod collections_window;
 mod duplicate_review;
 mod face_runtime;
 mod face_search_panel;
+mod image_preview;
 mod inspector;
 mod people_filter;
 mod people_manager;
@@ -208,6 +210,7 @@ pub struct ImageSearchApp {
     similarity_results_revision: u64,
     visible_order_cache: RefCell<VisibleOrderCache>,
     pub(super) inspector_open: bool,
+    image_preview: image_preview::ImagePreviewState,
     pub(super) appearance_mode: AppearanceMode,
     pub(super) system_dark_mode: Option<bool>,
     pub(super) task_center_open: bool,
@@ -367,6 +370,7 @@ impl ImageSearchApp {
             similarity_results_revision: 0,
             visible_order_cache: RefCell::new(VisibleOrderCache::default()),
             inspector_open: true,
+            image_preview: Default::default(),
             appearance_mode: AppearanceMode::System,
             system_dark_mode: None,
             task_center_open: false,
@@ -1371,7 +1375,8 @@ impl eframe::App for ImageSearchApp {
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.toggle_value(&mut self.inspector_open, "Inspector");
+                    ui.toggle_value(&mut self.inspector_open, "Inspector")
+                        .on_hover_text("Toggle Inspector (Shift+Space)");
                     ui.separator();
                     egui::ComboBox::from_id_salt("result-sort")
                         .selected_text(self.sort_mode.label())
@@ -1409,7 +1414,8 @@ impl eframe::App for ImageSearchApp {
                         );
                         ui.selectable_value(&mut self.thumb_fit, ThumbnailFit::Cover, "Cover tile");
                         ui.separator();
-                        ui.checkbox(&mut self.inspector_open, "Show Inspector");
+                        ui.checkbox(&mut self.inspector_open, "Show Inspector")
+                            .on_hover_text("Shortcut: Shift+Space");
                     });
 
                     ui.add_sized(
@@ -1432,6 +1438,7 @@ impl eframe::App for ImageSearchApp {
                 self.show_details(ui, &visible);
             }
         });
+        self.show_image_preview(ctx);
     }
 }
 

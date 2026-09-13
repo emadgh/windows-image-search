@@ -16,21 +16,32 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Test
-        run: cargo test --all-targets
+        run: cargo test --all-targets --locked
       - name: Build release
-        run: cargo build --release
+        run: cargo build --release --locked
       - name: Prepare updater assets
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target/release/windows-image-search.exe dist/windows-image-search.exe
+          Copy-Item "docs/releases/${{ github.ref_name }}.md" dist/RELEASE-NOTES.md
+          Copy-Item README.md, LICENSE dist/
+          "${{ github.ref_name }}" | Set-Content -Encoding ascii dist/VERSION.txt
+          git rev-parse HEAD | Set-Content -Encoding ascii dist/COMMIT.txt
           $hash = (Get-FileHash -Algorithm SHA256 dist/windows-image-search.exe).Hash.ToLowerInvariant()
           "$hash  windows-image-search.exe" | Set-Content -Encoding ascii -NoNewline dist/windows-image-search.exe.sha256
+          Compress-Archive -Path dist/* -DestinationPath "windows-image-search-${{ github.ref_name }}-win64.zip"
+          $zipHash = (Get-FileHash -Algorithm SHA256 "windows-image-search-${{ github.ref_name }}-win64.zip").Hash.ToLowerInvariant()
+          "$zipHash  windows-image-search-${{ github.ref_name }}-win64.zip" | Set-Content -Encoding ascii "windows-image-search-${{ github.ref_name }}-win64.zip.sha256"
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          name: ${{ github.ref_name }}
+          body_path: docs/releases/${{ github.ref_name }}.md
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             dist/windows-image-search.exe
             dist/windows-image-search.exe.sha256
+            windows-image-search-${{ github.ref_name }}-win64.zip
+            windows-image-search-${{ github.ref_name }}-win64.zip.sha256

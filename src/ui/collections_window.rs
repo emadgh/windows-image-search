@@ -13,22 +13,19 @@ impl ImageSearchApp {
 
         let mut open = self.collections_open;
         egui::Window::new("Collections")
+            .id(egui::Id::new("collections-workspace-v4"))
             .open(&mut open)
             .resizable(true)
-            .default_size([860.0, 680.0])
-            .min_size([620.0, 460.0])
-            .max_height((ctx.available_rect().height() - 48.0).max(360.0))
+            .default_size([1080.0, 620.0])
+            .min_size([340.0, 280.0])
+            .max_size(
+                (ctx.available_rect().size() - egui::vec2(24.0, 48.0))
+                    .max(egui::vec2(280.0, 240.0)),
+            )
             .show(ctx, |ui| {
-                ui.heading("Collections");
-                ui.label(
-                    "Organize indexed folders and images without moving or deleting source files.",
-                );
-                ui.add_space(6.0);
-                ui.separator();
-                egui::ScrollArea::vertical()
-                    .id_salt("collections-workspace-scroll")
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| self.show_collections_settings(ui));
+                egui::TopBottomPanel::bottom("collection-library-status")
+                    .show_inside(ui, |ui| self.collection_index_status(ui));
+                self.show_collections_settings(ui);
             });
         self.collections_open = open;
     }
