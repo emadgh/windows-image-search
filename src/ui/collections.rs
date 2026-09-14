@@ -976,7 +976,7 @@ impl ImageSearchApp {
         }
 
         let mut removed_any = false;
-        for root in self.roots.clone() {
+        for root in db::load_roots(&self.db_path)? {
             let referenced = folders
                 .iter()
                 .any(|folder| folder.starts_with(&root) || root.starts_with(folder))
@@ -993,11 +993,13 @@ impl ImageSearchApp {
     }
 
     fn reload_after_root_registry_change(&mut self) {
-        self.roots = db::load_roots(&self.db_path).unwrap_or_default();
+        let registered = db::load_roots(&self.db_path).unwrap_or_default();
+        (self.roots, self.unavailable_roots) = super::partition_registered_roots(registered);
         self.root_counts = db::load_root_counts(&self.db_path).unwrap_or_default();
         self.thumb_pool.set_roots(self.roots.clone());
         self.fs_watch_service.set_roots(self.roots.clone());
         self.images = db::load_image_summaries(&self.db_path).unwrap_or_default();
+        super::retain_available_images(&mut self.images, &self.roots);
         self.rebuild_image_positions();
         self.refresh_collection_effective_membership();
         self.refresh_text_search_after_data_change();

@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 
 const PREVIEW_EDGE: u32 = 2_560;
-const MAX_DIRECT_DECODE_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Default)]
 pub(super) struct ImagePreviewState {
