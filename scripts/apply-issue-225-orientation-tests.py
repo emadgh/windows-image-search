@@ -3,6 +3,12 @@ from pathlib import Path
 path = Path("src/oversized_preview.rs")
 text = path.read_text(encoding="utf-8")
 
+# The validation workflow runs on every push to the feature branch. Once the
+# orientation migration has been committed, rerunning it should be a no-op
+# instead of failing because the expected pre-migration text is gone.
+if "fn bounded_jpeg_applies_exif_orientation_without_full_decode" in text:
+    raise SystemExit(0)
+
 
 def replace_once(old: str, new: str, label: str) -> None:
     global text
