@@ -51,8 +51,7 @@ pub fn search_candidates(
     }
     let ef = search_ef(k, manifest.count);
     let neighbours = hnsw.search(query, k, ef);
-
-    Ok(neighbours
+    let mut candidates: HashMap<usize, f32> = neighbours
         .into_iter()
         .map(|neighbour| {
             // DistCosine returns cosine distance. The application historically
@@ -60,7 +59,27 @@ pub fn search_candidates(
             let similarity = (1.0_f32 - neighbour.distance).clamp(0.0_f32, 1.0_f32);
             (neighbour.d_id, similarity)
         })
-        .collect())
+        .collect();
+
+    // HNSW can return fewer than `k` neighbours for a very small or sparse
+    // persisted graph. The candidate API promises up to the requested limit,
+    // so fill any gap with an exact ranking from SQLite. This path is only
+    // taken when the graph is incomplete and keeps normal large-library
+    // queries on the fast ANN path.
+    if candidates.len() < k {
+        let entries = db::load_ann_embeddings(db_path)?;
+        for rowid in exact_top_rowids(&entries, query, k) {
+            if let Some(entry) = entries.iter().find(|entry| entry.rowid == rowid) {
+                let similarity = dot_product(query, &entry.embedding).clamp(0.0_f32, 1.0_f32);
+                candidates.entry(rowid).or_insert(similarity);
+            }
+            if candidates.len() >= k {
+                break;
+            }
+        }
+    }
+
+    Ok(candidates)
 }
 
 pub fn benchmark(db_path: &Path, requested_queries: usize) -> Result<String> {

@@ -14,6 +14,9 @@ permissions:
 
 env:
   LIBVIPS_VERSION: 8.18.6
+  # Keep Windows test PDBs below MSVC's limit when the libvips feature links
+  # the full image-processing dependency graph.
+  CARGO_PROFILE_TEST_DEBUG: 0
 
 jobs:
   build:

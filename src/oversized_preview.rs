@@ -294,7 +294,7 @@ fn decode_with_libvips(source: &Path) -> Result<DynamicImage> {
         );
     }
     let encoded = thumbnail
-        .jpegsave_buffer_with_opts(VOption::new().set("q", JPEG_QUALITY as i32))
+        .jpegsave_buffer_with_opts(VOption::new().set("Q", JPEG_QUALITY as i32))
         .with_context(|| format!("encoding libvips thumbnail for {}", source.display()))?;
     image::load_from_memory_with_format(&encoded, ImageFormat::Jpeg)
         .with_context(|| format!("decoding bounded libvips output for {}", source.display()))
