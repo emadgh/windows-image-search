@@ -4,7 +4,7 @@ A native, local-first image index and visual search application for Windows, wri
 
 Keyboard shortcuts: select an image and press `Space` for an in-app whole-image preview; use `Left`/`Right` to move through the currently displayed result order, and `Space` or `Esc` to close it. Press `Shift+Space` to toggle the Inspector sidebar. Shortcuts are ignored while typing in a text field.
 
-> **v0.3.0-beta.1 — Beta / testing preview.** Validation is incomplete and tests are not final. Manual UI acceptance, labeled material/face quality evaluation, and some hardware/model gates remain outstanding. See [beta release notes](docs/releases/v0.3.0-beta.1.md).
+> **v0.3.0-beta.2 — Beta / testing preview.** Validation is incomplete and tests are not final. Manual UI acceptance, labeled material/face quality evaluation, and some hardware/model gates remain outstanding. See [beta release notes](docs/releases/v0.3.0-beta.2.md).
 
 ## Current features (v0.3 beta)
 
@@ -29,6 +29,8 @@ Keyboard shortcuts: select an image and press `Space` for an in-app whole-image 
 - Double-click to open an image; context menu can open its containing folder or copy its path.
 
 ## First run and portable indexes
+
+For the Windows beta, download and extract the complete `*-win64.zip` bundle before starting the app. Keep `windows-image-search.exe` beside the bundled libvips DLLs; an exe copied out of the archive (including the standalone exe asset from older beta releases) cannot start because Windows also needs `libvips-42.dll`, `libglib-2.0-0.dll` and `libgobject-2.0-0.dll`.
 
 1. Start `windows-image-search.exe`.
 2. Open **Preferences → Collections**, create/select a Collection, and add folders. New roots are scheduled for indexing automatically.
@@ -232,7 +234,7 @@ cargo test --all-targets
 cargo run --release
 ```
 
-Windows CI reads the package version from `Cargo.toml` and uploads a versioned artifact such as `windows-image-search-v0.2.10-win64`. The ZIP contains `windows-image-search.exe`, `run-v0.2-benchmark-gate.ps1`, `README.md`, `LICENSE` and `VERSION.txt`.
+Windows CI reads the package version from `Cargo.toml` and uploads a versioned artifact such as `windows-image-search-v0.2.10-win64`. The ZIP contains `windows-image-search.exe`, the complete libvips runtime DLL set, `run-v0.2-benchmark-gate.ps1`, `README.md`, `LICENSE` and `VERSION.txt`. Run the executable from the extracted directory so Windows can resolve those DLLs.
 
 ## Privacy
 

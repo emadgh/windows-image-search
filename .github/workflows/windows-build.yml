@@ -12,6 +12,12 @@ on:
 permissions:
   contents: read
 
+env:
+  LIBVIPS_VERSION: 8.18.6
+  # Keep Windows test PDBs below MSVC's limit when the libvips feature links
+  # the full image-processing dependency graph.
+  CARGO_PROFILE_TEST_DEBUG: 0
+
 jobs:
   build:
     runs-on: windows-latest
@@ -80,22 +86,57 @@ jobs:
           }
       - name: Format check
         run: cargo fmt --all -- --check
-      - name: Cargo check
-        run: cargo check --all-targets
-      - name: Tests
-        run: cargo test --all-targets
+      - name: Cargo check without libvips
+        run: cargo check --all-targets --locked
+      - name: Tests without libvips
+        run: cargo test --all-targets --locked
+      - name: Install libvips runtime and import library
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'libvips.zip'
+          $root = Join-Path $env:RUNNER_TEMP 'libvips'
+          $url = "https://github.com/libvips/build-win64-mxe/releases/download/v$env:LIBVIPS_VERSION/vips-dev-x64-web-$env:LIBVIPS_VERSION.zip"
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          Expand-Archive -LiteralPath $archive -DestinationPath $root -Force
+
+          $importLibrary = Get-ChildItem -LiteralPath $root -Recurse -File -Filter 'libvips.lib' | Select-Object -First 1
+          $runtimeDll = Get-ChildItem -LiteralPath $root -Recurse -File -Filter 'libvips-42.dll' | Select-Object -First 1
+          if (-not $importLibrary) {
+            throw 'libvips.lib was not found in the downloaded Windows bundle.'
+          }
+          if (-not $runtimeDll) {
+            throw 'libvips-42.dll was not found in the downloaded Windows bundle.'
+          }
+
+          "VIPS_LIB_DIR=$($importLibrary.Directory.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "VIPS_BIN_DIR=$($runtimeDll.Directory.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $runtimeDll.Directory.FullName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Cargo check with libvips
+        run: cargo check --all-targets --locked --features libvips-backend
+      - name: Tests with libvips
+        run: cargo test --all-targets --locked --features libvips-backend
       - name: Benchmark workspace isolation regression
         run: python scripts/test-benchmark-workspace.py
       - name: Face benchmark provider manifest regression
         shell: powershell
         run: ./scripts/test-benchmark-runners.ps1
-      - name: Release build
-        run: cargo build --release
+      - name: Release build with libvips
+        run: cargo build --release --locked --features libvips-backend
       - name: Prepare Windows test bundle
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path artifact | Out-Null
           Copy-Item target/release/windows-image-search.exe artifact/
+          $runtimeDlls = @(Get-ChildItem -LiteralPath $env:VIPS_BIN_DIR -File -Filter '*.dll')
+          if ($runtimeDlls.Count -eq 0) {
+            throw 'No libvips runtime DLLs were found beside libvips-42.dll.'
+          }
+          Copy-Item -LiteralPath $runtimeDlls.FullName -Destination artifact/ -Force
+          foreach ($required in @('libvips-42.dll', 'libglib-2.0-0.dll', 'libgobject-2.0-0.dll')) {
+            if (-not (Test-Path -LiteralPath (Join-Path artifact $required))) {
+              throw "Windows test bundle is missing required runtime DLL: $required"
+            }
+          }
           Copy-Item scripts/run-indexed-sample-benchmark.ps1 artifact/
           Copy-Item scripts/run-v0.2-benchmark-gate.ps1 artifact/
           Copy-Item scripts/run-v0.3-face-benchmark-gate.ps1 artifact/
@@ -105,10 +146,19 @@ jobs:
           Copy-Item README.md artifact/
           Copy-Item LICENSE artifact/
           git rev-parse HEAD | Set-Content artifact/COMMIT.txt -Encoding ascii
+      - name: Smoke test packaged executable
+        shell: pwsh
+        run: |
+          $stdout = Join-Path $env:RUNNER_TEMP 'windows-image-search-version.txt'
+          $stderr = Join-Path $env:RUNNER_TEMP 'windows-image-search-version.err.txt'
+          $process = Start-Process -FilePath (Resolve-Path -LiteralPath 'artifact/windows-image-search.exe') -ArgumentList '--version' -WorkingDirectory (Resolve-Path -LiteralPath 'artifact') -Wait -PassThru -NoNewWindow -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          if ($process.ExitCode -ne 0) { throw "Packaged executable failed to start: $(Get-Content -LiteralPath $stderr -Raw)" }
+          $version = Get-Content -LiteralPath $stdout -Raw
+          if ($version -notmatch 'Windows Image Search') { throw "Unexpected version output: $version" }
       - name: Upload Windows test bundle
         uses: actions/upload-artifact@v4
         with:
-          name: windows-image-search-pr133-test
+          name: windows-image-search-libvips-${{ github.sha }}
           path: artifact
           if-no-files-found: error
           retention-days: 14

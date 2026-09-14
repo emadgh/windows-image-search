@@ -142,6 +142,17 @@ where
     indices.sort_by_cached_key(|index| key(*index));
 }
 
+fn partition_registered_roots(roots: Vec<PathBuf>) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    roots
+        .into_iter()
+        .partition(|root| portable::is_indexed_root(root))
+}
+
+fn retain_available_images(images: &mut Vec<ImageSummary>, roots: &[PathBuf]) {
+    let available: HashSet<&Path> = roots.iter().map(PathBuf::as_path).collect();
+    images.retain(|image| available.contains(image.root.as_path()));
+}
+
 enum StartupMessage {
     Stage {
         status: String,
@@ -150,6 +161,7 @@ enum StartupMessage {
     },
     Ready {
         roots: Vec<PathBuf>,
+        unavailable_roots: Vec<PathBuf>,
         images: Vec<ImageSummary>,
         collections: collections::CollectionsState,
         root_counts: HashMap<PathBuf, (usize, usize)>,
@@ -166,6 +178,7 @@ pub struct ImageSearchApp {
     pending_fs_paths: HashSet<PathBuf>,
     watcher_reconcile_required: Option<String>,
     pub(super) roots: Vec<PathBuf>,
+    pub(super) unavailable_roots: Vec<PathBuf>,
     pub(super) images: Vec<ImageSummary>,
     image_positions: HashMap<PathBuf, usize>,
     pub(super) similarity_results: Option<Vec<ImageSummary>>,
@@ -291,19 +304,29 @@ impl ImageSearchApp {
                 send_stage("Opening index database…", 1);
                 let _ = db::open(&startup_db)?;
                 send_stage("Loading indexed roots…", 2);
-                let roots = db::load_roots(&startup_db)?;
+                let registered_roots = db::load_roots(&startup_db)?;
                 send_stage("Attaching portable indexes…", 3);
-                let warnings = portable::prepare_registered_roots(&startup_db, &roots);
+                let warnings = portable::prepare_registered_roots(&startup_db, &registered_roots);
+                let (roots, unavailable_roots) = partition_registered_roots(registered_roots);
                 send_stage("Loading indexed image catalog…", 4);
-                let images = db::load_image_summaries(&startup_db)?;
+                let mut images = db::load_image_summaries(&startup_db)?;
+                retain_available_images(&mut images, &roots);
                 let collections = collections::CollectionsState::load(&startup_db, &images)?;
                 let root_counts = db::load_root_counts(&startup_db)?;
-                Ok((roots, images, collections, root_counts, warnings))
+                Ok((
+                    roots,
+                    unavailable_roots,
+                    images,
+                    collections,
+                    root_counts,
+                    warnings,
+                ))
             })();
             match result {
-                Ok((roots, images, collections, root_counts, warnings)) => {
+                Ok((roots, unavailable_roots, images, collections, root_counts, warnings)) => {
                     let _ = startup_tx.send(StartupMessage::Ready {
                         roots,
+                        unavailable_roots,
                         images,
                         collections,
                         root_counts,
@@ -320,6 +343,7 @@ impl ImageSearchApp {
 
         Self {
             roots: Vec::new(),
+            unavailable_roots: Vec::new(),
             images: Vec::new(),
             image_positions: HashMap::new(),
             db_path,
@@ -414,21 +438,19 @@ impl ImageSearchApp {
                 }
                 StartupMessage::Ready {
                     roots,
+                    unavailable_roots,
                     images,
                     collections,
                     root_counts,
                     warnings,
                 } => {
                     self.roots = roots;
+                    self.unavailable_roots = unavailable_roots;
                     self.images = images;
                     self.rebuild_image_positions();
                     self.collections = collections;
                     self.root_counts = root_counts;
                     self.thumb_pool.set_roots(self.roots.clone());
-                    // `prepare_registered_roots` has already copied any legacy
-                    // AppData thumbnails into portable roots. The local cache can
-                    // now be retired and must not be recreated.
-                    self.thumb_pool.retire_legacy_cache();
                     self.fs_watch_service.set_roots(self.roots.clone());
                     self.busy = false;
                     self.progress = None;
@@ -474,7 +496,8 @@ impl ImageSearchApp {
                     // synchronous full catalog reload. New workers send ReplaceImages instead.
                     self.progress = None;
                 }
-                WorkerMessage::ReplaceImages(images) => {
+                WorkerMessage::ReplaceImages(mut images) => {
+                    retain_available_images(&mut images, &self.roots);
                     self.images = images;
                     self.rebuild_image_positions();
                     self.refresh_collection_effective_membership();
@@ -785,11 +808,13 @@ impl ImageSearchApp {
         };
         match portable::attach_root(&self.db_path, &folder) {
             Ok(outcome) => {
-                self.roots = db::load_roots(&self.db_path).unwrap_or_default();
+                let registered = db::load_roots(&self.db_path).unwrap_or_default();
+                (self.roots, self.unavailable_roots) = partition_registered_roots(registered);
                 self.root_counts = db::load_root_counts(&self.db_path).unwrap_or_default();
                 self.thumb_pool.set_roots(self.roots.clone());
                 self.fs_watch_service.set_roots(self.roots.clone());
                 self.images = db::load_image_summaries(&self.db_path).unwrap_or_default();
+                retain_available_images(&mut self.images, &self.roots);
                 self.rebuild_image_positions();
                 self.refresh_collection_effective_membership();
                 self.refresh_text_search_after_data_change();
@@ -822,10 +847,12 @@ impl ImageSearchApp {
         }
         match db::remove_root(&self.db_path, folder) {
             Ok(()) => {
-                self.roots = db::load_roots(&self.db_path).unwrap_or_default();
+                let registered = db::load_roots(&self.db_path).unwrap_or_default();
+                (self.roots, self.unavailable_roots) = partition_registered_roots(registered);
                 self.root_counts = db::load_root_counts(&self.db_path).unwrap_or_default();
                 self.thumb_pool.set_roots(self.roots.clone());
                 self.images = db::load_image_summaries(&self.db_path).unwrap_or_default();
+                retain_available_images(&mut self.images, &self.roots);
                 self.rebuild_image_positions();
                 self.fs_watch_service.set_roots(self.roots.clone());
                 self.similarity_results = None;
@@ -1444,7 +1471,8 @@ impl eframe::App for ImageSearchApp {
 
 #[cfg(test)]
 mod visible_order_tests {
-    use super::sort_indices_by_cached_name;
+    use super::{partition_registered_roots, sort_indices_by_cached_name};
+    use std::path::PathBuf;
 
     #[test]
     fn cached_name_sort_handles_large_synthetic_result_set() {
@@ -1461,5 +1489,29 @@ mod visible_order_tests {
         assert!(indices
             .windows(2)
             .all(|pair| { names[pair[0]].to_lowercase() <= names[pair[1]].to_lowercase() }));
+    }
+
+    #[test]
+    fn unavailable_registered_root_is_separated_from_active_roots() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let available =
+            std::env::temp_dir().join(format!("wis-available-root-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(available.join(".imagesearch")).unwrap();
+        std::fs::write(
+            available.join(".imagesearch").join("index.sqlite3"),
+            b"index",
+        )
+        .unwrap();
+        let unavailable = PathBuf::from(r"R:\missing-image-library");
+
+        let (active, missing) =
+            partition_registered_roots(vec![unavailable.clone(), available.clone()]);
+
+        assert_eq!(active, vec![available.clone()]);
+        assert_eq!(missing, vec![unavailable]);
+        let _ = std::fs::remove_dir_all(available);
     }
 }

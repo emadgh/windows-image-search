@@ -4,10 +4,10 @@ use update_via_github::UpdateConfig;
 pub use update_via_github::UpdateStatus;
 
 const REPOSITORY: &str = "emadgh/windows-image-search";
-const ASSET_NAME: &str = "windows-image-search.exe";
-const CHECKSUM_ASSET_NAME: &str = "windows-image-search.exe.sha256";
+const ASSET_NAME: &str = "windows-image-search-win64.zip";
+const CHECKSUM_ASSET_NAME: &str = "windows-image-search-win64.zip.sha256";
 const MAX_DOWNLOAD_SIZE: usize = 256 * 1024 * 1024;
-const MIN_EXECUTABLE_SIZE: usize = 1024 * 1024;
+const MIN_UPDATE_ASSET_SIZE: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UpdateSettings {
@@ -71,7 +71,7 @@ impl Default for UpdateManager {
             .with_checksum_asset(CHECKSUM_ASSET_NAME)
             .with_required_checksum(true)
             .with_max_download_size(MAX_DOWNLOAD_SIZE)
-            .with_min_executable_size(MIN_EXECUTABLE_SIZE);
+            .with_min_executable_size(MIN_UPDATE_ASSET_SIZE);
         Self {
             inner: update_via_github::UpdateManager::new(config),
         }

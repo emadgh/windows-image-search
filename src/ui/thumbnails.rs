@@ -181,6 +181,7 @@ impl ThumbnailPool {
             let scheduler = Arc::clone(&scheduler);
             let roots = Arc::clone(&roots);
             let tx = result_tx.clone();
+            let legacy_cache = legacy_cache_dir.clone();
             std::thread::spawn(move || loop {
                 let job = {
                     let (lock, wake) = &*scheduler;
@@ -199,7 +200,7 @@ impl ThumbnailPool {
                     }
                 };
 
-                let result = match load_or_build(&roots, &job.path) {
+                let result = match load_or_build(&legacy_cache, &roots, &job.path) {
                     Some((width, height, rgba)) => ThumbnailResult::Ready {
                         path: job.path.clone(),
                         width,
@@ -275,13 +276,6 @@ impl ThumbnailPool {
         }
     }
 
-    /// Delete the old AppData thumbnail cache after portable-root migration has
-    /// completed. This is intentionally separate from construction because
-    /// startup may still need the old cache as a migration source.
-    pub fn retire_legacy_cache(&self) {
-        let _ = std::fs::remove_dir_all(&self.legacy_cache_dir);
-    }
-
     pub fn cache_dirs(&self) -> Vec<PathBuf> {
         self.roots
             .read()
@@ -296,13 +290,32 @@ impl ThumbnailPool {
     }
 }
 
-fn load_or_build(roots: &RwLock<Vec<PathBuf>>, source: &Path) -> Option<(usize, usize, Vec<u8>)> {
+fn load_or_build(
+    legacy_cache: &Path,
+    roots: &RwLock<Vec<PathBuf>>,
+    source: &Path,
+) -> Option<(usize, usize, Vec<u8>)> {
     let root = roots
         .read()
         .ok()
         .and_then(|roots| portable::indexed_root_for_path(source, &roots).cloned());
     let image = match root {
         Some(root) if portable::is_indexed_root(&root) => {
+            // Existing thumbnails are safe, bounded files. Read them before
+            // inspecting or decoding the source so an unavailable libvips
+            // backend cannot hide thumbnails created by earlier versions.
+            if let Some(image) = thumbnail_cache::load_cached_for_root(&root, source) {
+                return Some(to_rgba(image));
+            }
+
+            // Some upgrades attached an already-portable index after the
+            // one-time migration window. Recover its old AppData thumbnail on
+            // demand and copy it into the root-owned cache.
+            if let Some(image) = thumbnail_cache::load_cached(legacy_cache, source) {
+                let _ = thumbnail_cache::store_from_decoded_for_root(&root, source, &image);
+                return Some(to_rgba(image));
+            }
+
             let oversized = std::fs::metadata(source)
                 .map(|meta| meta.len() > settings::DIRECT_DECODE_MAX_FILE_SIZE_BYTES)
                 .unwrap_or(false);
@@ -377,7 +390,7 @@ mod tests {
             .unwrap();
         let legacy = dir.join("legacy-cache");
         let roots = RwLock::new(Vec::new());
-        let (width, height, _) = load_or_build(&roots, &source).unwrap();
+        let (width, height, _) = load_or_build(&legacy, &roots, &source).unwrap();
         assert!(width <= thumbnail_cache::CACHE_EDGE as usize);
         assert!(height <= thumbnail_cache::CACHE_EDGE as usize);
         assert!(!legacy.exists());
@@ -385,13 +398,48 @@ mod tests {
     }
 
     #[test]
-    fn retire_legacy_cache_removes_upgrade_leftovers() {
-        let legacy = temp_dir("legacy-retire");
-        std::fs::create_dir_all(&legacy).unwrap();
-        std::fs::write(legacy.join("old.jpg"), b"old").unwrap();
-        let pool = ThumbnailPool::new(legacy.clone(), Vec::new());
-        pool.retire_legacy_cache();
-        assert!(!legacy.exists());
+    fn indexed_thumbnail_recovers_legacy_cache_into_portable_root() {
+        use image::{ImageBuffer, Rgb};
+        let root = temp_dir("legacy-recovery-root");
+        let legacy = temp_dir("legacy-recovery-cache");
+        std::fs::create_dir_all(root.join("images")).unwrap();
+        std::fs::create_dir_all(root.join(".imagesearch")).unwrap();
+        std::fs::write(root.join(".imagesearch").join("index.sqlite3"), b"index").unwrap();
+        let source = root.join("images").join("existing.png");
+        let image = DynamicImage::ImageRgb8(ImageBuffer::from_pixel(64, 32, Rgb([7, 8, 9])));
+        image.save(&source).unwrap();
+        thumbnail_cache::store_from_decoded(&legacy, &source, &image).unwrap();
+
+        let roots = RwLock::new(vec![root.clone()]);
+        let (width, height, _) = load_or_build(&legacy, &roots, &source).unwrap();
+        assert_eq!(width, 512);
+        assert_eq!(height, 256);
+        assert!(thumbnail_cache::load_cached_for_root(&root, &source).is_some());
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(legacy);
+    }
+
+    #[test]
+    fn indexed_oversized_source_uses_cached_thumbnail_before_source_decode() {
+        use image::{ImageBuffer, Rgb};
+        let root = temp_dir("oversized-cache-first");
+        let legacy = temp_dir("unused-legacy");
+        std::fs::create_dir_all(root.join("images")).unwrap();
+        std::fs::create_dir_all(root.join(".imagesearch")).unwrap();
+        std::fs::write(root.join(".imagesearch").join("index.sqlite3"), b"index").unwrap();
+        let source = root.join("images").join("huge.png");
+        let file = std::fs::File::create(&source).unwrap();
+        file.set_len(settings::DIRECT_DECODE_MAX_FILE_SIZE_BYTES + 1)
+            .unwrap();
+        let thumbnail = DynamicImage::ImageRgb8(ImageBuffer::from_pixel(32, 16, Rgb([11, 12, 13])));
+        thumbnail_cache::store_from_decoded_for_root(&root, &source, &thumbnail).unwrap();
+
+        let roots = RwLock::new(vec![root.clone()]);
+        let (width, height, _) = load_or_build(&legacy, &roots, &source).unwrap();
+        assert_eq!((width, height), (512, 256));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

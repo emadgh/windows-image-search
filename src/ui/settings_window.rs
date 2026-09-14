@@ -229,7 +229,7 @@ fn settings_library_indexing(app: &mut ImageSearchApp, ui: &mut egui::Ui, effect
 
     ui.add_space(10.0);
     ui.strong("Indexed folders");
-    if app.roots.is_empty() {
+    if app.roots.is_empty() && app.unavailable_roots.is_empty() {
         ui.label("No folders configured.");
     } else {
         for root in app.roots.clone() {
@@ -253,6 +253,27 @@ fn settings_library_indexing(app: &mut ImageSearchApp, ui: &mut egui::Ui, effect
                         }
                         if portable::is_indexed_root(&root) {
                             ui.small("✓ .imagesearch");
+                        }
+                    });
+                });
+            });
+        }
+        for root in app.unavailable_roots.clone() {
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(root.display().to_string());
+                        ui.colored_label(
+                            ui.visuals().warn_fg_color,
+                            "Unavailable — drive or folder is not connected",
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add_enabled(!app.busy, egui::Button::new("Remove").small())
+                            .clicked()
+                        {
+                            effects.remove_folder = Some(root.clone());
                         }
                     });
                 });

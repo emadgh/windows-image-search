@@ -1334,7 +1334,7 @@ fn build_embeddings(
 fn inspect_pending_image(
     item: &PendingImage,
 ) -> Result<(u32, u32, [u8; 3], u64, Vec<f32>, Vec<f32>, u64)> {
-    if item.size > DIRECT_DECODE_MAX_FILE_SIZE_BYTES {
+    if oversized_preview::requires_bounded_decode(&item.path, item.size)? {
         let asset =
             oversized_preview::load_or_build(&item.root, &item.path, item.size, item.modified)?;
         let content_fingerprint = decoded_content_fingerprint(&asset.image);
@@ -1386,9 +1386,9 @@ fn inspect_image(
     root: &Path,
     source_size: u64,
 ) -> Result<(u32, u32, [u8; 3], u64, Vec<f32>, Vec<f32>, u64)> {
-    if source_size > DIRECT_DECODE_MAX_FILE_SIZE_BYTES {
+    if oversized_preview::requires_bounded_decode(path, source_size)? {
         bail!(
-            "direct image decoder refused oversized source {}; resized preview is mandatory",
+            "direct image decoder refused memory-unsafe source {}; bounded preview is mandatory",
             path.display()
         );
     }
@@ -1438,7 +1438,7 @@ fn persist_descriptor_provenance(
     path: &Path,
     source_size: u64,
 ) -> Result<()> {
-    if source_size > DIRECT_DECODE_MAX_FILE_SIZE_BYTES {
+    if oversized_preview::requires_bounded_decode(path, source_size)? {
         db::set_descriptor_provenance(
             conn,
             path,
@@ -1451,6 +1451,26 @@ fn persist_descriptor_provenance(
     }
 }
 
+fn bounded_preview_asset_for_path(
+    path: &Path,
+    roots: &[PathBuf],
+    meta: &std::fs::Metadata,
+) -> Result<oversized_preview::PreviewAsset> {
+    let root = indexed_root_for_path(path, roots).with_context(|| {
+        format!(
+            "memory-unsafe source {} is outside an indexed root; safe-preview processing is unavailable",
+            path.display()
+        )
+    })?;
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0);
+    oversized_preview::load_or_build(root, path, meta.len(), modified)
+}
+
 pub(crate) fn safe_descriptor_image(
     path: &Path,
     roots: &[PathBuf],
@@ -1458,29 +1478,22 @@ pub(crate) fn safe_descriptor_image(
 ) -> Result<(DynamicImage, PathBuf, bool)> {
     let meta = std::fs::metadata(path)
         .with_context(|| format!("reading source metadata {}", path.display()))?;
-    match indexing_settings.source_policy(meta.len()) {
+    let policy = indexing_settings.source_policy(meta.len());
+    let needs_bounded = matches!(policy, SourcePolicy::OversizedPreview)
+        || (matches!(policy, SourcePolicy::DirectSource)
+            && oversized_preview::requires_bounded_decode(path, meta.len())?);
+    match policy {
         SourcePolicy::SkipConfigured => bail!(
             "source {} exceeds configured {} MiB indexing limit",
             path.display(),
             indexing_settings.max_file_size_mib
         ),
-        SourcePolicy::DirectSource => Ok((decode_image(path)?, path.to_path_buf(), false)),
-        SourcePolicy::OversizedPreview => {
-            let root = indexed_root_for_path(path, roots).with_context(|| {
-                format!(
-                    "oversized source {} is outside an indexed root; safe-preview processing is unavailable",
-                    path.display()
-                )
-            })?;
-            let modified = meta
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                .map(|duration| duration.as_secs() as i64)
-                .unwrap_or(0);
-            let asset = oversized_preview::load_or_build(root, path, meta.len(), modified)?;
+        SourcePolicy::DirectSource | SourcePolicy::OversizedPreview if needs_bounded => {
+            let asset = bounded_preview_asset_for_path(path, roots, &meta)?;
             Ok((asset.image, asset.path, true))
         }
+        SourcePolicy::DirectSource => Ok((decode_image(path)?, path.to_path_buf(), false)),
+        SourcePolicy::OversizedPreview => unreachable!("oversized policy must use bounded decode"),
     }
 }
 
@@ -1492,41 +1505,34 @@ fn safe_embedding_input_path(
 ) -> Result<PathBuf> {
     let meta = std::fs::metadata(path)
         .with_context(|| format!("reading source metadata {}", path.display()))?;
-    match indexing_settings.source_policy(meta.len()) {
+    let policy = indexing_settings.source_policy(meta.len());
+    let needs_bounded = matches!(policy, SourcePolicy::OversizedPreview)
+        || (matches!(policy, SourcePolicy::DirectSource)
+            && oversized_preview::requires_bounded_decode(path, meta.len())?);
+    match policy {
         SourcePolicy::SkipConfigured => bail!(
             "source {} exceeds configured {} MiB indexing limit",
             path.display(),
             indexing_settings.max_file_size_mib
         ),
-        SourcePolicy::OversizedPreview => {
-            let root = indexed_root_for_path(path, roots).with_context(|| {
-                format!(
-                    "oversized indexed source has no registered root: {}",
-                    path.display()
-                )
-            })?;
-            let modified = meta
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                .map(|duration| duration.as_secs() as i64)
-                .unwrap_or(0);
-            Ok(oversized_preview::load_or_build(root, path, meta.len(), modified)?.path)
+        SourcePolicy::DirectSource | SourcePolicy::OversizedPreview if needs_bounded => {
+            Ok(bounded_preview_asset_for_path(path, roots, &meta)?.path)
         }
         SourcePolicy::DirectSource if prefer_thumbnail => Ok(indexed_root_for_path(path, roots)
             .and_then(|root| thumbnail_cache::valid_cache_path_for_root(root, path))
             .unwrap_or_else(|| path.to_path_buf())),
         SourcePolicy::DirectSource => Ok(path.to_path_buf()),
+        SourcePolicy::OversizedPreview => unreachable!("oversized policy must use bounded decode"),
     }
 }
 
 fn decode_image(path: &Path) -> Result<DynamicImage> {
-    if std::fs::metadata(path)
-        .map(|meta| meta.len() > DIRECT_DECODE_MAX_FILE_SIZE_BYTES)
-        .unwrap_or(false)
-    {
+    let source_size = std::fs::metadata(path)
+        .with_context(|| format!("reading source metadata {}", path.display()))?
+        .len();
+    if oversized_preview::requires_bounded_decode(path, source_size)? {
         bail!(
-            "direct decoder refused source above 256 MiB: {}",
+            "direct decoder refused memory-unsafe source; bounded preview is required: {}",
             path.display()
         );
     }
@@ -1654,7 +1660,7 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("resized preview is mandatory"));
+        assert!(err.contains("bounded preview is mandatory"));
         assert!(!err.contains("opening"));
     }
 

@@ -284,27 +284,43 @@ impl ImageSearchApp {
         ui.vertical_centered(|ui| {
             ui.add_space((ui.available_height() * 0.14).min(90.0));
             if self.images.is_empty() {
-                ui.heading("Build your image library");
-                ui.add_space(4.0);
-                ui.label(
-                    "Add a folder to create or reuse its portable local image index. Your source files stay where they are.",
-                );
-                ui.add_space(12.0);
-                if ui
-                    .add_enabled(!self.busy, egui::Button::new("Add folder"))
-                    .clicked()
-                {
-                    self.prompt_add_library_folder();
-                }
-                if !self.roots.is_empty()
-                    && ui
-                        .add_enabled(!self.busy, egui::Button::new("Rescan library"))
+                if self.roots.is_empty() && !self.unavailable_roots.is_empty() {
+                    ui.heading("Image library is unavailable");
+                    ui.add_space(4.0);
+                    ui.label("Connect the missing drive or folder, then restart the application.");
+                    ui.add_space(8.0);
+                    for root in &self.unavailable_roots {
+                        ui.colored_label(ui.visuals().warn_fg_color, root.display().to_string());
+                    }
+                    ui.add_space(12.0);
+                    if ui.button("Open settings").clicked() {
+                        self.settings_open = true;
+                    }
+                } else {
+                    ui.heading("Build your image library");
+                    ui.add_space(4.0);
+                    ui.label(
+                        "Add a folder to create or reuse its portable local image index. Your source files stay where they are.",
+                    );
+                    ui.add_space(12.0);
+                    if ui
+                        .add_enabled(!self.busy, egui::Button::new("Add folder"))
                         .clicked()
-                {
-                    self.start_rescan();
+                    {
+                        self.prompt_add_library_folder();
+                    }
+                    if !self.roots.is_empty()
+                        && ui
+                            .add_enabled(!self.busy, egui::Button::new("Rescan library"))
+                            .clicked()
+                    {
+                        self.start_rescan();
+                    }
+                    ui.add_space(8.0);
+                    ui.small(
+                        "Existing .imagesearch indexes are attached and reused automatically.",
+                    );
                 }
-                ui.add_space(8.0);
-                ui.small("Existing .imagesearch indexes are attached and reused automatically.");
             } else {
                 ui.heading("No matching images");
                 ui.add_space(4.0);

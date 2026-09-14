@@ -7,12 +7,14 @@ use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
 
 pub const CACHE_EDGE: u32 = 512;
 const JPEG_QUALITY: u8 = 84;
 const PORTABLE_FNV_OFFSET: u64 = 0xcbf29ce484222325;
 const PORTABLE_FNV_PRIME: u64 = 0x100000001b3;
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 pub fn cache_dir_for_db(db_path: &Path) -> PathBuf {
     db_path
@@ -157,6 +159,9 @@ fn load_cached_path(path: PathBuf) -> Option<DynamicImage> {
 }
 
 fn store_at_path(cache_path: PathBuf, image: &DynamicImage) -> Result<PathBuf> {
+    if load_cached_path(cache_path.clone()).is_some() {
+        return Ok(cache_path);
+    }
     let thumb = image.thumbnail(CACHE_EDGE, CACHE_EDGE).to_rgb8();
     write_rgb_thumbnail(&cache_path, &thumb)?;
     Ok(cache_path)
@@ -175,17 +180,35 @@ fn build_and_store(cache_path: PathBuf, source: &Path) -> Option<DynamicImage> {
 }
 
 fn write_rgb_thumbnail(cache_path: &Path, thumb: &image::RgbImage) -> Result<()> {
-    if let Some(parent) = cache_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating thumbnail cache {}", parent.display()))?;
+    let parent = cache_path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("creating thumbnail cache {}", parent.display()))?;
+
+    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temp = parent.join(format!(".thumbnail-{}-{sequence}.tmp", std::process::id()));
+    let result = (|| -> Result<()> {
+        let file = File::create(&temp)
+            .with_context(|| format!("creating temporary thumbnail {}", temp.display()))?;
+        let mut encoder = JpegEncoder::new_with_quality(BufWriter::new(file), JPEG_QUALITY);
+        encoder
+            .encode_image(&DynamicImage::ImageRgb8(thumb.clone()))
+            .with_context(|| format!("encoding cached thumbnail {}", cache_path.display()))?;
+        drop(encoder);
+
+        match std::fs::rename(&temp, cache_path) {
+            Ok(()) => Ok(()),
+            Err(error) if cache_path.is_file() => {
+                let _ = std::fs::remove_file(&temp);
+                Ok(())
+            }
+            Err(error) => Err(error)
+                .with_context(|| format!("committing cached thumbnail {}", cache_path.display())),
+        }
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
     }
-    let file = File::create(cache_path)
-        .with_context(|| format!("creating cached thumbnail {}", cache_path.display()))?;
-    let mut encoder = JpegEncoder::new_with_quality(BufWriter::new(file), JPEG_QUALITY);
-    encoder
-        .encode_image(&DynamicImage::ImageRgb8(thumb.clone()))
-        .with_context(|| format!("encoding cached thumbnail {}", cache_path.display()))?;
-    Ok(())
+    result
 }
 
 #[cfg(test)]
@@ -259,6 +282,13 @@ mod tests {
         let cached = load_cached(&cache_dir, &source).unwrap();
         assert!(cached.width() <= CACHE_EDGE);
         assert!(cached.height() <= CACHE_EDGE);
+        assert!(std::fs::read_dir(&cache_dir)
+            .unwrap()
+            .flatten()
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".thumbnail-")));
         let _ = std::fs::remove_dir_all(dir);
     }
 
