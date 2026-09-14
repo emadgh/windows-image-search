@@ -51,7 +51,16 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target/release/windows-image-search.exe dist/windows-image-search.exe
-          Copy-Item "$env:VIPS_BIN_DIR\*.dll" dist/
+          $runtimeDlls = @(Get-ChildItem -LiteralPath $env:VIPS_BIN_DIR -File -Filter '*.dll')
+          if ($runtimeDlls.Count -eq 0) {
+            throw 'No libvips runtime DLLs were found beside libvips-42.dll.'
+          }
+          Copy-Item -LiteralPath $runtimeDlls.FullName -Destination dist/ -Force
+          foreach ($required in @('libvips-42.dll', 'libglib-2.0-0.dll', 'libgobject-2.0-0.dll')) {
+            if (-not (Test-Path -LiteralPath (Join-Path dist $required))) {
+              throw "Release bundle is missing required runtime DLL: $required"
+            }
+          }
           Copy-Item "docs/releases/${{ github.ref_name }}.md" dist/RELEASE-NOTES.md
           Copy-Item README.md, LICENSE dist/
           "${{ github.ref_name }}" | Set-Content -Encoding ascii dist/VERSION.txt
@@ -67,12 +76,18 @@ jobs:
           Copy-Item $bundle $versionedBundle
           "$bundleHash  $versionedBundle" | Set-Content -Encoding ascii -NoNewline "$versionedBundle.sha256"
 
-          if (-not (Test-Path 'dist/libvips-42.dll')) {
-            throw 'Release bundle is missing libvips-42.dll.'
-          }
           if (-not (Test-Path 'dist/windows-image-search.exe')) {
             throw 'Release bundle is missing windows-image-search.exe.'
           }
+      - name: Smoke test packaged executable
+        shell: pwsh
+        run: |
+          $stdout = Join-Path $env:RUNNER_TEMP 'windows-image-search-version.txt'
+          $stderr = Join-Path $env:RUNNER_TEMP 'windows-image-search-version.err.txt'
+          $process = Start-Process -FilePath (Resolve-Path -LiteralPath 'dist/windows-image-search.exe') -ArgumentList '--version' -WorkingDirectory (Resolve-Path -LiteralPath 'dist') -Wait -PassThru -NoNewWindow -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          if ($process.ExitCode -ne 0) { throw "Packaged executable failed to start: $(Get-Content -LiteralPath $stderr -Raw)" }
+          $version = Get-Content -LiteralPath $stdout -Raw
+          if ($version -notmatch 'Windows Image Search') { throw "Unexpected version output: $version" }
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:

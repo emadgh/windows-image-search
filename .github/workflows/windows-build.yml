@@ -127,7 +127,16 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path artifact | Out-Null
           Copy-Item target/release/windows-image-search.exe artifact/
-          Copy-Item "$env:VIPS_BIN_DIR\*.dll" artifact/
+          $runtimeDlls = @(Get-ChildItem -LiteralPath $env:VIPS_BIN_DIR -File -Filter '*.dll')
+          if ($runtimeDlls.Count -eq 0) {
+            throw 'No libvips runtime DLLs were found beside libvips-42.dll.'
+          }
+          Copy-Item -LiteralPath $runtimeDlls.FullName -Destination artifact/ -Force
+          foreach ($required in @('libvips-42.dll', 'libglib-2.0-0.dll', 'libgobject-2.0-0.dll')) {
+            if (-not (Test-Path -LiteralPath (Join-Path artifact $required))) {
+              throw "Windows test bundle is missing required runtime DLL: $required"
+            }
+          }
           Copy-Item scripts/run-indexed-sample-benchmark.ps1 artifact/
           Copy-Item scripts/run-v0.2-benchmark-gate.ps1 artifact/
           Copy-Item scripts/run-v0.3-face-benchmark-gate.ps1 artifact/
@@ -137,6 +146,15 @@ jobs:
           Copy-Item README.md artifact/
           Copy-Item LICENSE artifact/
           git rev-parse HEAD | Set-Content artifact/COMMIT.txt -Encoding ascii
+      - name: Smoke test packaged executable
+        shell: pwsh
+        run: |
+          $stdout = Join-Path $env:RUNNER_TEMP 'windows-image-search-version.txt'
+          $stderr = Join-Path $env:RUNNER_TEMP 'windows-image-search-version.err.txt'
+          $process = Start-Process -FilePath (Resolve-Path -LiteralPath 'artifact/windows-image-search.exe') -ArgumentList '--version' -WorkingDirectory (Resolve-Path -LiteralPath 'artifact') -Wait -PassThru -NoNewWindow -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          if ($process.ExitCode -ne 0) { throw "Packaged executable failed to start: $(Get-Content -LiteralPath $stderr -Raw)" }
+          $version = Get-Content -LiteralPath $stdout -Raw
+          if ($version -notmatch 'Windows Image Search') { throw "Unexpected version output: $version" }
       - name: Upload Windows test bundle
         uses: actions/upload-artifact@v4
         with:

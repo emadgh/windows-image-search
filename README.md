@@ -30,6 +30,8 @@ Keyboard shortcuts: select an image and press `Space` for an in-app whole-image 
 
 ## First run and portable indexes
 
+For the Windows beta, download and extract the complete `*-win64.zip` bundle before starting the app. Keep `windows-image-search.exe` beside the bundled libvips DLLs; an exe copied out of the archive (including the standalone exe asset from older beta releases) cannot start because Windows also needs `libvips-42.dll`, `libglib-2.0-0.dll` and `libgobject-2.0-0.dll`.
+
 1. Start `windows-image-search.exe`.
 2. Open **Preferences → Collections**, create/select a Collection, and add folders. New roots are scheduled for indexing automatically.
 3. A new folder gets a `.imagesearch` directory and can then be populated with **Rescan**. If the folder already contains a valid `.imagesearch/index.sqlite3`, the existing portable index is attached and reused without decoding/rescanning the source images.
@@ -232,7 +234,7 @@ cargo test --all-targets
 cargo run --release
 ```
 
-Windows CI reads the package version from `Cargo.toml` and uploads a versioned artifact such as `windows-image-search-v0.2.10-win64`. The ZIP contains `windows-image-search.exe`, `run-v0.2-benchmark-gate.ps1`, `README.md`, `LICENSE` and `VERSION.txt`.
+Windows CI reads the package version from `Cargo.toml` and uploads a versioned artifact such as `windows-image-search-v0.2.10-win64`. The ZIP contains `windows-image-search.exe`, the complete libvips runtime DLL set, `run-v0.2-benchmark-gate.ps1`, `README.md`, `LICENSE` and `VERSION.txt`. Run the executable from the extracted directory so Windows can resolve those DLLs.
 
 ## Privacy
 
