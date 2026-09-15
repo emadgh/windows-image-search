@@ -150,7 +150,16 @@ fn partition_registered_roots(roots: Vec<PathBuf>) -> (Vec<PathBuf>, Vec<PathBuf
 
 fn retain_available_images(images: &mut Vec<ImageSummary>, roots: &[PathBuf]) {
     let available: HashSet<&Path> = roots.iter().map(PathBuf::as_path).collect();
-    images.retain(|image| available.contains(image.root.as_path()));
+    images.retain(|image| available.contains(image.root.as_path()) && image.path.is_file());
+}
+
+/// Return whether an indexed record can still be presented to the user.
+///
+/// The database intentionally keeps records until a rescan reconciles them,
+/// but the UI must not surface a path whose root was detached or whose source
+/// file was removed while a filter/search was active.
+fn image_is_available(image: &ImageSummary, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| root == &image.root) && image.path.is_file()
 }
 
 enum StartupMessage {
@@ -920,7 +929,8 @@ impl ImageSearchApp {
             self.images
                 .iter()
                 .filter(|record| {
-                    self.collection_filter_matches(&record.path)
+                    image_is_available(record, &self.roots)
+                        && self.collection_filter_matches(&record.path)
                         && self.people_filter_matches(&record.path)
                         && (self.search_text.trim().is_empty()
                             || self
@@ -1035,6 +1045,9 @@ impl ImageSearchApp {
             .iter()
             .enumerate()
             .filter(|(_, record)| {
+                if !image_is_available(record, &self.roots) {
+                    return false;
+                }
                 if !self.collection_filter_matches(&record.path) {
                     return false;
                 }
@@ -1471,7 +1484,8 @@ impl eframe::App for ImageSearchApp {
 
 #[cfg(test)]
 mod visible_order_tests {
-    use super::{partition_registered_roots, sort_indices_by_cached_name};
+    use super::{partition_registered_roots, retain_available_images, sort_indices_by_cached_name};
+    use crate::db::ImageSummary;
     use std::path::PathBuf;
 
     #[test]
@@ -1513,5 +1527,43 @@ mod visible_order_tests {
         assert_eq!(active, vec![available.clone()]);
         assert_eq!(missing, vec![unavailable]);
         let _ = std::fs::remove_dir_all(available);
+    }
+
+    #[test]
+    fn missing_indexed_files_are_removed_from_the_presentable_catalog() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "wis-available-file-filter-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let present = root.join("present.jpg");
+        let missing = root.join("missing.jpg");
+        std::fs::write(&present, b"placeholder").unwrap();
+
+        let summary = |path: PathBuf| ImageSummary {
+            file_name: path.file_name().unwrap().to_string_lossy().into_owned(),
+            extension: "jpg".to_owned(),
+            path,
+            root: root.clone(),
+            size: 1,
+            modified: 0,
+            width: 1,
+            height: 1,
+            description: String::new(),
+            keywords: String::new(),
+            dominant: [0, 0, 0],
+            score: None,
+        };
+        let mut images = vec![summary(present.clone()), summary(missing)];
+
+        retain_available_images(&mut images, std::slice::from_ref(&root));
+
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].path, present);
+        let _ = std::fs::remove_dir_all(root);
     }
 }
