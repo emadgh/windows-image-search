@@ -4,7 +4,7 @@ A native, local-first image index and visual search application for Windows, wri
 
 Keyboard shortcuts: select an image and press `Space` for an in-app whole-image preview; use `Left`/`Right` to move through the currently displayed result order, and `Space` or `Esc` to close it. Press `Shift+Space` to toggle the Inspector sidebar. Shortcuts are ignored while typing in a text field.
 
-> **v0.4.0 — Stable release.** The release includes bounded libvips previews for large images, portable thumbnail recovery, unavailable-file filtering, Collections management, image preview navigation, and face/People search. See the [v0.4.0 release notes](docs/releases/v0.4.0.md).
+> **v0.4.1 — Stable release.** The release includes bounded libvips previews for large images, portable thumbnail recovery, unavailable-file filtering, Collections management, image preview navigation, and face/People search, plus global clipboard image search, responsive Grid sizing, and scoped rescans. See the [v0.4.1 release notes](docs/releases/v0.4.1.md).
 
 ## Current features (v0.4)
 
