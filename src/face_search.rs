@@ -302,6 +302,60 @@ pub fn list_persisted_faces(root: &Path, image_path: &Path) -> Result<Vec<Indexe
         .context("loading persisted faces for indexed image")
 }
 
+pub fn list_searchable_faces_for_image(
+    root: &Path,
+    image_path: &Path,
+) -> Result<Vec<IndexedFaceSuggestion>> {
+    let relative = portable::relative_source_path(root, image_path)?;
+    let conn = open_read_only(root)?;
+    let relative_text = relative.to_string_lossy().to_string();
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT f.face_id, f.face_ordinal, f.confidence,
+               f.bbox_x, f.bbox_y, f.bbox_width, f.bbox_height
+        FROM faces f
+        JOIN face_detection_state s ON s.image_path = f.image_path
+        JOIN images i ON i.path = f.image_path
+        JOIN face_embeddings e ON e.face_id = f.face_id
+        WHERE f.image_path = ?1
+          AND s.detector_id = f.detector_id
+          AND s.detector_version = f.detector_version
+          AND s.detector_cache_revision = f.detector_cache_revision
+          AND s.schema_version = f.schema_version
+          AND s.source_size = f.source_size
+          AND s.source_modified = f.source_modified
+          AND i.size = f.source_size
+          AND i.modified = f.source_modified
+          AND e.normalized = 1
+          AND e.detector_id = f.detector_id
+          AND e.detector_version = f.detector_version
+          AND e.detector_cache_revision = f.detector_cache_revision
+          AND e.detection_schema_version = f.schema_version
+          AND e.source_size = f.source_size
+          AND e.source_modified = f.source_modified
+        ORDER BY f.face_ordinal ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(params![relative_text], |row| {
+        Ok(IndexedFaceSuggestion {
+            root: root.to_path_buf(),
+            face_id: row.get(0)?,
+            image_path: image_path.to_path_buf(),
+            ordinal: row.get::<_, i64>(1)?.max(0) as usize,
+            confidence: row.get(2)?,
+            bbox: FaceBox {
+                x: row.get(3)?,
+                y: row.get(4)?,
+                width: row.get(5)?,
+                height: row.get(6)?,
+            },
+            group_size: None,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .context("loading searchable faces for indexed image")
+}
+
 pub fn search_indexed_face(
     roots: &[PathBuf],
     query_root: &Path,

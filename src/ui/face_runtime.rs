@@ -114,6 +114,19 @@ impl ImageSearchApp {
         }
     }
 
+    pub(super) fn schedule_people_snapshot_recovery(&mut self, snapshot_missing: bool) {
+        if snapshot_missing
+            && !self.roots.is_empty()
+            && self.face_embedding_settings.configured()
+            && self.face_embedding_settings.model_path.is_file()
+        {
+            self.face_runtime.run_people_after_embedding = true;
+            self.status =
+                "People snapshot missing; rebuilding groups from existing face embeddings…"
+                    .to_owned();
+        }
+    }
+
     pub(super) fn process_face_runtime_messages(&mut self) {
         while let Ok(message) = self.face_runtime.rx.try_recv() {
             match message {
@@ -202,6 +215,9 @@ impl ImageSearchApp {
                             );
                             self.refresh_face_suggestions();
                             self.refresh_people_filter_catalog();
+                            if self.people_manager_ui.open {
+                                self.refresh_people_manager();
+                            }
                         }
                         Err(error) => {
                             self.status = "People clustering failed".to_owned();

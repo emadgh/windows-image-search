@@ -100,6 +100,8 @@ impl ImageSearchApp {
                             }
                         }
                         SearchMode::SimilarImage => {
+                            ui.small("Paste an image anywhere with Ctrl+V to search for it.");
+                            ui.add_space(4.0);
                             ui.collapsing("Search a region", |ui| {
                                 ui.checkbox(&mut self.query_region_enabled, "Use selected rectangle");
                                 if self.query_region_enabled {

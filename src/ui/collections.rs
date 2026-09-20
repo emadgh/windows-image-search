@@ -167,6 +167,8 @@ enum CollectionAction {
     RemoveFolder(i64, PathBuf),
     RemoveFile(i64, PathBuf),
     Drop(i64, Vec<PathBuf>),
+    RescanCollection(i64),
+    RescanFolder(PathBuf),
 }
 
 impl ImageSearchApp {
@@ -478,6 +480,16 @@ impl ImageSearchApp {
             membership.folders.len(),
             membership.files.len()
         ));
+        if ui
+            .add_enabled(
+                !self.busy && (!membership.folders.is_empty() || !membership.files.is_empty()),
+                egui::Button::new("Rescan collection"),
+            )
+            .on_hover_text("Rescan only the folders and individual files in this collection.")
+            .clicked()
+        {
+            *action = Some(CollectionAction::RescanCollection(id));
+        }
         ui.add_space(10.0);
         ui.columns(2, |columns| {
             columns[0].strong("Contents");
@@ -806,6 +818,14 @@ impl ImageSearchApp {
                         CollectionAction::RemoveFile(id, path.to_owned())
                     });
                 }
+                if folder
+                    && ui
+                        .add_enabled(!self.busy, egui::Button::new("Rescan").small())
+                        .on_hover_text("Rescan only this folder and its subfolders.")
+                        .clicked()
+                {
+                    *action = Some(CollectionAction::RescanFolder(path.to_owned()));
+                }
                 let available = if folder {
                     self.folder_assignment_available(path)
                 } else {
@@ -839,6 +859,39 @@ impl ImageSearchApp {
     }
 
     fn apply_collection_action(&mut self, action: CollectionAction) {
+        match &action {
+            CollectionAction::RescanCollection(id) => {
+                let Some(item) = self.collections.items.iter().find(|item| item.id == *id) else {
+                    return;
+                };
+                let name = item.name.clone();
+                let membership = self
+                    .collections
+                    .memberships
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_default();
+                let mut paths = membership.folders;
+                paths.extend(membership.files);
+                self.collections.statistics.reset();
+                self.start_scoped_rescan(paths);
+                if self.indexing {
+                    self.status = format!("Rescanning collection ‘{name}’…");
+                }
+                return;
+            }
+            CollectionAction::RescanFolder(folder) => {
+                let label = folder.display().to_string();
+                self.collections.statistics.reset();
+                self.start_scoped_rescan(vec![folder.clone()]);
+                if self.indexing {
+                    self.status = format!("Rescanning folder {label}…");
+                }
+                return;
+            }
+            _ => {}
+        }
+
         let mut rescan_after = false;
         let mut sync_roots_after = false;
         let result = (|| -> anyhow::Result<String> {
@@ -902,6 +955,9 @@ impl ImageSearchApp {
                     let (added, skipped, attached) = self.assign_paths_to_collection(id, paths)?;
                     rescan_after |= attached;
                     format_collection_assignment_status(added, skipped)
+                }
+                CollectionAction::RescanCollection(_) | CollectionAction::RescanFolder(_) => {
+                    unreachable!("rescan actions return before collection mutations")
                 }
             };
             self.collections.statistics.reset();

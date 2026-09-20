@@ -174,6 +174,7 @@ enum StartupMessage {
         images: Vec<ImageSummary>,
         collections: collections::CollectionsState,
         root_counts: HashMap<PathBuf, (usize, usize)>,
+        people_snapshot_missing: bool,
         warnings: Vec<String>,
     },
     Error(String),
@@ -241,6 +242,11 @@ pub struct ImageSearchApp {
     pub(super) selected_paths: HashSet<PathBuf>,
     pub(super) selection_anchor: Option<PathBuf>,
     pub(super) focused_result: Option<PathBuf>,
+    file_context_path: Option<PathBuf>,
+    file_context_faces: Vec<crate::face_search::IndexedFaceSuggestion>,
+    clipboard_query_images: Vec<crate::visual_query::TemporaryQueryImage>,
+    pending_clipboard_query: Option<PathBuf>,
+    clipboard_paste_shortcut_down: bool,
     pub(super) result_grid_columns: usize,
     thumb_pool: ThumbnailPool,
     pub(super) tx: Sender<WorkerMessage>,
@@ -322,23 +328,40 @@ impl ImageSearchApp {
                 retain_available_images(&mut images, &roots);
                 let collections = collections::CollectionsState::load(&startup_db, &images)?;
                 let root_counts = db::load_root_counts(&startup_db)?;
+                // People groups are derived data. Older builds could leave valid face
+                // embeddings behind without a portable clustering snapshot, so audit the
+                // cache during the existing background startup load and self-heal below.
+                let people_snapshot_missing = {
+                    let conn = db::open(&startup_db)?;
+                    crate::people_store::load_state(&conn)?.is_none()
+                };
                 Ok((
                     roots,
                     unavailable_roots,
                     images,
                     collections,
                     root_counts,
+                    people_snapshot_missing,
                     warnings,
                 ))
             })();
             match result {
-                Ok((roots, unavailable_roots, images, collections, root_counts, warnings)) => {
+                Ok((
+                    roots,
+                    unavailable_roots,
+                    images,
+                    collections,
+                    root_counts,
+                    people_snapshot_missing,
+                    warnings,
+                )) => {
                     let _ = startup_tx.send(StartupMessage::Ready {
                         roots,
                         unavailable_roots,
                         images,
                         collections,
                         root_counts,
+                        people_snapshot_missing,
                         warnings,
                     });
                 }
@@ -412,6 +435,11 @@ impl ImageSearchApp {
             selected_paths: HashSet::new(),
             selection_anchor: None,
             focused_result: None,
+            file_context_path: None,
+            file_context_faces: Vec::new(),
+            clipboard_query_images: Vec::new(),
+            pending_clipboard_query: None,
+            clipboard_paste_shortcut_down: false,
             result_grid_columns: 1,
             thumb_pool,
             tx,
@@ -451,6 +479,7 @@ impl ImageSearchApp {
                     images,
                     collections,
                     root_counts,
+                    people_snapshot_missing,
                     warnings,
                 } => {
                     self.roots = roots;
@@ -467,6 +496,7 @@ impl ImageSearchApp {
                         .first()
                         .cloned()
                         .unwrap_or_else(|| "Ready".to_owned());
+                    self.schedule_people_snapshot_recovery(people_snapshot_missing);
                 }
                 StartupMessage::Error(error) => {
                     self.busy = false;
@@ -685,6 +715,32 @@ impl ImageSearchApp {
             if paths.len() == 1 { "" } else { "s" }
         );
         indexer::spawn_incremental_update(
+            self.db_path.clone(),
+            self.roots.clone(),
+            paths,
+            self.indexing_settings,
+            self.embedding_service.clone(),
+            control,
+            self.tx.clone(),
+        );
+    }
+
+    fn start_scoped_rescan(&mut self, paths: Vec<PathBuf>) {
+        if paths.is_empty() || self.busy {
+            return;
+        }
+        self.busy = true;
+        self.indexing = true;
+        self.allow_close = false;
+        self.close_confirmation_open = false;
+        self.progress = None;
+        self.last_error = None;
+        self.similarity_results = None;
+        self.selected_paths.clear();
+        let control = indexer::IndexControl::default();
+        self.index_control = Some(control.clone());
+        self.index_paused = false;
+        indexer::spawn_scoped_rescan(
             self.db_path.clone(),
             self.roots.clone(),
             paths,
@@ -914,6 +970,53 @@ impl ImageSearchApp {
 
     fn run_similarity_search(&mut self, path: PathBuf) {
         self.run_visual_query(path, None);
+    }
+
+    fn handle_clipboard_image_paste(&mut self, ctx: &egui::Context) {
+        let shortcut_down = crate::windows_shell::ctrl_v_is_down();
+        let native_press = shortcut_down && !self.clipboard_paste_shortcut_down;
+        self.clipboard_paste_shortcut_down = shortcut_down;
+        let egui_paste = ctx.input(|input| {
+            input
+                .events
+                .iter()
+                .any(|event| matches!(event, egui::Event::Paste(_)))
+                || (input.modifiers.ctrl && input.key_pressed(egui::Key::V))
+        });
+        let paste_pressed = native_press || egui_paste;
+        if paste_pressed {
+            match crate::clipboard_image::read_for_search() {
+                Ok(Some(query)) => {
+                    // Stop the focused text widget from also receiving the platform's text-paste
+                    // event, but only after confirming that the clipboard contains an image.
+                    ctx.input_mut(|input| {
+                        input.consume_key(egui::Modifiers::CTRL, egui::Key::V);
+                        input
+                            .events
+                            .retain(|event| !matches!(event, egui::Event::Paste(_)));
+                    });
+                    self.cancel_visual_search();
+                    self.cancel_face_search();
+                    self.query_region_enabled = false;
+                    if query.temporary {
+                        self.clipboard_query_images
+                            .push(crate::visual_query::TemporaryQueryImage(query.path.clone()));
+                    }
+                    self.pending_clipboard_query = Some(query.path);
+                    self.status = "Clipboard image ready for visual search…".to_owned();
+                }
+                Ok(None) => {}
+                Err(error) => self.last_error = Some(error),
+            }
+        }
+
+        if self.pending_clipboard_query.is_some() && self.can_run_similarity_search() {
+            let path = self
+                .pending_clipboard_query
+                .take()
+                .expect("clipboard query was checked above");
+            self.run_similarity_search(path);
+        }
     }
 
     pub(super) fn run_description_search(&mut self) {
@@ -1279,6 +1382,7 @@ impl eframe::App for ImageSearchApp {
         self.process_people_filter_messages();
         self.process_fs_watch_messages();
         self.process_thumbnail_messages(ctx);
+        self.handle_clipboard_image_paste(ctx);
         self.observe_text_search_input();
         self.dispatch_text_search_if_due();
         self.process_text_search_results();

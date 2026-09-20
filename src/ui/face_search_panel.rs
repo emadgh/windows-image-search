@@ -335,6 +335,11 @@ impl ImageSearchApp {
         });
     }
 
+    pub(super) fn start_context_face_search(&mut self, query: IndexedFaceSuggestion) {
+        self.open_face_search();
+        self.start_indexed_face_search(query);
+    }
+
     fn start_external_face_search(&mut self, query: ExternalFaceChoice) {
         if self.busy
             || self.face_search_ui.searching

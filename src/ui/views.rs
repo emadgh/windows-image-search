@@ -1,6 +1,7 @@
 use super::photo_grid::{self, PhotoGridSpec, PhotoTileMode};
 use super::{ImageSearchApp, SortMode, ThumbnailFit};
 use crate::face_detection::FaceBox;
+use crate::face_search::IndexedFaceSuggestion;
 use chrono::{Local, TimeZone};
 use eframe::egui;
 use std::path::{Path, PathBuf};
@@ -19,6 +20,19 @@ struct RecordView {
     keywords: String,
     dominant: [u8; 3],
     score: Option<f32>,
+}
+
+#[derive(Clone)]
+enum FileContextAction {
+    Inspect,
+    SearchFace(IndexedFaceSuggestion),
+    CopyFile,
+    OpenFile,
+    OpenInPhotoshop,
+    SearchSimilar,
+    SearchByColor([u8; 3]),
+    OpenFileLocation,
+    WindowsContextMenu,
 }
 
 impl ImageSearchApp {
@@ -41,15 +55,21 @@ impl ImageSearchApp {
     }
 
     pub(super) fn show_grid(&mut self, ui: &mut egui::Ui, visible: &[usize]) {
-        let cell_width = self.thumb_size + 24.0;
-        let row_height = self.thumb_size + 62.0;
+        const CELL_HORIZONTAL_PADDING: f32 = 24.0;
+        const CELL_VERTICAL_OVERHEAD: f32 = 62.0;
+
+        let spacing = ui.spacing().item_spacing.x;
+        let scrollbar_width = ui.spacing().scroll.allocated_width();
+        let available_width = (ui.available_width() - scrollbar_width).max(1.0);
+        let preferred_cell_width = self.thumb_size + CELL_HORIZONTAL_PADDING;
+        let (columns, cell_width) =
+            photo_grid::nearest_fitted_layout(available_width, preferred_cell_width, spacing);
+        let fitted_thumb_size = (cell_width - CELL_HORIZONTAL_PADDING).max(1.0);
+        let row_height = fitted_thumb_size + CELL_VERTICAL_OVERHEAD;
         let fit = self.thumb_fit;
-        let spec = PhotoGridSpec::new("main-result-photo-grid", cell_width, row_height);
-        self.result_grid_columns = photo_grid::columns_for_width(
-            ui.available_width(),
-            cell_width,
-            ui.spacing().item_spacing.x,
-        );
+        let spec =
+            PhotoGridSpec::new("main-result-photo-grid", cell_width, row_height).columns(columns);
+        self.result_grid_columns = columns;
 
         photo_grid::show(ui, visible.len(), spec, |ui, pos| {
             let record = self.record_view(visible[pos]);
@@ -59,7 +79,7 @@ impl ImageSearchApp {
                 let response = photo_grid::photo_tile(
                     ui,
                     &texture,
-                    egui::vec2(self.thumb_size, self.thumb_size),
+                    egui::vec2(fitted_thumb_size, fitted_thumb_size),
                     PhotoTileMode::Full(fit),
                     selected,
                     egui::Sense::click_and_drag(),
@@ -71,20 +91,20 @@ impl ImageSearchApp {
             } else {
                 photo_grid::loading_tile(
                     ui,
-                    egui::vec2(self.thumb_size, self.thumb_size),
+                    egui::vec2(fitted_thumb_size, fitted_thumb_size),
                     selected,
                     egui::Sense::click_and_drag(),
                 )
             };
 
-            self.handle_result_response(&response, &record.path);
+            self.handle_result_response(&response, &record.path, &record.root, record.dominant);
             self.attach_collection_drag_source(&response, &record.path);
 
             let label = ui.add(
                 egui::Label::new(truncate_middle(&record.file_name, 30))
                     .sense(egui::Sense::click_and_drag()),
             );
-            self.handle_result_response(&label, &record.path);
+            self.handle_result_response(&label, &record.path, &record.root, record.dominant);
             self.attach_collection_drag_source(&label, &record.path);
             label.on_hover_text(record.path.display().to_string());
 
@@ -142,7 +162,12 @@ impl ImageSearchApp {
                                 egui::Sense::click_and_drag(),
                             )
                         };
-                        self.handle_result_response(&response, &record.path);
+                        self.handle_result_response(
+                            &response,
+                            &record.path,
+                            &record.root,
+                            record.dominant,
+                        );
                         self.attach_collection_drag_source(&response, &record.path);
 
                         let name_text = format!(
@@ -156,7 +181,12 @@ impl ImageSearchApp {
                                 .wrap()
                                 .sense(egui::Sense::click_and_drag()),
                         );
-                        self.handle_result_response(&name, &record.path);
+                        self.handle_result_response(
+                            &name,
+                            &record.path,
+                            &record.root,
+                            record.dominant,
+                        );
                         self.attach_collection_drag_source(&name, &record.path);
                         name.on_hover_text(record.path.display().to_string());
 
@@ -208,12 +238,87 @@ impl ImageSearchApp {
             });
     }
 
-    fn handle_result_response(&mut self, response: &egui::Response, path: &Path) {
+    fn handle_result_response(
+        &mut self,
+        response: &egui::Response,
+        path: &Path,
+        root: &Path,
+        dominant: [u8; 3],
+    ) {
         if response.secondary_clicked() {
             if !self.selected_paths.contains(path) {
                 self.select_path(path, false);
             }
-            crate::windows_shell::show_context_menu(path.to_path_buf());
+            self.file_context_path = Some(path.to_path_buf());
+            self.file_context_faces =
+                crate::face_search::list_searchable_faces_for_image(root, path).unwrap_or_default();
+        }
+        let context_faces = (self.file_context_path.as_deref() == Some(path))
+            .then(|| self.file_context_faces.clone())
+            .unwrap_or_default();
+        let mut context_action = None;
+        response.context_menu(|ui| {
+            ui.set_min_width(210.0);
+            if ui.button("Inspect").clicked() {
+                context_action = Some(FileContextAction::Inspect);
+                ui.close();
+            }
+            ui.separator();
+            if ui.button("Copy file").clicked() {
+                context_action = Some(FileContextAction::CopyFile);
+                ui.close();
+            }
+            if ui.button("Open file").clicked() {
+                context_action = Some(FileContextAction::OpenFile);
+                ui.close();
+            }
+            if ui.button("Open file in Photoshop").clicked() {
+                context_action = Some(FileContextAction::OpenInPhotoshop);
+                ui.close();
+            }
+            ui.separator();
+            if ui.button("Search similar").clicked() {
+                context_action = Some(FileContextAction::SearchSimilar);
+                ui.close();
+            }
+            ui.horizontal(|ui| {
+                if ui.button("Search by color").clicked() {
+                    context_action = Some(FileContextAction::SearchByColor(dominant));
+                    ui.close();
+                }
+                swatch(ui, dominant);
+                ui.small(format!(
+                    "#{:02X}{:02X}{:02X}",
+                    dominant[0], dominant[1], dominant[2]
+                ));
+            });
+            if context_faces.len() == 1 {
+                if ui.button("Search face").clicked() {
+                    context_action = Some(FileContextAction::SearchFace(context_faces[0].clone()));
+                    ui.close();
+                }
+            } else if context_faces.len() > 1 {
+                ui.menu_button("Search face", |ui| {
+                    for face in &context_faces {
+                        if ui.button(format!("Face {}", face.ordinal + 1)).clicked() {
+                            context_action = Some(FileContextAction::SearchFace(face.clone()));
+                            ui.close();
+                        }
+                    }
+                });
+            }
+            if ui.button("Open file location").clicked() {
+                context_action = Some(FileContextAction::OpenFileLocation);
+                ui.close();
+            }
+            ui.separator();
+            if ui.button("Context menu").clicked() {
+                context_action = Some(FileContextAction::WindowsContextMenu);
+                ui.close();
+            }
+        });
+        if let Some(action) = context_action {
+            self.run_file_context_action(action, path, &response.ctx);
         }
         if response.clicked() {
             let modifiers = response.ctx.input(|input| input.modifiers);
@@ -222,6 +327,50 @@ impl ImageSearchApp {
         }
         if response.double_clicked() {
             let _ = open::that(path);
+        }
+    }
+
+    fn run_file_context_action(
+        &mut self,
+        action: FileContextAction,
+        path: &Path,
+        ctx: &egui::Context,
+    ) {
+        let path = path.to_path_buf();
+        match action {
+            FileContextAction::Inspect => self.open_image_preview(path, ctx),
+            FileContextAction::SearchFace(query) => self.start_context_face_search(query),
+            FileContextAction::CopyFile => {
+                if let Err(error) = crate::windows_shell::copy_file(path) {
+                    self.last_error = Some(error);
+                }
+            }
+            FileContextAction::OpenFile => {
+                if let Err(error) = open::that(&path) {
+                    self.last_error = Some(format!("Cannot open {}: {error}", path.display()));
+                }
+            }
+            FileContextAction::OpenInPhotoshop => {
+                if let Err(error) = crate::windows_shell::open_in_photoshop(path) {
+                    self.last_error = Some(error);
+                }
+            }
+            FileContextAction::SearchSimilar => self.run_similarity_search(path),
+            FileContextAction::SearchByColor(color) => {
+                self.cancel_visual_search();
+                self.cancel_face_search();
+                self.similarity_results = None;
+                self.query_image = None;
+                self.clear_face_search_result_state();
+                self.target_color = color;
+                self.color_enabled = true;
+                self.status = format!(
+                    "Filtering by dominant color #{:02X}{:02X}{:02X}",
+                    color[0], color[1], color[2]
+                );
+            }
+            FileContextAction::OpenFileLocation => crate::windows_shell::show_in_explorer(path),
+            FileContextAction::WindowsContextMenu => crate::windows_shell::show_context_menu(path),
         }
     }
 }

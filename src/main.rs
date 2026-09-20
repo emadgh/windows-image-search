@@ -2,6 +2,7 @@
 
 mod ann;
 mod benchmark_workspace;
+mod clipboard_image;
 mod db;
 mod descriptor_cache;
 mod duplicates;
