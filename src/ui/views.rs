@@ -31,6 +31,7 @@ enum FileContextAction {
     OpenInPhotoshop,
     SearchSimilar,
     SearchByColor([u8; 3]),
+    SearchEverything { numeric_only: bool },
     OpenFileLocation,
     WindowsContextMenu,
 }
@@ -307,6 +308,16 @@ impl ImageSearchApp {
                     }
                 });
             }
+            if crate::windows_shell::everything_is_available() {
+                let search_everything = ui
+                    .button("Search by Everything")
+                    .on_hover_text("Ctrl+click to search only the number in the file name");
+                if search_everything.clicked() {
+                    let numeric_only = ui.input(|input| input.modifiers.ctrl);
+                    context_action = Some(FileContextAction::SearchEverything { numeric_only });
+                    ui.close();
+                }
+            }
             if ui.button("Open file location").clicked() {
                 context_action = Some(FileContextAction::OpenFileLocation);
                 ui.close();
@@ -368,6 +379,11 @@ impl ImageSearchApp {
                     "Filtering by dominant color #{:02X}{:02X}{:02X}",
                     color[0], color[1], color[2]
                 );
+            }
+            FileContextAction::SearchEverything { numeric_only } => {
+                if let Err(error) = crate::windows_shell::search_in_everything(path, numeric_only) {
+                    self.last_error = Some(error);
+                }
             }
             FileContextAction::OpenFileLocation => crate::windows_shell::show_in_explorer(path),
             FileContextAction::WindowsContextMenu => crate::windows_shell::show_context_menu(path),
