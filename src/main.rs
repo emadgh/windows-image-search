@@ -669,9 +669,14 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
+    let app_icon =
+        eframe::icon_data::from_png_bytes(include_bytes!("../assets/windows-image-search.png"))
+            .expect("failed to load the application icon");
+
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(APP_TITLE)
+            .with_icon(app_icon)
             .with_inner_size([1380.0, 860.0])
             .with_min_inner_size([900.0, 600.0]),
         ..Default::default()

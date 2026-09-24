@@ -264,6 +264,7 @@ pub struct ImageSearchApp {
     pub(super) progress: Option<(usize, usize)>,
     pub(super) last_error: Option<String>,
     settings_open: bool,
+    about_open: bool,
     close_confirmation_open: bool,
     allow_close: bool,
 }
@@ -457,6 +458,7 @@ impl ImageSearchApp {
             progress: Some((0, 4)),
             last_error: None,
             settings_open: false,
+            about_open: false,
             close_confirmation_open: false,
             allow_close: false,
         }
@@ -1330,6 +1332,27 @@ impl ImageSearchApp {
         settings_window::show(self, ctx);
     }
 
+    fn show_about_window(&mut self, ctx: &egui::Context) {
+        if !self.about_open {
+            return;
+        }
+
+        egui::Window::new("About Windows Image Search")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut self.about_open)
+            .show(ctx, |ui| {
+                ui.heading("Windows Image Search");
+                ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
+                ui.add_space(8.0);
+                ui.hyperlink_to("emadghasemi.ir", "https://emadghasemi.ir");
+                ui.hyperlink_to(
+                    "GitHub repository",
+                    "https://github.com/emadgh/windows-image-search",
+                );
+            });
+    }
+
     fn show_close_confirmation(&mut self, ctx: &egui::Context) {
         if !self.close_confirmation_open {
             return;
@@ -1450,6 +1473,9 @@ impl eframe::App for ImageSearchApp {
                 if ui.button("Settings").clicked() {
                     self.settings_open = true;
                 }
+                if ui.button("About").clicked() {
+                    self.about_open = true;
+                }
                 ui.separator();
                 ui.small(format!("{} indexed images", self.images.len()));
                 if self.indexing {
@@ -1463,6 +1489,7 @@ impl eframe::App for ImageSearchApp {
         self.show_inspector(ctx);
         self.show_collections_workspace(ctx);
         self.show_settings_window(ctx);
+        self.show_about_window(ctx);
         self.show_people_manager_window(ctx);
         self.show_duplicate_review(ctx);
 
