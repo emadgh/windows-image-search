@@ -226,10 +226,40 @@ pub fn spawn_incremental_update(
             &embedding_service,
             &control,
             &tx,
+            false,
         );
         if let Err(err) = result {
             let _ = tx.send(WorkerMessage::Error(format!(
                 "Live indexing failed: {err:#}"
+            )));
+        }
+        let _ = tx.send(WorkerMessage::Idle);
+    });
+}
+
+pub fn spawn_scoped_rescan(
+    db_path: PathBuf,
+    roots: Vec<PathBuf>,
+    paths: Vec<PathBuf>,
+    indexing_settings: IndexingSettings,
+    embedding_service: EmbeddingService,
+    control: IndexControl,
+    tx: Sender<WorkerMessage>,
+) {
+    std::thread::spawn(move || {
+        let result = incremental_update(
+            &db_path,
+            &roots,
+            &paths,
+            indexing_settings,
+            &embedding_service,
+            &control,
+            &tx,
+            true,
+        );
+        if let Err(err) = result {
+            let _ = tx.send(WorkerMessage::Error(format!(
+                "Scoped rescan failed: {err:#}"
             )));
         }
         let _ = tx.send(WorkerMessage::Idle);
@@ -244,6 +274,7 @@ fn incremental_update(
     embedding_service: &EmbeddingService,
     control: &IndexControl,
     tx: &Sender<WorkerMessage>,
+    reconcile_subtrees: bool,
 ) -> Result<()> {
     let indexing_settings = indexing_settings.sanitized();
     let mut conn = db::open(db_path)?;
@@ -251,6 +282,7 @@ fn incremental_update(
     let unique_paths: HashSet<PathBuf> = changed_paths.iter().cloned().collect();
     let mut candidates = HashMap::<PathBuf, PathBuf>::new();
     let mut removed_targets = Vec::<PathBuf>::new();
+    let mut safely_scanned_subtrees = Vec::<PathBuf>::new();
     let mut oversized_skipped = 0usize;
     let mut oversized_preview_eligible = 0usize;
 
@@ -284,6 +316,7 @@ fn incremental_update(
                     }
                 }
             } else if changed.is_dir() {
+                let mut traversal_complete = true;
                 for entry in WalkDir::new(&changed)
                     .follow_links(false)
                     .into_iter()
@@ -314,6 +347,7 @@ fn incremental_update(
                         }
                         Ok(_) => {}
                         Err(err) => {
+                            traversal_complete = false;
                             let _ = tx.send(WorkerMessage::Error(format!(
                                 "Live subtree scan could not access {}: {err}",
                                 changed.display()
@@ -321,9 +355,34 @@ fn incremental_update(
                         }
                     }
                 }
+                if traversal_complete {
+                    safely_scanned_subtrees.push(changed);
+                }
             }
         } else {
             removed_targets.push(changed);
+        }
+    }
+
+    // A manual subtree rescan is also a reconciliation boundary. Remove saved
+    // rows that no longer exist inside a completely traversed subtree, while
+    // leaving every sibling folder and collection untouched.
+    if reconcile_subtrees && !safely_scanned_subtrees.is_empty() {
+        let indexed_paths = db::load_file_states(&conn)?;
+        let discovered_paths = db::load_discovered_paths(db_path)?;
+        for subtree in &safely_scanned_subtrees {
+            removed_targets.extend(
+                indexed_paths
+                    .keys()
+                    .filter(|path| missing_from_scanned_subtree(path, subtree, &candidates))
+                    .cloned(),
+            );
+            removed_targets.extend(
+                discovered_paths
+                    .iter()
+                    .filter(|path| missing_from_scanned_subtree(path, subtree, &candidates))
+                    .cloned(),
+            );
         }
     }
 
@@ -337,6 +396,8 @@ fn incremental_update(
     }
 
     let mut removed_paths = Vec::<PathBuf>::new();
+    removed_targets.sort();
+    removed_targets.dedup();
     for target in removed_targets {
         control.wait_if_paused();
         let _ = db::delete_discovered_path_tree(&conn, &target)?;
@@ -564,6 +625,14 @@ fn incremental_update(
         removed_paths.len()
     )));
     Ok(())
+}
+
+fn missing_from_scanned_subtree(
+    path: &Path,
+    subtree: &Path,
+    candidates: &HashMap<PathBuf, PathBuf>,
+) -> bool {
+    path.starts_with(subtree) && !candidates.contains_key(path)
 }
 
 fn durable_decode_failure_reason(err: &anyhow::Error) -> Option<String> {
@@ -1630,6 +1699,32 @@ pub fn is_supported_image(path: &Path) -> bool {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn subtree_reconciliation_never_removes_sibling_collection_paths() {
+        let root = PathBuf::from("C:/library");
+        let selected = root.join("collection-a");
+        let missing = selected.join("removed.jpg");
+        let retained = selected.join("kept.jpg");
+        let sibling = root.join("collection-b").join("untouched.jpg");
+        let candidates = HashMap::from([(retained.clone(), root)]);
+
+        assert!(missing_from_scanned_subtree(
+            &missing,
+            &selected,
+            &candidates
+        ));
+        assert!(!missing_from_scanned_subtree(
+            &retained,
+            &selected,
+            &candidates
+        ));
+        assert!(!missing_from_scanned_subtree(
+            &sibling,
+            &selected,
+            &candidates
+        ));
+    }
 
     #[test]
     fn index_control_pause_resume_is_cooperative() {

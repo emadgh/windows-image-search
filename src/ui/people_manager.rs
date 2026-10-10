@@ -167,7 +167,7 @@ impl ImageSearchApp {
         self.refresh_people_manager();
     }
 
-    fn refresh_people_manager(&mut self) {
+    pub(super) fn refresh_people_manager(&mut self) {
         if self.people_manager_ui.loading {
             return;
         }

@@ -4,8 +4,10 @@ mod collections_window;
 mod duplicate_review;
 mod face_runtime;
 mod face_search_panel;
+mod icons;
 mod image_preview;
 mod inspector;
+mod navigation_tree;
 mod people_filter;
 mod people_manager;
 mod photo_grid;
@@ -17,6 +19,7 @@ mod theme;
 mod thumbnails;
 mod update_ui;
 mod ux;
+pub(crate) mod view_settings;
 mod views;
 
 use crate::db::{self, ImageSummary};
@@ -42,7 +45,8 @@ use std::time::{Duration, Instant};
 use texture_lru::{TextureLru, DEFAULT_GPU_TEXTURE_CAPACITY};
 use thumbnails::{ThumbnailPool, ThumbnailResult};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(super) enum AppearanceMode {
     System,
     Light,
@@ -67,19 +71,22 @@ pub(super) enum SearchMode {
     Face,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(super) enum ViewMode {
     Grid,
     Details,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(super) enum ThumbnailFit {
     Contain,
     Cover,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(super) enum SortMode {
     Relevance,
     Name,
@@ -113,6 +120,7 @@ struct VisibleOrderKey {
     text_match_count: usize,
     collection_filter: Option<i64>,
     collection_revision: u64,
+    folder_scope_revision: u64,
     people_resolve_generation: u64,
     people_resolving: bool,
     color_enabled: bool,
@@ -174,6 +182,7 @@ enum StartupMessage {
         images: Vec<ImageSummary>,
         collections: collections::CollectionsState,
         root_counts: HashMap<PathBuf, (usize, usize)>,
+        people_snapshot_missing: bool,
         warnings: Vec<String>,
     },
     Error(String),
@@ -212,6 +221,8 @@ pub struct ImageSearchApp {
     people_filter_ui: people_filter::PeopleFilterUiState,
     people_manager_ui: people_manager::PeopleManagerUiState,
     collections: collections::CollectionsState,
+    navigation: navigation_tree::NavigationState,
+    view_preferences: view_settings::ViewPreferences,
     pub(super) collections_open: bool,
     pub(super) search_mode: SearchMode,
     pub(super) search_text: String,
@@ -241,6 +252,11 @@ pub struct ImageSearchApp {
     pub(super) selected_paths: HashSet<PathBuf>,
     pub(super) selection_anchor: Option<PathBuf>,
     pub(super) focused_result: Option<PathBuf>,
+    file_context_path: Option<PathBuf>,
+    file_context_faces: Vec<crate::face_search::IndexedFaceSuggestion>,
+    clipboard_query_images: Vec<crate::visual_query::TemporaryQueryImage>,
+    pending_clipboard_query: Option<PathBuf>,
+    clipboard_paste_shortcut_down: bool,
     pub(super) result_grid_columns: usize,
     thumb_pool: ThumbnailPool,
     pub(super) tx: Sender<WorkerMessage>,
@@ -258,6 +274,7 @@ pub struct ImageSearchApp {
     pub(super) progress: Option<(usize, usize)>,
     pub(super) last_error: Option<String>,
     settings_open: bool,
+    about_open: bool,
     close_confirmation_open: bool,
     allow_close: bool,
 }
@@ -267,11 +284,16 @@ impl ImageSearchApp {
         let (tx, rx) = std::sync::mpsc::channel();
         let (startup_tx, startup_rx) = std::sync::mpsc::channel();
         let app_data_dir = db_path.parent().unwrap_or_else(|| Path::new("."));
+        let view_preferences =
+            view_settings::ViewPreferences::new(view_settings::ViewSettings::path_for_db(&db_path));
+        let view = view_preferences.settings.clone();
         // This path is retained only so older AppData thumbnail caches can be
         // migrated into each root's portable `.imagesearch/thumbnails` folder.
         let legacy_thumbnail_cache = thumbnail_cache::cache_dir_for_db(&db_path);
         let settings_path = app_data_dir.join("performance-settings.ini");
         let indexing_settings = settings::load(&settings_path);
+        let navigation =
+            navigation_tree::NavigationState::new(app_data_dir.join("navigation-settings.json"));
         let update_settings_path = app_data_dir.join("update-settings.ini");
         let update_settings = crate::update::load_settings(&update_settings_path);
         let update_manager = UpdateManager::default();
@@ -322,23 +344,40 @@ impl ImageSearchApp {
                 retain_available_images(&mut images, &roots);
                 let collections = collections::CollectionsState::load(&startup_db, &images)?;
                 let root_counts = db::load_root_counts(&startup_db)?;
+                // People groups are derived data. Older builds could leave valid face
+                // embeddings behind without a portable clustering snapshot, so audit the
+                // cache during the existing background startup load and self-heal below.
+                let people_snapshot_missing = {
+                    let conn = db::open(&startup_db)?;
+                    crate::people_store::load_state(&conn)?.is_none()
+                };
                 Ok((
                     roots,
                     unavailable_roots,
                     images,
                     collections,
                     root_counts,
+                    people_snapshot_missing,
                     warnings,
                 ))
             })();
             match result {
-                Ok((roots, unavailable_roots, images, collections, root_counts, warnings)) => {
+                Ok((
+                    roots,
+                    unavailable_roots,
+                    images,
+                    collections,
+                    root_counts,
+                    people_snapshot_missing,
+                    warnings,
+                )) => {
                     let _ = startup_tx.send(StartupMessage::Ready {
                         roots,
                         unavailable_roots,
                         images,
                         collections,
                         root_counts,
+                        people_snapshot_missing,
                         warnings,
                     });
                 }
@@ -383,6 +422,8 @@ impl ImageSearchApp {
             people_filter_ui,
             people_manager_ui,
             collections: collections::CollectionsState::default(),
+            navigation,
+            view_preferences,
             collections_open: false,
             search_mode: SearchMode::Text,
             search_text: String::new(),
@@ -395,16 +436,16 @@ impl ImageSearchApp {
             color_enabled: false,
             target_color: [128, 128, 128],
             color_tolerance: 0.22,
-            view_mode: ViewMode::Grid,
-            thumb_size: 168.0,
-            thumb_fit: ThumbnailFit::Contain,
-            sort_mode: SortMode::Relevance,
+            view_mode: view.view_mode,
+            thumb_size: view.thumb_size,
+            thumb_fit: view.thumb_fit,
+            sort_mode: view.sort_mode,
             image_catalog_revision: 0,
             similarity_results_revision: 0,
             visible_order_cache: RefCell::new(VisibleOrderCache::default()),
-            inspector_open: true,
+            inspector_open: view.inspector_open,
             image_preview: Default::default(),
-            appearance_mode: AppearanceMode::System,
+            appearance_mode: view.appearance_mode,
             system_dark_mode: None,
             task_center_open: false,
             textures: HashMap::new(),
@@ -412,6 +453,11 @@ impl ImageSearchApp {
             selected_paths: HashSet::new(),
             selection_anchor: None,
             focused_result: None,
+            file_context_path: None,
+            file_context_faces: Vec::new(),
+            clipboard_query_images: Vec::new(),
+            pending_clipboard_query: None,
+            clipboard_paste_shortcut_down: false,
             result_grid_columns: 1,
             thumb_pool,
             tx,
@@ -429,6 +475,7 @@ impl ImageSearchApp {
             progress: Some((0, 4)),
             last_error: None,
             settings_open: false,
+            about_open: false,
             close_confirmation_open: false,
             allow_close: false,
         }
@@ -451,6 +498,7 @@ impl ImageSearchApp {
                     images,
                     collections,
                     root_counts,
+                    people_snapshot_missing,
                     warnings,
                 } => {
                     self.roots = roots;
@@ -467,6 +515,7 @@ impl ImageSearchApp {
                         .first()
                         .cloned()
                         .unwrap_or_else(|| "Ready".to_owned());
+                    self.schedule_people_snapshot_recovery(people_snapshot_missing);
                 }
                 StartupMessage::Error(error) => {
                     self.busy = false;
@@ -695,6 +744,32 @@ impl ImageSearchApp {
         );
     }
 
+    fn start_scoped_rescan(&mut self, paths: Vec<PathBuf>) {
+        if paths.is_empty() || self.busy {
+            return;
+        }
+        self.busy = true;
+        self.indexing = true;
+        self.allow_close = false;
+        self.close_confirmation_open = false;
+        self.progress = None;
+        self.last_error = None;
+        self.similarity_results = None;
+        self.selected_paths.clear();
+        let control = indexer::IndexControl::default();
+        self.index_control = Some(control.clone());
+        self.index_paused = false;
+        indexer::spawn_scoped_rescan(
+            self.db_path.clone(),
+            self.roots.clone(),
+            paths,
+            self.indexing_settings,
+            self.embedding_service.clone(),
+            control,
+            self.tx.clone(),
+        );
+    }
+
     fn process_thumbnail_messages(&mut self, ctx: &egui::Context) {
         let mut received = false;
         while let Some(message) = self.thumb_pool.try_recv() {
@@ -884,6 +959,7 @@ impl ImageSearchApp {
     }
 
     pub(super) fn cancel_visual_search(&mut self) {
+        self.navigation.rerun_due = None;
         self.visual_search_session.cancel();
         if self.searching {
             self.searching = false;
@@ -916,12 +992,60 @@ impl ImageSearchApp {
         self.run_visual_query(path, None);
     }
 
+    fn handle_clipboard_image_paste(&mut self, ctx: &egui::Context) {
+        let shortcut_down = crate::windows_shell::ctrl_v_is_down();
+        let native_press = shortcut_down && !self.clipboard_paste_shortcut_down;
+        self.clipboard_paste_shortcut_down = shortcut_down;
+        let egui_paste = ctx.input(|input| {
+            input
+                .events
+                .iter()
+                .any(|event| matches!(event, egui::Event::Paste(_)))
+                || (input.modifiers.ctrl && input.key_pressed(egui::Key::V))
+        });
+        let paste_pressed = native_press || egui_paste;
+        if paste_pressed {
+            match crate::clipboard_image::read_for_search() {
+                Ok(Some(query)) => {
+                    // Stop the focused text widget from also receiving the platform's text-paste
+                    // event, but only after confirming that the clipboard contains an image.
+                    ctx.input_mut(|input| {
+                        input.consume_key(egui::Modifiers::CTRL, egui::Key::V);
+                        input
+                            .events
+                            .retain(|event| !matches!(event, egui::Event::Paste(_)));
+                    });
+                    self.cancel_visual_search();
+                    self.cancel_face_search();
+                    self.query_region_enabled = false;
+                    if query.temporary {
+                        self.clipboard_query_images
+                            .push(crate::visual_query::TemporaryQueryImage(query.path.clone()));
+                    }
+                    self.pending_clipboard_query = Some(query.path);
+                    self.status = "Clipboard image ready for visual search…".to_owned();
+                }
+                Ok(None) => {}
+                Err(error) => self.last_error = Some(error),
+            }
+        }
+
+        if self.pending_clipboard_query.is_some() && self.can_run_similarity_search() {
+            let path = self
+                .pending_clipboard_query
+                .take()
+                .expect("clipboard query was checked above");
+            self.run_similarity_search(path);
+        }
+    }
+
     pub(super) fn run_description_search(&mut self) {
         self.run_visual_query(PathBuf::new(), Some(self.semantic_description.clone()));
     }
 
     pub(super) fn search_eligibility(&self) -> Option<HashSet<PathBuf>> {
-        let filtered = self.collection_filter_chip().is_some()
+        let filtered = self.navigation.folder.is_some()
+            || self.collection_filter_chip().is_some()
             || self.people_filter_selected_count() > 0
             || self.color_enabled
             || !self.search_text.trim().is_empty();
@@ -930,6 +1054,7 @@ impl ImageSearchApp {
                 .iter()
                 .filter(|record| {
                     image_is_available(record, &self.roots)
+                        && self.folder_filter_matches(&record.path)
                         && self.collection_filter_matches(&record.path)
                         && self.people_filter_matches(&record.path)
                         && (self.search_text.trim().is_empty()
@@ -947,9 +1072,22 @@ impl ImageSearchApp {
     }
 
     fn run_visual_query(&mut self, path: PathBuf, description: Option<String>) {
+        let region =
+            (description.is_none() && self.query_region_enabled).then_some(self.query_region);
+        self.run_visual_input(navigation_tree::VisualInput {
+            path,
+            description,
+            settings: self.similarity_settings,
+            region,
+        });
+    }
+
+    fn run_visual_input(&mut self, input: navigation_tree::VisualInput) {
         if !self.can_run_similarity_search() {
             return;
         }
+        let path = input.path.clone();
+        let description = input.description.clone();
         let request = self.visual_search_session.start();
         self.clear_face_search_result_state();
         self.search_mode = if description.is_some() {
@@ -957,6 +1095,8 @@ impl ImageSearchApp {
         } else {
             SearchMode::SimilarImage
         };
+        self.navigation.query = Some(navigation_tree::LibraryQuery::Visual(input.clone()));
+        self.navigation.rerun_due = None;
         self.searching = true;
         self.busy = true;
         self.last_error = None;
@@ -967,8 +1107,7 @@ impl ImageSearchApp {
         self.similarity_semantic_unavailable = None;
         self.similarity_details.clear();
         self.similarity_timings = None;
-        let region =
-            (description.is_none() && self.query_region_enabled).then_some(self.query_region);
+        let region = input.region;
         let settings = if description.is_some() {
             indexer::SimilaritySettings {
                 color_distribution_weight: 0.0,
@@ -976,10 +1115,10 @@ impl ImageSearchApp {
                 clip_weight: 100.0,
                 dominant_color_weight: 0.0,
                 strict_color_rejection: false,
-                ..self.similarity_settings
+                ..input.settings
             }
         } else {
-            self.similarity_settings
+            input.settings
         };
         let options = crate::visual_query::VisualQueryOptions {
             region,
@@ -1021,6 +1160,7 @@ impl ImageSearchApp {
             text_match_count: self.text_search_matches.as_ref().map_or(0, HashSet::len),
             collection_filter,
             collection_revision,
+            folder_scope_revision: self.navigation.scope_revision,
             people_resolve_generation,
             people_resolving,
             color_enabled: self.color_enabled,
@@ -1048,7 +1188,9 @@ impl ImageSearchApp {
                 if !image_is_available(record, &self.roots) {
                     return false;
                 }
-                if !self.collection_filter_matches(&record.path) {
+                if !self.folder_filter_matches(&record.path)
+                    || !self.collection_filter_matches(&record.path)
+                {
                     return false;
                 }
                 if !self.people_filter_matches(&record.path) {
@@ -1126,8 +1268,22 @@ impl ImageSearchApp {
             return;
         }
         self.text_search_due = None;
-        self.text_search_service
-            .request(self.text_search_generation, self.search_text.clone());
+        let scope = (self.navigation.folder.is_some() || self.collection_filter_chip().is_some())
+            .then(|| {
+                self.images
+                    .iter()
+                    .filter(|image| {
+                        self.folder_filter_matches(&image.path)
+                            && self.collection_filter_matches(&image.path)
+                    })
+                    .map(|image| image.path.clone())
+                    .collect()
+            });
+        self.text_search_service.request(
+            self.text_search_generation,
+            self.search_text.clone(),
+            scope,
+        );
     }
 
     fn process_text_search_results(&mut self) {
@@ -1227,6 +1383,27 @@ impl ImageSearchApp {
         settings_window::show(self, ctx);
     }
 
+    fn show_about_window(&mut self, ctx: &egui::Context) {
+        if !self.about_open {
+            return;
+        }
+
+        egui::Window::new("About Windows Image Search")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut self.about_open)
+            .show(ctx, |ui| {
+                ui.heading("Windows Image Search");
+                ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
+                ui.add_space(8.0);
+                ui.hyperlink_to("emadghasemi.ir", "https://emadghasemi.ir");
+                ui.hyperlink_to(
+                    "GitHub repository",
+                    "https://github.com/emadgh/windows-image-search",
+                );
+            });
+    }
+
     fn show_close_confirmation(&mut self, ctx: &egui::Context) {
         if !self.close_confirmation_open {
             return;
@@ -1273,15 +1450,18 @@ impl eframe::App for ImageSearchApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.apply_design_system(ctx);
         self.process_startup_messages();
+        self.process_navigation(ctx);
         self.process_worker_messages();
         self.process_face_runtime_messages();
         self.process_face_search_messages();
         self.process_people_filter_messages();
         self.process_fs_watch_messages();
         self.process_thumbnail_messages(ctx);
+        self.handle_clipboard_image_paste(ctx);
         self.observe_text_search_input();
         self.dispatch_text_search_if_due();
         self.process_text_search_results();
+        self.dispatch_navigation_search();
         update_ui::process(self, ctx);
         self.handle_result_shortcuts(ctx);
 
@@ -1313,7 +1493,10 @@ impl eframe::App for ImageSearchApp {
                 ui.strong("Windows Image Search");
                 ui.separator();
                 if ui
-                    .selectable_label(self.collection_filter_chip().is_none(), "All Photos")
+                    .selectable_label(
+                        self.collection_filter_chip().is_none() && self.navigation.folder.is_none(),
+                        "All Photos",
+                    )
                     .clicked()
                 {
                     self.clear_collection_filter();
@@ -1346,6 +1529,9 @@ impl eframe::App for ImageSearchApp {
                 if ui.button("Settings").clicked() {
                     self.settings_open = true;
                 }
+                if ui.button("About").clicked() {
+                    self.about_open = true;
+                }
                 ui.separator();
                 ui.small(format!("{} indexed images", self.images.len()));
                 if self.indexing {
@@ -1359,6 +1545,7 @@ impl eframe::App for ImageSearchApp {
         self.show_inspector(ctx);
         self.show_collections_workspace(ctx);
         self.show_settings_window(ctx);
+        self.show_about_window(ctx);
         self.show_people_manager_window(ctx);
         self.show_duplicate_review(ctx);
 
@@ -1479,6 +1666,12 @@ impl eframe::App for ImageSearchApp {
             }
         });
         self.show_image_preview(ctx);
+        self.persist_view_settings(ctx);
+        if self.navigation.settings.show_tree
+            && self.navigation.observed_file != self.focused_result
+        {
+            ctx.request_repaint();
+        }
     }
 }
 

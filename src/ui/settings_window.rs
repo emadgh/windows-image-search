@@ -15,16 +15,18 @@ enum SettingsCategory {
     Performance,
     Storage,
     Updates,
+    Navigation,
 }
 
 impl SettingsCategory {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Appearance,
         Self::SearchClip,
         Self::FacesPeople,
         Self::Performance,
         Self::Storage,
         Self::Updates,
+        Self::Navigation,
     ];
 
     fn label(self) -> &'static str {
@@ -35,6 +37,7 @@ impl SettingsCategory {
             Self::Performance => "Performance",
             Self::Storage => "Storage",
             Self::Updates => "Updates",
+            Self::Navigation => "Folders & Collections",
         }
     }
 
@@ -46,6 +49,7 @@ impl SettingsCategory {
             Self::Performance => 3,
             Self::Storage => 4,
             Self::Updates => 5,
+            Self::Navigation => 6,
         }
     }
 
@@ -56,6 +60,7 @@ impl SettingsCategory {
             3 => Self::Performance,
             4 => Self::Storage,
             5 => Self::Updates,
+            6 => Self::Navigation,
             _ => Self::Appearance,
         }
     }
@@ -150,6 +155,7 @@ pub(super) fn show(app: &mut ImageSearchApp, ctx: &egui::Context) {
                                 .id_salt("preferences-category-content")
                                 .auto_shrink([false, false])
                                 .show(ui, |ui| match category {
+                                    SettingsCategory::Navigation => app.navigation_preferences(ui),
                                     SettingsCategory::Appearance => settings_appearance(app, ui),
                                     SettingsCategory::SearchClip => {
                                         settings_search_clip(app, ui, &mut effects)
@@ -252,7 +258,7 @@ fn settings_library_indexing(app: &mut ImageSearchApp, ui: &mut egui::Ui, effect
                             effects.remove_folder = Some(root.clone());
                         }
                         if portable::is_indexed_root(&root) {
-                            ui.small("✓ .imagesearch");
+                            ui.small("Indexed: .imagesearch");
                         }
                     });
                 });

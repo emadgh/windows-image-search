@@ -15,7 +15,7 @@ pub(super) struct CollectionDragPayload {
 pub(super) struct CollectionsState {
     items: Vec<Collection>,
     selected_manage: Option<i64>,
-    active_filter: Option<i64>,
+    pub(super) active_filter: Option<i64>,
     memberships: HashMap<i64, CollectionMembership>,
     effective: HashMap<i64, HashSet<PathBuf>>,
     discovered_counts: HashMap<i64, usize>,
@@ -81,15 +81,19 @@ impl CollectionsState {
                 self.discovered_counts.insert(item.id, 0);
                 continue;
             };
-            let manual: HashSet<&Path> = membership.files.iter().map(PathBuf::as_path).collect();
+            let manual: HashSet<String> = membership
+                .files
+                .iter()
+                .map(|p| crate::navigation::path_key(p))
+                .collect();
             let count = discovered
                 .iter()
                 .filter(|path| {
-                    manual.contains(path.as_path())
+                    manual.contains(&crate::navigation::path_key(path))
                         || membership
                             .folders
                             .iter()
-                            .any(|folder| path.starts_with(folder))
+                            .any(|folder| crate::navigation::within(path, folder))
                 })
                 .count();
             self.discovered_counts.insert(item.id, count);
@@ -110,14 +114,18 @@ impl CollectionsState {
                 self.effective.insert(item.id, HashSet::new());
                 continue;
             };
-            let manual: HashSet<&Path> = membership.files.iter().map(PathBuf::as_path).collect();
+            let manual: HashSet<String> = membership
+                .files
+                .iter()
+                .map(|p| crate::navigation::path_key(p))
+                .collect();
             let mut paths = HashSet::new();
             for image in images {
-                if manual.contains(image.path.as_path())
+                if manual.contains(&crate::navigation::path_key(&image.path))
                     || membership
                         .folders
                         .iter()
-                        .any(|folder| image.path.starts_with(folder))
+                        .any(|folder| crate::navigation::within(&image.path, folder))
                 {
                     paths.insert(image.path.clone());
                 }
@@ -167,9 +175,27 @@ enum CollectionAction {
     RemoveFolder(i64, PathBuf),
     RemoveFile(i64, PathBuf),
     Drop(i64, Vec<PathBuf>),
+    RescanCollection(i64),
+    RescanFolder(PathBuf),
 }
 
 impl ImageSearchApp {
+    pub(super) fn navigation_collections(&self) -> Vec<(Collection, CollectionMembership)> {
+        self.collections
+            .items
+            .iter()
+            .map(|item| {
+                (
+                    item.clone(),
+                    self.collections
+                        .memberships
+                        .get(&item.id)
+                        .cloned()
+                        .unwrap_or_default(),
+                )
+            })
+            .collect()
+    }
     pub(super) fn refresh_collection_effective_membership(&mut self) {
         self.collections.rebuild_effective(&self.images);
     }
@@ -195,7 +221,7 @@ impl ImageSearchApp {
     }
 
     pub(super) fn clear_collection_filter(&mut self) {
-        self.collections.active_filter = None;
+        self.set_library_scope(None, None);
     }
 
     pub(super) fn collection_count(&self) -> usize {
@@ -270,6 +296,7 @@ impl ImageSearchApp {
     }
 
     pub(super) fn show_collection_filter(&mut self, ui: &mut egui::Ui) {
+        let previous = self.collections.active_filter;
         ui.strong("Collection");
         let items = self.collections.items.clone();
         let counts: HashMap<i64, usize> = items
@@ -290,6 +317,10 @@ impl ImageSearchApp {
                     );
                 }
             });
+        if previous != self.collections.active_filter {
+            self.navigation.folder = None;
+            self.navigation_scope_changed();
+        }
         ui.add_space(8.0);
     }
 
@@ -478,6 +509,16 @@ impl ImageSearchApp {
             membership.folders.len(),
             membership.files.len()
         ));
+        if ui
+            .add_enabled(
+                !self.busy && (!membership.folders.is_empty() || !membership.files.is_empty()),
+                egui::Button::new("Rescan collection"),
+            )
+            .on_hover_text("Rescan only the folders and individual files in this collection.")
+            .clicked()
+        {
+            *action = Some(CollectionAction::RescanCollection(id));
+        }
         ui.add_space(10.0);
         ui.columns(2, |columns| {
             columns[0].strong("Contents");
@@ -806,6 +847,14 @@ impl ImageSearchApp {
                         CollectionAction::RemoveFile(id, path.to_owned())
                     });
                 }
+                if folder
+                    && ui
+                        .add_enabled(!self.busy, egui::Button::new("Rescan").small())
+                        .on_hover_text("Rescan only this folder and its subfolders.")
+                        .clicked()
+                {
+                    *action = Some(CollectionAction::RescanFolder(path.to_owned()));
+                }
                 let available = if folder {
                     self.folder_assignment_available(path)
                 } else {
@@ -839,6 +888,39 @@ impl ImageSearchApp {
     }
 
     fn apply_collection_action(&mut self, action: CollectionAction) {
+        match &action {
+            CollectionAction::RescanCollection(id) => {
+                let Some(item) = self.collections.items.iter().find(|item| item.id == *id) else {
+                    return;
+                };
+                let name = item.name.clone();
+                let membership = self
+                    .collections
+                    .memberships
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_default();
+                let mut paths = membership.folders;
+                paths.extend(membership.files);
+                self.collections.statistics.reset();
+                self.start_scoped_rescan(paths);
+                if self.indexing {
+                    self.status = format!("Rescanning collection ‘{name}’…");
+                }
+                return;
+            }
+            CollectionAction::RescanFolder(folder) => {
+                let label = folder.display().to_string();
+                self.collections.statistics.reset();
+                self.start_scoped_rescan(vec![folder.clone()]);
+                if self.indexing {
+                    self.status = format!("Rescanning folder {label}…");
+                }
+                return;
+            }
+            _ => {}
+        }
+
         let mut rescan_after = false;
         let mut sync_roots_after = false;
         let result = (|| -> anyhow::Result<String> {
@@ -902,6 +984,9 @@ impl ImageSearchApp {
                     let (added, skipped, attached) = self.assign_paths_to_collection(id, paths)?;
                     rescan_after |= attached;
                     format_collection_assignment_status(added, skipped)
+                }
+                CollectionAction::RescanCollection(_) | CollectionAction::RescanFolder(_) => {
+                    unreachable!("rescan actions return before collection mutations")
                 }
             };
             self.collections.statistics.reset();

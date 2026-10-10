@@ -17,6 +17,7 @@ pub struct TextSearchResult {
 struct SearchRequest {
     generation: u64,
     query: String,
+    scope: Option<HashSet<PathBuf>>,
 }
 
 pub struct TextSearchService {
@@ -42,8 +43,13 @@ impl TextSearchService {
 
                     let started = Instant::now();
                     let paths = match &connection {
-                        Ok(conn) => search_text_and_people(&db_path, conn, &request.query)
-                            .map_err(|err| format!("{err:#}")),
+                        Ok(conn) => search_text_and_people(
+                            &db_path,
+                            conn,
+                            &request.query,
+                            request.scope.as_ref(),
+                        )
+                        .map_err(|err| format!("{err:#}")),
                         Err(err) => Err(err.clone()),
                     };
                     let _ = result_tx.send(TextSearchResult {
@@ -62,8 +68,12 @@ impl TextSearchService {
         }
     }
 
-    pub fn request(&self, generation: u64, query: String) {
-        let _ = self.request_tx.send(SearchRequest { generation, query });
+    pub fn request(&self, generation: u64, query: String, scope: Option<HashSet<PathBuf>>) {
+        let _ = self.request_tx.send(SearchRequest {
+            generation,
+            query,
+            scope,
+        });
     }
 
     pub fn try_recv(&self) -> Option<TextSearchResult> {
@@ -75,6 +85,7 @@ fn search_text_and_people(
     db_path: &Path,
     conn: &Connection,
     query: &str,
+    scope: Option<&HashSet<PathBuf>>,
 ) -> Result<HashSet<PathBuf>> {
     let tokens = query
         .split_whitespace()
@@ -111,6 +122,9 @@ fn search_text_and_people(
             )?;
             matches.extend(resolved.matching_images);
         }
+        if let Some(scope) = scope {
+            matches.retain(|path| scope.contains(path));
+        }
         token_sets.push(matches);
     }
 
@@ -136,6 +150,43 @@ mod tests {
 
     fn paths(values: &[&str]) -> HashSet<PathBuf> {
         values.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn indexed_text_query_respects_folder_and_collection_candidates() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let db_path = std::env::temp_dir().join(format!(
+            "wis-text-scope-{}-{nonce}.sqlite3",
+            std::process::id()
+        ));
+        let conn = db::open(&db_path).unwrap();
+        let first = PathBuf::from(r"C:\Photos\beach.jpg");
+        let second = PathBuf::from(r"D:\Other\beach.jpg");
+        for path in [&first, &second] {
+            conn.execute("INSERT INTO images(path, root, file_name, extension, size, modified, width, height) VALUES (?1, ?2, 'beach.jpg', 'jpg', 1, 0, 1, 1)",
+                rusqlite::params![path.to_string_lossy().to_string(), path.parent().unwrap().to_string_lossy().to_string()]).unwrap();
+        }
+        assert_eq!(
+            search_text_and_people(&db_path, &conn, "beach", None)
+                .unwrap()
+                .len(),
+            2
+        );
+        let scope = HashSet::from([first.clone()]);
+        assert_eq!(
+            search_text_and_people(&db_path, &conn, "beach", Some(&scope)).unwrap(),
+            scope
+        );
+        assert!(
+            search_text_and_people(&db_path, &conn, "beach", Some(&HashSet::new()))
+                .unwrap()
+                .is_empty()
+        );
+        drop(conn);
+        std::fs::remove_file(db_path).unwrap();
     }
 
     #[test]

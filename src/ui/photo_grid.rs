@@ -8,6 +8,7 @@ pub(super) struct PhotoGridSpec {
     pub cell_width: f32,
     pub row_height: f32,
     pub max_height: Option<f32>,
+    pub columns: Option<usize>,
 }
 
 impl PhotoGridSpec {
@@ -17,11 +18,17 @@ impl PhotoGridSpec {
             cell_width,
             row_height,
             max_height: None,
+            columns: None,
         }
     }
 
     pub(super) fn max_height(mut self, max_height: f32) -> Self {
         self.max_height = Some(max_height);
+        self
+    }
+
+    pub(super) fn columns(mut self, columns: usize) -> Self {
+        self.columns = Some(columns.max(1));
         self
     }
 }
@@ -43,7 +50,9 @@ pub(super) fn show(
     }
 
     let spacing = ui.spacing().item_spacing.x;
-    let columns = columns_for_width(ui.available_width(), spec.cell_width, spacing);
+    let columns = spec
+        .columns
+        .unwrap_or_else(|| columns_for_width(ui.available_width(), spec.cell_width, spacing));
     let rows = row_count(item_count, columns);
     let mut scroll = egui::ScrollArea::vertical()
         .id_salt(spec.id_salt)
@@ -152,6 +161,33 @@ pub(super) fn columns_for_width(available: f32, cell_width: f32, spacing: f32) -
     (((available.max(0.0) + spacing) / (cell_width + spacing)).floor() as usize).max(1)
 }
 
+/// Pick the adjacent column count whose evenly distributed cell width is
+/// closest to the user's preferred width. Unlike floor-only sizing, this can
+/// trade a few pixels per tile for a complete extra column.
+pub(super) fn nearest_fitted_layout(
+    available: f32,
+    preferred_cell_width: f32,
+    spacing: f32,
+) -> (usize, f32) {
+    let available = available.max(1.0);
+    let preferred = preferred_cell_width.max(1.0);
+    let spacing = spacing.max(0.0);
+    let ideal_columns = (available + spacing) / (preferred + spacing);
+    let lower = (ideal_columns.floor() as usize).max(1);
+    let upper = (ideal_columns.ceil() as usize).max(1);
+
+    let fitted_width = |columns: usize| {
+        ((available - spacing * columns.saturating_sub(1) as f32) / columns as f32).max(1.0)
+    };
+    let lower_width = fitted_width(lower);
+    let upper_width = fitted_width(upper);
+    if (upper_width - preferred).abs() <= (lower_width - preferred).abs() {
+        (upper, upper_width)
+    } else {
+        (lower, lower_width)
+    }
+}
+
 pub(super) fn row_count(item_count: usize, columns: usize) -> usize {
     item_count.div_ceil(columns.max(1))
 }
@@ -214,6 +250,21 @@ mod tests {
         assert_eq!(row_count(0, 4), 0);
         assert_eq!(row_count(1, 4), 1);
         assert_eq!(row_count(9, 4), 3);
+    }
+
+    #[test]
+    fn fitted_layout_uses_a_nearby_size_to_gain_a_complete_column() {
+        let (columns, cell_width) = nearest_fitted_layout(1071.0, 359.0, 8.0);
+        assert_eq!(columns, 3);
+        assert!((cell_width - 351.66666).abs() < 0.001);
+        assert!((columns as f32 * cell_width + (columns - 1) as f32 * 8.0 - 1071.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn fitted_layout_keeps_fewer_columns_when_that_size_is_closer() {
+        let (columns, cell_width) = nearest_fitted_layout(600.0, 536.0, 8.0);
+        assert_eq!(columns, 1);
+        assert_eq!(cell_width, 600.0);
     }
 
     #[test]

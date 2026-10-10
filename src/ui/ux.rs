@@ -17,7 +17,8 @@ impl ImageSearchApp {
             return;
         }
 
-        if ctx.wants_keyboard_input()
+        if (self.navigation.settings.show_tree && self.navigation.tree_focus)
+            || ctx.wants_keyboard_input()
             || self.settings_open
             || self.collections_open
             || self.task_center_open
@@ -158,6 +159,7 @@ impl ImageSearchApp {
 
     pub(super) fn show_active_filter_chips(&mut self, ui: &mut egui::Ui) {
         let collection = self.collection_filter_chip();
+        let folder = self.navigation.folder.clone();
         let people_count = self.people_filter_selected_count();
         let text = self.search_text.trim().to_owned();
         let color_active = self.color_enabled;
@@ -169,6 +171,7 @@ impl ImageSearchApp {
         });
         let face_active = self.face_search_active();
         let any_active = collection.is_some()
+            || folder.is_some()
             || people_count > 0
             || !text.is_empty()
             || color_active
@@ -179,6 +182,24 @@ impl ImageSearchApp {
 
         ui.horizontal_wrapped(|ui| {
             ui.small("Active:");
+            if let Some(folder) = folder {
+                let label = format!(
+                    "Folder: {}{}  ×",
+                    folder.display(),
+                    if self.navigation.settings.include_subfolders {
+                        " (+ subfolders)"
+                    } else {
+                        ""
+                    }
+                );
+                if ui
+                    .small_button(super::views::truncate_middle(&label, 55))
+                    .on_hover_text(label)
+                    .clicked()
+                {
+                    self.set_library_scope(self.collection_filter_cache_token().0, None);
+                }
+            }
             if let Some(label) = collection {
                 if ui.small_button(format!("{label}  ×")).clicked() {
                     self.clear_collection_filter();
@@ -219,6 +240,8 @@ impl ImageSearchApp {
                     ))
                     .clicked()
                 {
+                    self.cancel_visual_search();
+                    self.cancel_face_search();
                     self.similarity_results = None;
                     self.query_image = None;
                     self.clear_face_search_result_state();
@@ -334,6 +357,8 @@ impl ImageSearchApp {
     }
 
     fn clear_all_search_constraints(&mut self) {
+        self.cancel_visual_search();
+        self.cancel_face_search();
         self.clear_collection_filter();
         self.clear_people_filter();
         self.search_text.clear();

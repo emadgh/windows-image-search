@@ -4,10 +4,12 @@ A native, local-first image index and visual search application for Windows, wri
 
 Keyboard shortcuts: select an image and press `Space` for an in-app whole-image preview; use `Left`/`Right` to move through the currently displayed result order, and `Space` or `Esc` to close it. Press `Shift+Space` to toggle the Inspector sidebar. Shortcuts are ignored while typing in a text field.
 
-> **v0.4.0 — Stable release.** The release includes bounded libvips previews for large images, portable thumbnail recovery, unavailable-file filtering, Collections management, image preview navigation, and face/People search. See the [v0.4.0 release notes](docs/releases/v0.4.0.md).
+> **v0.4.4 — Stable release.** Adds a searchable folder and collection tree, automatic folder navigation for selected images, and saved view settings. See the [v0.4.4 release notes](docs/releases/v0.4.4.md).
 
 ## Current features (v0.4)
 
+- View preferences persist across restarts: Inspector visibility, thumbnail size and fit, Grid/Details, sorting, appearance, sidebar widths, window size and maximized state.
+- Browse indexed folders in the sidebar collection tree. Folder selection scopes every search mode; selecting a result can reveal and briefly highlight its folder. Configure these behaviors under **Settings → Folders & Collections**.
 - Configure one or more folders to index recursively.
 - Portable per-root indexes under `<root>/.imagesearch`, suitable for external/removable drives and drive-letter changes.
 - Crash-safe incremental **Rescan** with durable batch commits and live results while indexing.
@@ -27,6 +29,7 @@ Keyboard shortcuts: select an image and press `Space` for an in-app whole-image 
 - Managed YuNet/SFace model setup and CPU/DirectML inference options.
 - Switch between a resizable thumbnail grid and an Explorer-style detailed list.
 - Double-click to open an image; context menu can open its containing folder or copy its path.
+- When Everything is installed, the file context menu can search the selected filename in Everything; Ctrl+click searches its longest numeric segment.
 
 ## First run and portable indexes
 
