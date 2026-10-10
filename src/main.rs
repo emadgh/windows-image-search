@@ -34,6 +34,7 @@ mod material_eval;
 mod material_texture;
 mod metadata;
 mod model_benchmark;
+mod navigation;
 mod oversized_preview;
 mod oversized_validation;
 mod people_clustering;
@@ -673,11 +674,15 @@ fn main() -> eframe::Result<()> {
         eframe::icon_data::from_png_bytes(include_bytes!("../assets/windows-image-search.png"))
             .expect("failed to load the application icon");
 
+    let view = ui::view_settings::ViewSettings::load(
+        &ui::view_settings::ViewSettings::path_for_db(&db_path),
+    );
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(APP_TITLE)
             .with_icon(app_icon)
-            .with_inner_size([1380.0, 860.0])
+            .with_inner_size(view.window_size)
+            .with_maximized(view.maximized)
             .with_min_inner_size([900.0, 600.0]),
         ..Default::default()
     };

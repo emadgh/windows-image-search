@@ -4,8 +4,10 @@ mod collections_window;
 mod duplicate_review;
 mod face_runtime;
 mod face_search_panel;
+mod icons;
 mod image_preview;
 mod inspector;
+mod navigation_tree;
 mod people_filter;
 mod people_manager;
 mod photo_grid;
@@ -17,6 +19,7 @@ mod theme;
 mod thumbnails;
 mod update_ui;
 mod ux;
+pub(crate) mod view_settings;
 mod views;
 
 use crate::db::{self, ImageSummary};
@@ -42,7 +45,8 @@ use std::time::{Duration, Instant};
 use texture_lru::{TextureLru, DEFAULT_GPU_TEXTURE_CAPACITY};
 use thumbnails::{ThumbnailPool, ThumbnailResult};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(super) enum AppearanceMode {
     System,
     Light,
@@ -67,19 +71,22 @@ pub(super) enum SearchMode {
     Face,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(super) enum ViewMode {
     Grid,
     Details,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(super) enum ThumbnailFit {
     Contain,
     Cover,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(super) enum SortMode {
     Relevance,
     Name,
@@ -113,6 +120,7 @@ struct VisibleOrderKey {
     text_match_count: usize,
     collection_filter: Option<i64>,
     collection_revision: u64,
+    folder_scope_revision: u64,
     people_resolve_generation: u64,
     people_resolving: bool,
     color_enabled: bool,
@@ -213,6 +221,8 @@ pub struct ImageSearchApp {
     people_filter_ui: people_filter::PeopleFilterUiState,
     people_manager_ui: people_manager::PeopleManagerUiState,
     collections: collections::CollectionsState,
+    navigation: navigation_tree::NavigationState,
+    view_preferences: view_settings::ViewPreferences,
     pub(super) collections_open: bool,
     pub(super) search_mode: SearchMode,
     pub(super) search_text: String,
@@ -274,11 +284,16 @@ impl ImageSearchApp {
         let (tx, rx) = std::sync::mpsc::channel();
         let (startup_tx, startup_rx) = std::sync::mpsc::channel();
         let app_data_dir = db_path.parent().unwrap_or_else(|| Path::new("."));
+        let view_preferences =
+            view_settings::ViewPreferences::new(view_settings::ViewSettings::path_for_db(&db_path));
+        let view = view_preferences.settings.clone();
         // This path is retained only so older AppData thumbnail caches can be
         // migrated into each root's portable `.imagesearch/thumbnails` folder.
         let legacy_thumbnail_cache = thumbnail_cache::cache_dir_for_db(&db_path);
         let settings_path = app_data_dir.join("performance-settings.ini");
         let indexing_settings = settings::load(&settings_path);
+        let navigation =
+            navigation_tree::NavigationState::new(app_data_dir.join("navigation-settings.json"));
         let update_settings_path = app_data_dir.join("update-settings.ini");
         let update_settings = crate::update::load_settings(&update_settings_path);
         let update_manager = UpdateManager::default();
@@ -407,6 +422,8 @@ impl ImageSearchApp {
             people_filter_ui,
             people_manager_ui,
             collections: collections::CollectionsState::default(),
+            navigation,
+            view_preferences,
             collections_open: false,
             search_mode: SearchMode::Text,
             search_text: String::new(),
@@ -419,16 +436,16 @@ impl ImageSearchApp {
             color_enabled: false,
             target_color: [128, 128, 128],
             color_tolerance: 0.22,
-            view_mode: ViewMode::Grid,
-            thumb_size: 168.0,
-            thumb_fit: ThumbnailFit::Contain,
-            sort_mode: SortMode::Relevance,
+            view_mode: view.view_mode,
+            thumb_size: view.thumb_size,
+            thumb_fit: view.thumb_fit,
+            sort_mode: view.sort_mode,
             image_catalog_revision: 0,
             similarity_results_revision: 0,
             visible_order_cache: RefCell::new(VisibleOrderCache::default()),
-            inspector_open: true,
+            inspector_open: view.inspector_open,
             image_preview: Default::default(),
-            appearance_mode: AppearanceMode::System,
+            appearance_mode: view.appearance_mode,
             system_dark_mode: None,
             task_center_open: false,
             textures: HashMap::new(),
@@ -942,6 +959,7 @@ impl ImageSearchApp {
     }
 
     pub(super) fn cancel_visual_search(&mut self) {
+        self.navigation.rerun_due = None;
         self.visual_search_session.cancel();
         if self.searching {
             self.searching = false;
@@ -1026,7 +1044,8 @@ impl ImageSearchApp {
     }
 
     pub(super) fn search_eligibility(&self) -> Option<HashSet<PathBuf>> {
-        let filtered = self.collection_filter_chip().is_some()
+        let filtered = self.navigation.folder.is_some()
+            || self.collection_filter_chip().is_some()
             || self.people_filter_selected_count() > 0
             || self.color_enabled
             || !self.search_text.trim().is_empty();
@@ -1035,6 +1054,7 @@ impl ImageSearchApp {
                 .iter()
                 .filter(|record| {
                     image_is_available(record, &self.roots)
+                        && self.folder_filter_matches(&record.path)
                         && self.collection_filter_matches(&record.path)
                         && self.people_filter_matches(&record.path)
                         && (self.search_text.trim().is_empty()
@@ -1052,9 +1072,22 @@ impl ImageSearchApp {
     }
 
     fn run_visual_query(&mut self, path: PathBuf, description: Option<String>) {
+        let region =
+            (description.is_none() && self.query_region_enabled).then_some(self.query_region);
+        self.run_visual_input(navigation_tree::VisualInput {
+            path,
+            description,
+            settings: self.similarity_settings,
+            region,
+        });
+    }
+
+    fn run_visual_input(&mut self, input: navigation_tree::VisualInput) {
         if !self.can_run_similarity_search() {
             return;
         }
+        let path = input.path.clone();
+        let description = input.description.clone();
         let request = self.visual_search_session.start();
         self.clear_face_search_result_state();
         self.search_mode = if description.is_some() {
@@ -1062,6 +1095,8 @@ impl ImageSearchApp {
         } else {
             SearchMode::SimilarImage
         };
+        self.navigation.query = Some(navigation_tree::LibraryQuery::Visual(input.clone()));
+        self.navigation.rerun_due = None;
         self.searching = true;
         self.busy = true;
         self.last_error = None;
@@ -1072,8 +1107,7 @@ impl ImageSearchApp {
         self.similarity_semantic_unavailable = None;
         self.similarity_details.clear();
         self.similarity_timings = None;
-        let region =
-            (description.is_none() && self.query_region_enabled).then_some(self.query_region);
+        let region = input.region;
         let settings = if description.is_some() {
             indexer::SimilaritySettings {
                 color_distribution_weight: 0.0,
@@ -1081,10 +1115,10 @@ impl ImageSearchApp {
                 clip_weight: 100.0,
                 dominant_color_weight: 0.0,
                 strict_color_rejection: false,
-                ..self.similarity_settings
+                ..input.settings
             }
         } else {
-            self.similarity_settings
+            input.settings
         };
         let options = crate::visual_query::VisualQueryOptions {
             region,
@@ -1126,6 +1160,7 @@ impl ImageSearchApp {
             text_match_count: self.text_search_matches.as_ref().map_or(0, HashSet::len),
             collection_filter,
             collection_revision,
+            folder_scope_revision: self.navigation.scope_revision,
             people_resolve_generation,
             people_resolving,
             color_enabled: self.color_enabled,
@@ -1153,7 +1188,9 @@ impl ImageSearchApp {
                 if !image_is_available(record, &self.roots) {
                     return false;
                 }
-                if !self.collection_filter_matches(&record.path) {
+                if !self.folder_filter_matches(&record.path)
+                    || !self.collection_filter_matches(&record.path)
+                {
                     return false;
                 }
                 if !self.people_filter_matches(&record.path) {
@@ -1231,8 +1268,22 @@ impl ImageSearchApp {
             return;
         }
         self.text_search_due = None;
-        self.text_search_service
-            .request(self.text_search_generation, self.search_text.clone());
+        let scope = (self.navigation.folder.is_some() || self.collection_filter_chip().is_some())
+            .then(|| {
+                self.images
+                    .iter()
+                    .filter(|image| {
+                        self.folder_filter_matches(&image.path)
+                            && self.collection_filter_matches(&image.path)
+                    })
+                    .map(|image| image.path.clone())
+                    .collect()
+            });
+        self.text_search_service.request(
+            self.text_search_generation,
+            self.search_text.clone(),
+            scope,
+        );
     }
 
     fn process_text_search_results(&mut self) {
@@ -1399,6 +1450,7 @@ impl eframe::App for ImageSearchApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.apply_design_system(ctx);
         self.process_startup_messages();
+        self.process_navigation(ctx);
         self.process_worker_messages();
         self.process_face_runtime_messages();
         self.process_face_search_messages();
@@ -1409,6 +1461,7 @@ impl eframe::App for ImageSearchApp {
         self.observe_text_search_input();
         self.dispatch_text_search_if_due();
         self.process_text_search_results();
+        self.dispatch_navigation_search();
         update_ui::process(self, ctx);
         self.handle_result_shortcuts(ctx);
 
@@ -1440,7 +1493,10 @@ impl eframe::App for ImageSearchApp {
                 ui.strong("Windows Image Search");
                 ui.separator();
                 if ui
-                    .selectable_label(self.collection_filter_chip().is_none(), "All Photos")
+                    .selectable_label(
+                        self.collection_filter_chip().is_none() && self.navigation.folder.is_none(),
+                        "All Photos",
+                    )
                     .clicked()
                 {
                     self.clear_collection_filter();
@@ -1610,6 +1666,12 @@ impl eframe::App for ImageSearchApp {
             }
         });
         self.show_image_preview(ctx);
+        self.persist_view_settings(ctx);
+        if self.navigation.settings.show_tree
+            && self.navigation.observed_file != self.focused_result
+        {
+            ctx.request_repaint();
+        }
     }
 }
 

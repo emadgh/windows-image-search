@@ -104,6 +104,7 @@ impl ImageSearchApp {
     }
 
     pub(super) fn cancel_face_search(&mut self) {
+        self.navigation.rerun_due = None;
         self.face_search_ui.session.cancel();
         if self.face_search_running() {
             self.face_search_ui.searching = false;
@@ -118,6 +119,8 @@ impl ImageSearchApp {
     }
 
     pub(super) fn clear_face_search_result_state(&mut self) {
+        self.navigation.query = None;
+        self.navigation.rerun_due = None;
         self.face_search_ui.active = false;
         self.face_search_ui.active_query = None;
         self.face_search_ui.match_boxes.clear();
@@ -295,8 +298,14 @@ impl ImageSearchApp {
         });
     }
 
-    fn start_indexed_face_search(&mut self, query: IndexedFaceSuggestion) {
-        if self.busy
+    pub(super) fn cancel_face_scope_search(&mut self) {
+        if self.face_search_ui.searching {
+            self.cancel_face_search();
+        }
+    }
+
+    pub(super) fn start_indexed_face_search(&mut self, query: IndexedFaceSuggestion) {
+        if (self.busy && !self.indexing)
             || self.face_search_ui.searching
             || self.text_search_pending
             || self.search_text != self.text_search_observed
@@ -306,6 +315,11 @@ impl ImageSearchApp {
         }
         let roots = self.roots.clone();
         let query_root = query.root.clone();
+        self.navigation.query = Some(super::navigation_tree::LibraryQuery::Face(
+            query.clone(),
+            self.face_search_ui.options,
+        ));
+        self.navigation.rerun_due = None;
         let face_id = query.face_id.clone();
         let eligible = self.search_eligibility();
         let options = self.face_search_ui.options.sanitized();
@@ -340,8 +354,30 @@ impl ImageSearchApp {
         self.start_indexed_face_search(query);
     }
 
-    fn start_external_face_search(&mut self, query: ExternalFaceChoice) {
-        if self.busy
+    pub(super) fn rerun_indexed_face_search(
+        &mut self,
+        query: IndexedFaceSuggestion,
+        options: IndexedFaceSearchOptions,
+    ) {
+        let previous = self.face_search_ui.options;
+        self.face_search_ui.options = options;
+        self.start_indexed_face_search(query);
+        self.face_search_ui.options = previous;
+    }
+
+    pub(super) fn rerun_external_face_search(
+        &mut self,
+        query: ExternalFaceChoice,
+        options: IndexedFaceSearchOptions,
+    ) {
+        let previous = self.face_search_ui.options;
+        self.face_search_ui.options = options;
+        self.start_external_face_search(query);
+        self.face_search_ui.options = previous;
+    }
+
+    pub(super) fn start_external_face_search(&mut self, query: ExternalFaceChoice) {
+        if (self.busy && !self.indexing)
             || self.face_search_ui.searching
             || self.text_search_pending
             || self.search_text != self.text_search_observed
@@ -351,6 +387,11 @@ impl ImageSearchApp {
         }
         let roots = self.roots.clone();
         let similarity_query = query.query.clone();
+        self.navigation.query = Some(super::navigation_tree::LibraryQuery::ExternalFace(
+            query.clone(),
+            self.face_search_ui.options,
+        ));
+        self.navigation.rerun_due = None;
         let eligible = self.search_eligibility();
         let options = self.face_search_ui.options.sanitized();
         let tx = self.face_search_ui.tx.clone();

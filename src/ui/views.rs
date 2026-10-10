@@ -431,19 +431,13 @@ fn detail_header(
         ui.spacing_mut().item_spacing.x = 0.0;
         ui.add_sized([widths.thumb, 22.0], egui::Label::new(""));
 
-        let name_label = if current_sort == SortMode::Name {
-            "Name ▲"
-        } else {
-            "Name"
-        };
-        if ui
-            .add_sized(
-                [widths.name, 22.0],
-                egui::Button::new(name_label).frame(false),
-            )
-            .on_hover_text("Sort by filename")
-            .clicked()
-        {
+        let name_response = ui
+            .add_sized([widths.name, 22.0], egui::Button::new("Name").frame(false))
+            .on_hover_text("Sort by filename");
+        if current_sort == SortMode::Name {
+            super::icons::sort_indicator(ui, &name_response, false);
+        }
+        if name_response.clicked() {
             requested_sort = Some(SortMode::Name);
         }
 
@@ -453,7 +447,7 @@ fn detail_header(
             |ui| {
                 ui.set_min_width(widths.info);
                 ui.set_max_width(widths.info);
-                ui.menu_button("Info sort ▾", |ui| {
+                ui.menu_button("Info sort", |ui| {
                     if ui
                         .selectable_label(current_sort == SortMode::Resolution, "Resolution")
                         .clicked()
@@ -488,19 +482,16 @@ fn detail_header(
             egui::Label::new(egui::RichText::new("Metadata").strong()),
         );
 
-        let score_label = if current_sort == SortMode::Relevance {
-            "Score ▼"
-        } else {
-            "Score"
-        };
-        if ui
+        let score_response = ui
             .add_sized(
                 [widths.score, 22.0],
-                egui::Button::new(score_label).frame(false),
+                egui::Button::new("Score").frame(false),
             )
-            .on_hover_text("Restore relevance / similarity order")
-            .clicked()
-        {
+            .on_hover_text("Restore relevance / similarity order");
+        if current_sort == SortMode::Relevance {
+            super::icons::sort_indicator(ui, &score_response, true);
+        }
+        if score_response.clicked() {
             requested_sort = Some(SortMode::Relevance);
         }
     });

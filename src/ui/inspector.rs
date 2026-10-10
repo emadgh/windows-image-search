@@ -8,9 +8,9 @@ impl ImageSearchApp {
             return;
         }
 
-        egui::SidePanel::right("image_inspector")
+        let panel = egui::SidePanel::right("image_inspector")
             .resizable(true)
-            .default_width(theme::INSPECTOR_DEFAULT)
+            .default_width(self.view_preferences.settings.inspector_width)
             .min_width(theme::INSPECTOR_MIN)
             .max_width(theme::INSPECTOR_MAX)
             .show(ctx, |ui| {
@@ -140,5 +140,6 @@ impl ImageSearchApp {
                     }
                 });
             });
+        self.view_preferences.settings.inspector_width = panel.response.rect.width();
     }
 }

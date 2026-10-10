@@ -4,10 +4,12 @@ A native, local-first image index and visual search application for Windows, wri
 
 Keyboard shortcuts: select an image and press `Space` for an in-app whole-image preview; use `Left`/`Right` to move through the currently displayed result order, and `Space` or `Esc` to close it. Press `Shift+Space` to toggle the Inspector sidebar. Shortcuts are ignored while typing in a text field.
 
-> **v0.4.3 — Stable release.** Adds the supplied Windows app icon in multiple sizes and an About window with website and GitHub links. See the [v0.4.3 release notes](docs/releases/v0.4.3.md).
+> **v0.4.4 — Stable release.** Adds a searchable folder and collection tree, automatic folder navigation for selected images, and saved view settings. See the [v0.4.4 release notes](docs/releases/v0.4.4.md).
 
 ## Current features (v0.4)
 
+- View preferences persist across restarts: Inspector visibility, thumbnail size and fit, Grid/Details, sorting, appearance, sidebar widths, window size and maximized state.
+- Browse indexed folders in the sidebar collection tree. Folder selection scopes every search mode; selecting a result can reveal and briefly highlight its folder. Configure these behaviors under **Settings → Folders & Collections**.
 - Configure one or more folders to index recursively.
 - Portable per-root indexes under `<root>/.imagesearch`, suitable for external/removable drives and drive-letter changes.
 - Crash-safe incremental **Rescan** with durable batch commits and live results while indexing.

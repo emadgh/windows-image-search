@@ -15,7 +15,7 @@ pub(super) struct CollectionDragPayload {
 pub(super) struct CollectionsState {
     items: Vec<Collection>,
     selected_manage: Option<i64>,
-    active_filter: Option<i64>,
+    pub(super) active_filter: Option<i64>,
     memberships: HashMap<i64, CollectionMembership>,
     effective: HashMap<i64, HashSet<PathBuf>>,
     discovered_counts: HashMap<i64, usize>,
@@ -81,15 +81,19 @@ impl CollectionsState {
                 self.discovered_counts.insert(item.id, 0);
                 continue;
             };
-            let manual: HashSet<&Path> = membership.files.iter().map(PathBuf::as_path).collect();
+            let manual: HashSet<String> = membership
+                .files
+                .iter()
+                .map(|p| crate::navigation::path_key(p))
+                .collect();
             let count = discovered
                 .iter()
                 .filter(|path| {
-                    manual.contains(path.as_path())
+                    manual.contains(&crate::navigation::path_key(path))
                         || membership
                             .folders
                             .iter()
-                            .any(|folder| path.starts_with(folder))
+                            .any(|folder| crate::navigation::within(path, folder))
                 })
                 .count();
             self.discovered_counts.insert(item.id, count);
@@ -110,14 +114,18 @@ impl CollectionsState {
                 self.effective.insert(item.id, HashSet::new());
                 continue;
             };
-            let manual: HashSet<&Path> = membership.files.iter().map(PathBuf::as_path).collect();
+            let manual: HashSet<String> = membership
+                .files
+                .iter()
+                .map(|p| crate::navigation::path_key(p))
+                .collect();
             let mut paths = HashSet::new();
             for image in images {
-                if manual.contains(image.path.as_path())
+                if manual.contains(&crate::navigation::path_key(&image.path))
                     || membership
                         .folders
                         .iter()
-                        .any(|folder| image.path.starts_with(folder))
+                        .any(|folder| crate::navigation::within(&image.path, folder))
                 {
                     paths.insert(image.path.clone());
                 }
@@ -172,6 +180,22 @@ enum CollectionAction {
 }
 
 impl ImageSearchApp {
+    pub(super) fn navigation_collections(&self) -> Vec<(Collection, CollectionMembership)> {
+        self.collections
+            .items
+            .iter()
+            .map(|item| {
+                (
+                    item.clone(),
+                    self.collections
+                        .memberships
+                        .get(&item.id)
+                        .cloned()
+                        .unwrap_or_default(),
+                )
+            })
+            .collect()
+    }
     pub(super) fn refresh_collection_effective_membership(&mut self) {
         self.collections.rebuild_effective(&self.images);
     }
@@ -197,7 +221,7 @@ impl ImageSearchApp {
     }
 
     pub(super) fn clear_collection_filter(&mut self) {
-        self.collections.active_filter = None;
+        self.set_library_scope(None, None);
     }
 
     pub(super) fn collection_count(&self) -> usize {
@@ -272,6 +296,7 @@ impl ImageSearchApp {
     }
 
     pub(super) fn show_collection_filter(&mut self, ui: &mut egui::Ui) {
+        let previous = self.collections.active_filter;
         ui.strong("Collection");
         let items = self.collections.items.clone();
         let counts: HashMap<i64, usize> = items
@@ -292,6 +317,10 @@ impl ImageSearchApp {
                     );
                 }
             });
+        if previous != self.collections.active_filter {
+            self.navigation.folder = None;
+            self.navigation_scope_changed();
+        }
         ui.add_space(8.0);
     }
 

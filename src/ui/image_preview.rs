@@ -176,8 +176,8 @@ impl ImageSearchApp {
                     egui::pos2(rect.right() - 30.0, rect.center().y),
                     egui::vec2(44.0, 72.0),
                 );
-                previous = ui.put(previous_rect, egui::Button::new("◀")).clicked();
-                next = ui.put(next_rect, egui::Button::new("▶")).clicked();
+                previous = super::icons::put_button(ui, previous_rect, super::icons::Icon::Previous).clicked();
+                next = super::icons::put_button(ui, next_rect, super::icons::Icon::Next).clicked();
 
                 let footer = egui::Rect::from_min_max(
                     egui::pos2(rect.left() + 16.0, rect.bottom() - footer_height),
@@ -186,7 +186,7 @@ impl ImageSearchApp {
                 ui.scope_builder(egui::UiBuilder::new().max_rect(footer), |ui| {
                     ui.horizontal_centered(|ui| {
                         ui.small(
-                            "← / → navigate   ·   Space or Esc close   ·   Shift+Space Inspector",
+                            "Left / Right: navigate   ·   Space or Esc: close   ·   Shift+Space: Inspector",
                         );
                         if let Some(quality) = &quality {
                             ui.separator();

@@ -8,6 +8,7 @@ impl ImageSearchApp {
         }
         self.cancel_visual_search();
         self.cancel_face_search();
+        self.navigation.query = None;
         match mode {
             SearchMode::Text => {
                 self.similarity_results = None;
@@ -37,13 +38,19 @@ impl ImageSearchApp {
     }
 
     pub(super) fn show_search_sidebar(&mut self, ctx: &egui::Context) {
-        egui::SidePanel::left("search_sidebar")
+        let panel = egui::SidePanel::left("search_sidebar")
             .resizable(true)
-            .default_width(theme::SEARCH_SIDEBAR_DEFAULT)
+            .default_width(self.view_preferences.settings.sidebar_width)
             .min_width(theme::SEARCH_SIDEBAR_MIN)
             .max_width(theme::SEARCH_SIDEBAR_MAX)
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                let height = ui.available_height();
+                let search_height = if self.navigation.settings.show_tree {
+                    (height * (1.0 - self.navigation.settings.tree_fraction) - 12.0).max(70.0)
+                } else { height };
+                egui::ScrollArea::vertical().id_salt("search-controls")
+                    .auto_shrink([false, false]).max_height(search_height)
+                    .min_scrolled_height(search_height).show(ui, |ui| {
                     ui.heading("Search");
                     ui.small("One workspace for text, visual similarity and face identity search.");
                     ui.add_space(8.0);
@@ -186,6 +193,8 @@ impl ImageSearchApp {
                                             self.choose_similarity_image();
                                         }
                                         if ui.button("Clear query").clicked() {
+                                            self.cancel_visual_search();
+                                            self.navigation.query = None;
                                             self.similarity_results = None;
                                             self.query_image = None;
                                             self.selected_paths.clear();
@@ -360,6 +369,17 @@ impl ImageSearchApp {
                         }
                     });
                 });
+                if self.navigation.settings.show_tree {
+                    let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 6.0), egui::Sense::drag());
+                    ui.painter().hline(rect.x_range(), rect.center().y, ui.visuals().widgets.noninteractive.bg_stroke);
+                    if response.dragged() {
+                        let delta = ui.input(|i| i.pointer.delta().y);
+                        self.navigation.settings.tree_fraction = (self.navigation.settings.tree_fraction - delta / height.max(1.0)).clamp(0.15, 0.8);
+                    }
+                    if response.drag_stopped() { self.save_navigation_settings(); }
+                    self.show_navigation_tree(ui);
+                } else { self.navigation.tree_focus = false; }
             });
+        self.view_preferences.settings.sidebar_width = panel.response.rect.width();
     }
 }
