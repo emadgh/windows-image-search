@@ -37,6 +37,12 @@ enum FileContextAction {
 }
 
 impl ImageSearchApp {
+    fn take_result_reveal(&mut self, visible: &[usize]) -> Option<usize> {
+        let path = self.reveal_result.take()?;
+        let source = self.source();
+        visible.iter().position(|&index| source[index].path == path)
+    }
+
     fn record_view(&self, index: usize) -> RecordView {
         let record = &self.source()[index];
         RecordView {
@@ -68,8 +74,11 @@ impl ImageSearchApp {
         let fitted_thumb_size = (cell_width - CELL_HORIZONTAL_PADDING).max(1.0);
         let row_height = fitted_thumb_size + CELL_VERTICAL_OVERHEAD;
         let fit = self.thumb_fit;
-        let spec =
+        let mut spec =
             PhotoGridSpec::new("main-result-photo-grid", cell_width, row_height).columns(columns);
+        spec.reveal_row = self
+            .take_result_reveal(visible)
+            .map(|index| index / columns);
         self.result_grid_columns = columns;
 
         photo_grid::show(ui, visible.len(), spec, |ui, pos| {
@@ -131,112 +140,129 @@ impl ImageSearchApp {
         }
         ui.separator();
 
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show_rows(ui, 66.0, visible.len(), |ui, range| {
+        const ID: &str = "main-result-details";
+        const ROW_HEIGHT: f32 = 66.0;
+        let row = self.take_result_reveal(visible);
+        let area = egui::ScrollArea::vertical()
+            .id_salt(ID)
+            .auto_shrink([false, false]);
+        photo_grid::reveal_row(ui, area, ID, ROW_HEIGHT, row).show_rows(
+            ui,
+            ROW_HEIGHT,
+            visible.len(),
+            |ui, range| {
                 for row in range {
                     let record = self.record_view(visible[row]);
                     let selected = self.selected_paths.contains(&record.path);
                     let fit = self.thumb_fit;
 
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 0.0;
+                    let row_rect = ui
+                        .horizontal(|ui| {
+                            ui.set_height(ROW_HEIGHT);
+                            ui.spacing_mut().item_spacing.x = 0.0;
 
-                        let response = if let Some(texture) = self.thumbnail(&record.path) {
-                            let response = thumbnail_widget(
-                                ui,
-                                &texture,
-                                egui::vec2(widths.thumb, 54.0),
-                                fit,
-                                selected,
-                                egui::Sense::click_and_drag(),
+                            let response = if let Some(texture) = self.thumbnail(&record.path) {
+                                let response = thumbnail_widget(
+                                    ui,
+                                    &texture,
+                                    egui::vec2(widths.thumb, 54.0),
+                                    fit,
+                                    selected,
+                                    egui::Sense::click_and_drag(),
+                                );
+                                if let Some(bbox) = self.face_match_box(&record.path) {
+                                    draw_face_match_box(ui, &texture, response.rect, fit, bbox);
+                                }
+                                response
+                            } else {
+                                photo_grid::loading_tile(
+                                    ui,
+                                    egui::vec2(widths.thumb, 54.0),
+                                    selected,
+                                    egui::Sense::click_and_drag(),
+                                )
+                            };
+                            self.handle_result_response(
+                                &response,
+                                &record.path,
+                                &record.root,
+                                record.dominant,
                             );
-                            if let Some(bbox) = self.face_match_box(&record.path) {
-                                draw_face_match_box(ui, &texture, response.rect, fit, bbox);
-                            }
-                            response
-                        } else {
-                            photo_grid::loading_tile(
-                                ui,
-                                egui::vec2(widths.thumb, 54.0),
-                                selected,
-                                egui::Sense::click_and_drag(),
+                            self.attach_collection_drag_source(&response, &record.path);
+
+                            let name_text = format!(
+                                "{}\n{}",
+                                truncate_middle(&record.file_name, 44),
+                                truncate_middle(&record.root.display().to_string(), 48)
+                            );
+                            let name = ui.add_sized(
+                                [widths.name, 56.0],
+                                egui::Label::new(name_text)
+                                    .wrap()
+                                    .sense(egui::Sense::click_and_drag()),
+                            );
+                            self.handle_result_response(
+                                &name,
+                                &record.path,
+                                &record.root,
+                                record.dominant,
+                            );
+                            self.attach_collection_drag_source(&name, &record.path);
+                            name.on_hover_text(record.path.display().to_string());
+
+                            ui.add_sized(
+                                [widths.info, 56.0],
+                                egui::Label::new(format!(
+                                    "{} × {}  {}\n{}  {}",
+                                    record.width,
+                                    record.height,
+                                    record.extension.to_ascii_uppercase(),
+                                    format_bytes(record.size),
+                                    format_modified(record.modified)
+                                ))
+                                .wrap(),
+                            );
+
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(widths.color, 56.0),
+                                egui::Layout::top_down(egui::Align::Center),
+                                |ui| {
+                                    ui.set_min_width(widths.color);
+                                    ui.set_max_width(widths.color);
+                                    swatch(ui, record.dominant);
+                                },
+                            );
+
+                            let metadata = metadata_text(&record);
+                            ui.add_sized(
+                                [widths.metadata, 56.0],
+                                egui::Label::new(truncate_middle(
+                                    &metadata,
+                                    metadata_chars(widths.metadata),
+                                ))
+                                .wrap(),
                             )
-                        };
-                        self.handle_result_response(
-                            &response,
-                            &record.path,
-                            &record.root,
-                            record.dominant,
-                        );
-                        self.attach_collection_drag_source(&response, &record.path);
+                            .on_hover_text(metadata);
 
-                        let name_text = format!(
-                            "{}\n{}",
-                            truncate_middle(&record.file_name, 44),
-                            truncate_middle(&record.root.display().to_string(), 48)
-                        );
-                        let name = ui.add_sized(
-                            [widths.name, 56.0],
-                            egui::Label::new(name_text)
-                                .wrap()
-                                .sense(egui::Sense::click_and_drag()),
-                        );
-                        self.handle_result_response(
-                            &name,
-                            &record.path,
-                            &record.root,
-                            record.dominant,
-                        );
-                        self.attach_collection_drag_source(&name, &record.path);
-                        name.on_hover_text(record.path.display().to_string());
-
-                        ui.add_sized(
-                            [widths.info, 56.0],
-                            egui::Label::new(format!(
-                                "{} × {}  {}\n{}  {}",
-                                record.width,
-                                record.height,
-                                record.extension.to_ascii_uppercase(),
-                                format_bytes(record.size),
-                                format_modified(record.modified)
-                            ))
-                            .wrap(),
-                        );
-
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(widths.color, 56.0),
-                            egui::Layout::top_down(egui::Align::Center),
-                            |ui| {
-                                ui.set_min_width(widths.color);
-                                ui.set_max_width(widths.color);
-                                swatch(ui, record.dominant);
-                            },
-                        );
-
-                        let metadata = metadata_text(&record);
-                        ui.add_sized(
-                            [widths.metadata, 56.0],
-                            egui::Label::new(truncate_middle(
-                                &metadata,
-                                metadata_chars(widths.metadata),
-                            ))
-                            .wrap(),
-                        )
-                        .on_hover_text(metadata);
-
-                        let score = record
-                            .score
-                            .map(|score| format!("{:.3}", score))
-                            .unwrap_or_else(|| "—".to_owned());
-                        ui.add_sized(
-                            [widths.score, 56.0],
-                            egui::Label::new(egui::RichText::new(score).strong()),
-                        );
-                    });
-                    ui.separator();
+                            let score = record
+                                .score
+                                .map(|score| format!("{:.3}", score))
+                                .unwrap_or_else(|| "—".to_owned());
+                            ui.add_sized(
+                                [widths.score, 56.0],
+                                egui::Label::new(egui::RichText::new(score).strong()),
+                            );
+                        })
+                        .response
+                        .rect;
+                    ui.painter().hline(
+                        row_rect.x_range(),
+                        row_rect.bottom(),
+                        ui.visuals().widgets.noninteractive.bg_stroke,
+                    );
                 }
-            });
+            },
+        );
     }
 
     fn handle_result_response(
@@ -249,6 +275,8 @@ impl ImageSearchApp {
         if response.secondary_clicked() {
             if !self.selected_paths.contains(path) {
                 self.select_path(path, false);
+            } else {
+                self.focused_result = Some(path.to_path_buf());
             }
             self.file_context_path = Some(path.to_path_buf());
             self.file_context_faces =
@@ -323,7 +351,17 @@ impl ImageSearchApp {
                 ui.close();
             }
             ui.separator();
-            if ui.button("Context menu").clicked() {
+            let same_folder = self.selected_paths.iter().all(|selected| {
+                selected.parent().map(crate::navigation::path_key)
+                    == path.parent().map(crate::navigation::path_key)
+            });
+            if ui
+                .add_enabled(same_folder, egui::Button::new("Context menu"))
+                .on_disabled_hover_text(
+                    "The Windows context menu requires files from the same folder.",
+                )
+                .clicked()
+            {
                 context_action = Some(FileContextAction::WindowsContextMenu);
                 ui.close();
             }
@@ -335,9 +373,41 @@ impl ImageSearchApp {
             let modifiers = response.ctx.input(|input| input.modifiers);
             let additive = modifiers.ctrl || modifiers.command;
             self.select_path_with_modifiers(path, additive, modifiers.shift);
+            if response.interact_pointer_pos().is_some() {
+                self.navigation.tree_focus = false;
+                response.ctx.memory_mut(|memory| {
+                    if let Some(id) = memory.focused() {
+                        memory.surrender_focus(id);
+                    }
+                });
+            }
         }
         if response.double_clicked() {
             let _ = open::that(path);
+        }
+    }
+
+    fn selected_open_paths(&self, path: &Path) -> Vec<PathBuf> {
+        if self.selected_paths.len() <= 1 || !self.selected_paths.contains(path) {
+            return vec![path.to_path_buf()];
+        }
+        self.visible_result_paths()
+            .into_iter()
+            .filter(|candidate| self.selected_paths.contains(candidate))
+            .collect()
+    }
+
+    pub(super) fn open_selected_files(&mut self, path: &Path) {
+        let mut first_error = None;
+        let mut failed = 0;
+        for file in self.selected_open_paths(path) {
+            if let Err(error) = open::that(&file) {
+                failed += 1;
+                first_error.get_or_insert_with(|| format!("{}: {error}", file.display()));
+            }
+        }
+        if let Some(error) = first_error {
+            self.last_error = Some(format!("Could not open {failed} file(s). {error}"));
         }
     }
 
@@ -356,13 +426,11 @@ impl ImageSearchApp {
                     self.last_error = Some(error);
                 }
             }
-            FileContextAction::OpenFile => {
-                if let Err(error) = open::that(&path) {
-                    self.last_error = Some(format!("Cannot open {}: {error}", path.display()));
-                }
-            }
+            FileContextAction::OpenFile => self.open_selected_files(&path),
             FileContextAction::OpenInPhotoshop => {
-                if let Err(error) = crate::windows_shell::open_in_photoshop(path) {
+                if let Err(error) =
+                    crate::windows_shell::open_in_photoshop(&self.selected_open_paths(&path))
+                {
                     self.last_error = Some(error);
                 }
             }
@@ -386,7 +454,13 @@ impl ImageSearchApp {
                 }
             }
             FileContextAction::OpenFileLocation => crate::windows_shell::show_in_explorer(path),
-            FileContextAction::WindowsContextMenu => crate::windows_shell::show_context_menu(path),
+            FileContextAction::WindowsContextMenu => {
+                if let Err(error) =
+                    crate::windows_shell::show_context_menu(&self.selected_open_paths(&path))
+                {
+                    self.last_error = Some(error);
+                }
+            }
         }
     }
 }

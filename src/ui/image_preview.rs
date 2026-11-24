@@ -215,6 +215,7 @@ impl ImageSearchApp {
         };
         let path = visible[target].clone();
         self.select_path(&path, false);
+        self.reveal_result = Some(path.clone());
         self.open_image_preview(path, ctx);
     }
 

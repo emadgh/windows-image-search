@@ -22,7 +22,7 @@ pub(crate) struct ViewSettings {
 impl Default for ViewSettings {
     fn default() -> Self {
         Self {
-            inspector_open: true,
+            inspector_open: false,
             thumb_size: 168.0,
             thumb_fit: ThumbnailFit::Contain,
             view_mode: ViewMode::Grid,
@@ -151,9 +151,16 @@ impl ImageSearchApp {
         }
         settings = settings.sanitized();
         if settings != self.view_preferences.observed {
+            let inspector_changed =
+                settings.inspector_open != self.view_preferences.observed.inspector_open;
             self.view_preferences.observed = settings.clone();
             self.view_preferences.settings = settings;
-            self.view_preferences.due = Some(Instant::now() + Duration::from_millis(500));
+            let delay = if inspector_changed {
+                Duration::ZERO
+            } else {
+                Duration::from_millis(500)
+            };
+            self.view_preferences.due = Some(Instant::now() + delay);
         }
         if self.view_preferences.settings == self.view_preferences.saved {
             self.view_preferences.due = None;

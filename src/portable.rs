@@ -1,6 +1,6 @@
-use crate::{ann, db, face_store, thumbnail_cache};
+use crate::{db, face_store, thumbnail_cache};
 use anyhow::{bail, Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
@@ -124,13 +124,9 @@ pub fn attach_root(session_db_path: &Path, root: &Path) -> Result<AttachOutcome>
     ensure_portable_layout(root)?;
     let (library_id, ready, portable_count) = portable_identity(root)?;
 
-    let session = db::open(session_db_path)?;
-    ensure_session_registry(&session)?;
-    let legacy_count = root_image_count(&session, root)?;
-    drop(session);
-
     let mut migrated = false;
     if !ready {
+        let legacy_count = root_image_count(&db::open(session_db_path)?, root)?;
         if legacy_count > 0 {
             replace_root_from_session(session_db_path, root)?;
             migrate_legacy_thumbnails(session_db_path, root);
@@ -144,9 +140,7 @@ pub fn attach_root(session_db_path: &Path, root: &Path) -> Result<AttachOutcome>
     }
 
     let images = import_root_into_session(session_db_path, root, &library_id)?;
-    // ANN is a derived cache; a missing/stale dump must never make attachment
-    // fail because exact search can still use stored embeddings.
-    let _ = refresh_ann(root);
+    // Similarity search prepares its derived ANN index on demand.
     Ok(AttachOutcome {
         library_id,
         images,
@@ -181,10 +175,6 @@ pub fn sync_paths_from_session(conn: &mut Connection, paths: &[PathBuf]) -> Resu
         mirror_paths_for_root(conn, &root, &root_paths)?;
     }
     Ok(())
-}
-
-pub fn refresh_ann(root: &Path) -> Result<bool> {
-    ann::prepare_index(&index_db_path(root))
 }
 
 fn migrate_legacy_thumbnails(session_db_path: &Path, root: &Path) {
@@ -335,6 +325,24 @@ fn import_root_into_session(
     let prefix = root_prefix(root);
     let result = (|| -> Result<usize> {
         let tx = conn.transaction()?;
+        let token: String = tx.query_row(
+            &format!("SELECT token FROM {ATTACHED_DB}.search_catalog_revision WHERE id = 1"),
+            [],
+            |row| row.get(0),
+        )?;
+        let cached_count = tx
+            .query_row(
+                "SELECT image_count FROM portable_image_imports
+             WHERE root_path = ?1 AND library_id = ?2 AND token = ?3
+               AND EXISTS (SELECT 1 FROM roots WHERE path = ?1)",
+                params![root_text, library_id, token],
+                |row| row.get::<_, usize>(0),
+            )
+            .optional()?;
+        if let Some(count) = cached_count {
+            tx.commit()?;
+            return Ok(count);
+        }
         tx.execute(
             "INSERT OR IGNORE INTO roots(path) VALUES(?1)",
             params![root_text],
@@ -361,6 +369,13 @@ fn import_root_into_session(
             "INSERT INTO portable_root_registry(library_id, root_path) VALUES(?1, ?2) \
              ON CONFLICT(library_id) DO UPDATE SET root_path = excluded.root_path",
             params![library_id, root_text],
+        )?;
+        tx.execute(
+            "INSERT INTO portable_image_imports(root_path, library_id, token, image_count)
+             VALUES(?1, ?2, ?3, ?4)
+             ON CONFLICT(root_path) DO UPDATE SET library_id = excluded.library_id,
+                 token = excluded.token, image_count = excluded.image_count",
+            params![root_text, library_id, token, copied],
         )?;
         tx.commit()?;
         Ok(copied)
@@ -472,10 +487,14 @@ fn portable_identity(root: &Path) -> Result<(String, bool, usize)> {
     let library_id =
         meta_value(&conn, "library_id")?.context("portable index has no library id")?;
     let ready = meta_value(&conn, "migration_complete")?.as_deref() == Some("1");
-    let count = conn.query_row("SELECT COUNT(*) FROM images", [], |row| {
-        row.get::<_, i64>(0)
-    })?;
-    Ok((library_id, ready, count.max(0) as usize))
+    let count = if ready {
+        0
+    } else {
+        conn.query_row("SELECT COUNT(*) FROM images", [], |row| {
+            row.get::<_, usize>(0)
+        })?
+    };
+    Ok((library_id, ready, count))
 }
 
 fn mark_portable_ready(root: &Path) -> Result<()> {
@@ -488,7 +507,25 @@ fn ensure_session_registry(conn: &Connection) -> Result<()> {
         "CREATE TABLE IF NOT EXISTS portable_root_registry(\
              library_id TEXT PRIMARY KEY NOT NULL,\
              root_path TEXT NOT NULL\
-         );",
+         );
+         CREATE TABLE IF NOT EXISTS portable_image_imports(
+             root_path TEXT PRIMARY KEY NOT NULL,
+             library_id TEXT NOT NULL,
+             token TEXT NOT NULL,
+             image_count INTEGER NOT NULL
+         );
+         CREATE TRIGGER IF NOT EXISTS portable_import_insert AFTER INSERT ON images BEGIN
+             DELETE FROM portable_image_imports WHERE root_path = new.root;
+         END;
+         CREATE TRIGGER IF NOT EXISTS portable_import_update AFTER UPDATE ON images BEGIN
+             DELETE FROM portable_image_imports WHERE root_path IN (old.root, new.root);
+         END;
+         CREATE TRIGGER IF NOT EXISTS portable_import_delete AFTER DELETE ON images BEGIN
+             DELETE FROM portable_image_imports WHERE root_path = old.root;
+         END;
+         CREATE TRIGGER IF NOT EXISTS portable_import_root_delete AFTER DELETE ON roots BEGIN
+             DELETE FROM portable_image_imports WHERE root_path = old.path;
+         END;",
     )?;
     Ok(())
 }

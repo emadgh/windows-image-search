@@ -45,8 +45,14 @@ impl ImageSearchApp {
         }
 
         if ctx.input(|input| input.key_pressed(egui::Key::Enter)) {
-            if let Some(path) = self.selected_path() {
-                let _ = open::that(path);
+            let path = self
+                .focused_result
+                .as_ref()
+                .filter(|path| self.selected_paths.contains(*path))
+                .or_else(|| self.selected_paths.iter().next())
+                .cloned();
+            if let Some(path) = path {
+                self.open_selected_files(&path);
             }
             return;
         }
@@ -122,6 +128,7 @@ impl ImageSearchApp {
         };
         let target_path = visible[target].clone();
         self.select_path_with_modifiers(&target_path, false, extend_range);
+        self.reveal_result = Some(target_path);
     }
 
     pub(super) fn show_error_banner(&mut self, ctx: &egui::Context) {

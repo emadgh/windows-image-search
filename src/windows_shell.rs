@@ -158,16 +158,15 @@ pub fn copy_file(path: PathBuf) -> Result<(), String> {
     }
 }
 
-pub fn open_in_photoshop(path: PathBuf) -> Result<(), String> {
+pub fn open_in_photoshop(paths: &[PathBuf]) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        windows_open_in_photoshop(&path)
-            .map_err(|err| format!("Cannot open {} in Adobe Photoshop: {err}", path.display()))
+        windows_open_in_photoshop(paths)
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = path;
+        let _ = paths;
         Err("Open in Photoshop is currently available only on Windows".to_owned())
     }
 }
@@ -236,29 +235,28 @@ fn windows_show_in_explorer(path: &std::path::Path) -> windows::core::Result<()>
     }
 }
 
-pub fn show_context_menu(path: PathBuf) {
+pub fn show_context_menu(paths: &[PathBuf]) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         // Keep Shell menu creation on the GUI thread that owns the foreground window.
         // Shell context-menu handlers can depend on the owner thread's window/message
         // loop; running the whole IContextMenu/TrackPopupMenuEx sequence on a detached
         // worker thread can make the native menu silently fail to appear.
-        if let Err(err) = windows_context_menu(&path) {
-            eprintln!(
-                "Windows shell context menu failed for {}: {err}",
-                path.display()
-            );
-        }
+        windows_context_menu(paths)
+            .map_err(|err| format!("Cannot show the Windows context menu: {err}"))
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = open::that(path);
+        for path in paths {
+            open::that(path).map_err(|err| format!("Cannot open {}: {err}", path.display()))?;
+        }
+        Ok(())
     }
 }
 
 #[cfg(target_os = "windows")]
-fn windows_context_menu(path: &std::path::Path) -> windows::core::Result<()> {
+fn windows_context_menu(paths: &[PathBuf]) -> windows::core::Result<()> {
     use std::ffi::c_void;
     use std::os::windows::ffi::OsStrExt;
     use std::ptr::null_mut;
@@ -269,8 +267,8 @@ fn windows_context_menu(path: &std::path::Path) -> windows::core::Result<()> {
     };
     use windows::Win32::UI::Shell::Common::ITEMIDLIST;
     use windows::Win32::UI::Shell::{
-        IContextMenu, IShellFolder, SHBindToParent, SHSimpleIDListFromPath, CMF_NORMAL,
-        CMINVOKECOMMANDINFO,
+        IContextMenu, ILFindLastID, IShellFolder, SHBindToParent, SHSimpleIDListFromPath,
+        CMF_NORMAL, CMINVOKECOMMANDINFO,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CreatePopupMenu, DestroyMenu, GetCursorPos, GetForegroundWindow, TrackPopupMenuEx,
@@ -300,25 +298,34 @@ fn windows_context_menu(path: &std::path::Path) -> windows::core::Result<()> {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
         let _com = ComGuard;
 
-        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-        let absolute_pidl = SHSimpleIDListFromPath(PCWSTR(wide.as_ptr()));
-        if absolute_pidl.is_null() {
-            return Err(Error::from_win32());
+        let mut pidls = Vec::with_capacity(paths.len());
+        for path in paths {
+            let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+            let absolute_pidl = SHSimpleIDListFromPath(PCWSTR(wide.as_ptr()));
+            if absolute_pidl.is_null() {
+                return Err(Error::from_win32());
+            }
+            pidls.push(PidlGuard(absolute_pidl));
         }
-        let _pidl = PidlGuard(absolute_pidl);
+        let Some(first) = pidls.first() else {
+            return Ok(());
+        };
 
         // Explorer obtains an item's IContextMenu from the item's parent IShellFolder.
         // SHBindToParent returns the child PIDL in the parent's namespace; that child PIDL
         // is what IShellFolder::GetUIObjectOf expects.
         let mut child_pidl: *mut ITEMIDLIST = null_mut();
-        let parent: IShellFolder = SHBindToParent(absolute_pidl, Some(&mut child_pidl))?;
+        let parent: IShellFolder = SHBindToParent(first.0, Some(&mut child_pidl))?;
         if child_pidl.is_null() {
             return Err(Error::from_win32());
         }
 
         let owner = GetForegroundWindow();
-        let child = child_pidl as *const ITEMIDLIST;
-        let context: IContextMenu = parent.GetUIObjectOf(owner, &[child], None)?;
+        let children: Vec<*const ITEMIDLIST> = pidls
+            .iter()
+            .map(|pidl| ILFindLastID(pidl.0).cast_const())
+            .collect();
+        let context: IContextMenu = parent.GetUIObjectOf(owner, &children, None)?;
         let menu = CreatePopupMenu()?;
 
         let menu_result = (|| -> windows::core::Result<()> {
@@ -417,16 +424,26 @@ fn invoke_shell_verb(path: &std::path::Path, verb: &'static [u8]) -> windows::co
 }
 
 #[cfg(target_os = "windows")]
-fn windows_open_in_photoshop(path: &std::path::Path) -> Result<(), String> {
+fn windows_open_in_photoshop(paths: &[PathBuf]) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SW_SHOWNORMAL};
 
     let executable: Vec<u16> = "Photoshop.exe".encode_utf16().chain(Some(0)).collect();
-    let parameters: Vec<u16> = format!("\"{}\"", path.display())
-        .encode_utf16()
-        .chain(Some(0))
-        .collect();
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let mut parameters = Vec::new();
+    for path in paths {
+        if !parameters.is_empty() {
+            parameters.push(b' ' as u16);
+        }
+        parameters.push(b'"' as u16);
+        parameters.extend(path.as_os_str().encode_wide());
+        parameters.push(b'"' as u16);
+    }
+    parameters.push(0);
     let result = unsafe {
         ShellExecuteW(
             Some(GetForegroundWindow()),

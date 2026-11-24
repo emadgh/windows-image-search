@@ -662,15 +662,16 @@ impl ImageSearchApp {
     }
 
     fn reveal_navigation_file(&mut self) {
-        if self.navigation.observed_file == self.focused_result {
-            return;
-        }
-        self.navigation.observed_file = self.focused_result.clone();
-        let Some(path) = self
+        let selected_file = self
             .focused_result
             .as_ref()
-            .filter(|p| self.selected_paths.contains(*p))
-        else {
+            .filter(|path| self.selected_paths.contains(*path));
+        if self.navigation.observed_file.as_ref() == selected_file {
+            return;
+        }
+        self.navigation.observed_file = selected_file.cloned();
+        self.navigation.highlight = None;
+        let Some(path) = selected_file else {
             return;
         };
         let Some(folder) = path.parent() else {
@@ -850,12 +851,14 @@ impl ImageSearchApp {
                             if let Some((key, started)) = &self.navigation.highlight {
                                 let elapsed = started.elapsed().as_secs_f32();
                                 if key == &node.key && elapsed < 1.5 {
-                                    button = button.fill(
-                                        ui.visuals()
-                                            .selection
-                                            .bg_fill
-                                            .gamma_multiply(0.5 * (1.0 - elapsed / 1.5)),
-                                    );
+                                    button = button
+                                        .fill(
+                                            ui.visuals()
+                                                .selection
+                                                .bg_fill
+                                                .gamma_multiply(0.5 * (1.0 - elapsed / 1.5)),
+                                        )
+                                        .frame_when_inactive(true);
                                     ui.ctx().request_repaint_after(Duration::from_millis(30));
                                 }
                             }

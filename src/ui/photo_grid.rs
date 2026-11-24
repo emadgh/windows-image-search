@@ -9,6 +9,7 @@ pub(super) struct PhotoGridSpec {
     pub row_height: f32,
     pub max_height: Option<f32>,
     pub columns: Option<usize>,
+    pub reveal_row: Option<usize>,
 }
 
 impl PhotoGridSpec {
@@ -19,6 +20,7 @@ impl PhotoGridSpec {
             row_height,
             max_height: None,
             columns: None,
+            reveal_row: None,
         }
     }
 
@@ -61,23 +63,50 @@ pub(super) fn show(
         scroll = scroll.max_height(max_height);
     }
 
-    scroll.show_rows(ui, spec.row_height, rows, |ui, row_range| {
-        for row in row_range {
-            ui.horizontal(|ui| {
-                for column in 0..columns {
-                    let index = row * columns + column;
-                    if index >= item_count {
-                        break;
+    reveal_row(ui, scroll, spec.id_salt, spec.row_height, spec.reveal_row).show_rows(
+        ui,
+        spec.row_height,
+        rows,
+        |ui, row_range| {
+            for row in row_range {
+                ui.horizontal(|ui| {
+                    for column in 0..columns {
+                        let index = row * columns + column;
+                        if index >= item_count {
+                            break;
+                        }
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(spec.cell_width, spec.row_height),
+                            egui::Layout::top_down(egui::Align::Center),
+                            |ui| render_cell(ui, index),
+                        );
                     }
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(spec.cell_width, spec.row_height),
-                        egui::Layout::top_down(egui::Align::Center),
-                        |ui| render_cell(ui, index),
-                    );
-                }
-            });
-        }
-    });
+                });
+            }
+        },
+    );
+}
+
+pub(super) fn reveal_row(
+    ui: &egui::Ui,
+    area: egui::ScrollArea,
+    id: &str,
+    row_height: f32,
+    row: Option<usize>,
+) -> egui::ScrollArea {
+    let Some(row) = row else { return area };
+    let offset = egui::scroll_area::State::load(ui.ctx(), ui.make_persistent_id(egui::Id::new(id)))
+        .map_or(0.0, |state| state.offset.y);
+    let height = ui.available_height().max(1.0);
+    let top = row as f32 * (row_height + ui.spacing().item_spacing.y);
+    let bottom = top + row_height;
+    if top < offset || row_height > height {
+        area.vertical_scroll_offset(top)
+    } else if bottom > offset + height {
+        area.vertical_scroll_offset(bottom - height)
+    } else {
+        area
+    }
 }
 
 pub(super) fn loading_tile(

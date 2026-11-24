@@ -166,10 +166,6 @@ fn retain_available_images(images: &mut Vec<ImageSummary>, roots: &[PathBuf]) {
 /// The database intentionally keeps records until a rescan reconciles them,
 /// but the UI must not surface a path whose root was detached or whose source
 /// file was removed while a filter/search was active.
-fn image_is_available(image: &ImageSummary, roots: &[PathBuf]) -> bool {
-    roots.iter().any(|root| root == &image.root) && image.path.is_file()
-}
-
 enum StartupMessage {
     Stage {
         status: String,
@@ -182,9 +178,10 @@ enum StartupMessage {
         images: Vec<ImageSummary>,
         collections: collections::CollectionsState,
         root_counts: HashMap<PathBuf, (usize, usize)>,
-        people_snapshot_missing: bool,
         warnings: Vec<String>,
     },
+    MissingPaths(Vec<PathBuf>),
+    BackgroundFinished(Result<bool, String>),
     Error(String),
 }
 
@@ -252,6 +249,7 @@ pub struct ImageSearchApp {
     pub(super) selected_paths: HashSet<PathBuf>,
     pub(super) selection_anchor: Option<PathBuf>,
     pub(super) focused_result: Option<PathBuf>,
+    pub(super) reveal_result: Option<PathBuf>,
     file_context_path: Option<PathBuf>,
     file_context_faces: Vec<crate::face_search::IndexedFaceSuggestion>,
     clipboard_query_images: Vec<crate::visual_query::TemporaryQueryImage>,
@@ -262,6 +260,8 @@ pub struct ImageSearchApp {
     pub(super) tx: Sender<WorkerMessage>,
     pub(super) rx: Receiver<WorkerMessage>,
     startup_rx: Receiver<StartupMessage>,
+    startup_audit_revision: Option<u64>,
+    startup_background_pending: bool,
     index_control: Option<indexer::IndexControl>,
     index_paused: bool,
     searching: bool,
@@ -323,7 +323,10 @@ impl ImageSearchApp {
         let thumb_pool = ThumbnailPool::new(legacy_thumbnail_cache, Vec::new());
 
         let startup_db = db_path.clone();
+        let check_people_snapshot = face_embedding_settings.configured();
         std::thread::spawn(move || {
+            let started = Instant::now();
+            let mut profile = String::new();
             let send_stage = |status: &str, done: usize| {
                 let _ = startup_tx.send(StartupMessage::Stage {
                     status: status.to_owned(),
@@ -336,50 +339,114 @@ impl ImageSearchApp {
                 let _ = db::open(&startup_db)?;
                 send_stage("Loading indexed roots…", 2);
                 let registered_roots = db::load_roots(&startup_db)?;
+                profile.push_str(&format!(
+                    "database_and_roots_ms={}\n",
+                    started.elapsed().as_millis()
+                ));
                 send_stage("Attaching portable indexes…", 3);
+                let attach_started = Instant::now();
                 let warnings = portable::prepare_registered_roots(&startup_db, &registered_roots);
                 let (roots, unavailable_roots) = partition_registered_roots(registered_roots);
+                profile.push_str(&format!(
+                    "attach_ms={}\n",
+                    attach_started.elapsed().as_millis()
+                ));
                 send_stage("Loading indexed image catalog…", 4);
+                let catalog_started = Instant::now();
                 let mut images = db::load_image_summaries(&startup_db)?;
-                retain_available_images(&mut images, &roots);
+                let available: HashSet<&Path> = roots.iter().map(PathBuf::as_path).collect();
+                images.retain(|image| available.contains(image.root.as_path()));
+                profile.push_str(&format!(
+                    "catalog_ms={}\n",
+                    catalog_started.elapsed().as_millis()
+                ));
+                let collections_started = Instant::now();
                 let collections = collections::CollectionsState::load(&startup_db, &images)?;
                 let root_counts = db::load_root_counts(&startup_db)?;
-                // People groups are derived data. Older builds could leave valid face
-                // embeddings behind without a portable clustering snapshot, so audit the
-                // cache during the existing background startup load and self-heal below.
-                let people_snapshot_missing = {
-                    let conn = db::open(&startup_db)?;
-                    crate::people_store::load_state(&conn)?.is_none()
-                };
+                profile.push_str(&format!(
+                    "collections_and_counts_ms={}\n",
+                    collections_started.elapsed().as_millis()
+                ));
                 Ok((
                     roots,
                     unavailable_roots,
                     images,
                     collections,
                     root_counts,
-                    people_snapshot_missing,
                     warnings,
                 ))
             })();
             match result {
-                Ok((
-                    roots,
-                    unavailable_roots,
-                    images,
-                    collections,
-                    root_counts,
-                    people_snapshot_missing,
-                    warnings,
-                )) => {
-                    let _ = startup_tx.send(StartupMessage::Ready {
-                        roots,
-                        unavailable_roots,
-                        images,
-                        collections,
-                        root_counts,
-                        people_snapshot_missing,
-                        warnings,
-                    });
+                Ok((roots, unavailable_roots, images, collections, root_counts, warnings)) => {
+                    let audit_paths = images
+                        .iter()
+                        .map(|image| image.path.clone())
+                        .collect::<Vec<_>>();
+                    let audit_roots = roots.clone();
+                    profile.push_str(&format!(
+                        "images={}\ncatalog_ready_ms={}\n",
+                        images.len(),
+                        started.elapsed().as_millis()
+                    ));
+                    let profile_path = startup_db.with_file_name("startup-profile.txt");
+                    if startup_tx
+                        .send(StartupMessage::Ready {
+                            roots,
+                            unavailable_roots,
+                            images,
+                            collections,
+                            root_counts,
+                            warnings,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                    let _ = std::fs::write(&profile_path, &profile);
+
+                    let audit_started = Instant::now();
+                    let mut missing = audit_paths
+                        .into_iter()
+                        .filter(|path| match path.metadata() {
+                            Ok(metadata) => !metadata.is_file(),
+                            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+                        })
+                        .collect::<Vec<_>>();
+                    let available_roots = audit_roots
+                        .into_iter()
+                        .filter(|root| portable::is_indexed_root(root))
+                        .collect::<Vec<_>>();
+                    missing
+                        .retain(|path| available_roots.iter().any(|root| path.starts_with(root)));
+                    profile.push_str(&format!(
+                        "file_audit_ms={}\nmissing_paths={}\n",
+                        audit_started.elapsed().as_millis(),
+                        missing.len()
+                    ));
+                    if startup_tx
+                        .send(StartupMessage::MissingPaths(missing))
+                        .is_err()
+                    {
+                        return;
+                    }
+                    let people_started = Instant::now();
+                    let people_snapshot_missing = if check_people_snapshot {
+                        db::open(&startup_db)
+                            .and_then(|conn| crate::people_store::load_state(&conn))
+                            .map(|state| state.is_none())
+                            .map_err(|error| {
+                                format!("Could not check the People snapshot: {error:#}")
+                            })
+                    } else {
+                        Ok(false)
+                    };
+                    profile.push_str(&format!(
+                        "people_snapshot_ms={}\n",
+                        people_started.elapsed().as_millis()
+                    ));
+                    let _ = std::fs::write(profile_path, profile);
+                    let _ = startup_tx
+                        .send(StartupMessage::BackgroundFinished(people_snapshot_missing));
                 }
                 Err(err) => {
                     let _ = startup_tx.send(StartupMessage::Error(format!(
@@ -453,6 +520,7 @@ impl ImageSearchApp {
             selected_paths: HashSet::new(),
             selection_anchor: None,
             focused_result: None,
+            reveal_result: None,
             file_context_path: None,
             file_context_faces: Vec::new(),
             clipboard_query_images: Vec::new(),
@@ -463,6 +531,8 @@ impl ImageSearchApp {
             tx,
             rx,
             startup_rx,
+            startup_audit_revision: None,
+            startup_background_pending: true,
             index_control: None,
             index_paused: false,
             searching: false,
@@ -498,13 +568,13 @@ impl ImageSearchApp {
                     images,
                     collections,
                     root_counts,
-                    people_snapshot_missing,
                     warnings,
                 } => {
                     self.roots = roots;
                     self.unavailable_roots = unavailable_roots;
                     self.images = images;
                     self.rebuild_image_positions();
+                    self.startup_audit_revision = Some(self.image_catalog_revision);
                     self.collections = collections;
                     self.root_counts = root_counts;
                     self.thumb_pool.set_roots(self.roots.clone());
@@ -515,9 +585,26 @@ impl ImageSearchApp {
                         .first()
                         .cloned()
                         .unwrap_or_else(|| "Ready".to_owned());
-                    self.schedule_people_snapshot_recovery(people_snapshot_missing);
+                }
+                StartupMessage::MissingPaths(paths) => {
+                    if self.startup_audit_revision.take() == Some(self.image_catalog_revision)
+                        && !paths.is_empty()
+                    {
+                        self.remove_indexed_paths(paths);
+                        self.refresh_live_root_indexed_counts();
+                        self.refresh_collection_effective_membership();
+                        self.refresh_text_search_after_data_change();
+                    }
+                }
+                StartupMessage::BackgroundFinished(result) => {
+                    self.startup_background_pending = false;
+                    match result {
+                        Ok(missing) => self.schedule_people_snapshot_recovery(missing),
+                        Err(error) => self.last_error = Some(error),
+                    }
                 }
                 StartupMessage::Error(error) => {
+                    self.startup_background_pending = false;
                     self.busy = false;
                     self.progress = None;
                     self.status = "Startup load failed".to_owned();
@@ -1053,8 +1140,7 @@ impl ImageSearchApp {
             self.images
                 .iter()
                 .filter(|record| {
-                    image_is_available(record, &self.roots)
-                        && self.folder_filter_matches(&record.path)
+                    self.folder_filter_matches(&record.path)
                         && self.collection_filter_matches(&record.path)
                         && self.people_filter_matches(&record.path)
                         && (self.search_text.trim().is_empty()
@@ -1185,7 +1271,9 @@ impl ImageSearchApp {
             .iter()
             .enumerate()
             .filter(|(_, record)| {
-                if !image_is_available(record, &self.roots) {
+                if self.similarity_results.is_some()
+                    && !self.image_positions.contains_key(&record.path)
+                {
                     return false;
                 }
                 if !self.folder_filter_matches(&record.path)
@@ -1450,6 +1538,9 @@ impl eframe::App for ImageSearchApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.apply_design_system(ctx);
         self.process_startup_messages();
+        if self.startup_background_pending {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
         self.process_navigation(ctx);
         self.process_worker_messages();
         self.process_face_runtime_messages();
@@ -1668,7 +1759,11 @@ impl eframe::App for ImageSearchApp {
         self.show_image_preview(ctx);
         self.persist_view_settings(ctx);
         if self.navigation.settings.show_tree
-            && self.navigation.observed_file != self.focused_result
+            && self.navigation.observed_file.as_ref()
+                != self
+                    .focused_result
+                    .as_ref()
+                    .filter(|path| self.selected_paths.contains(*path))
         {
             ctx.request_repaint();
         }

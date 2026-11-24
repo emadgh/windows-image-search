@@ -4,7 +4,7 @@ A native, local-first image index and visual search application for Windows, wri
 
 Keyboard shortcuts: select an image and press `Space` for an in-app whole-image preview; use `Left`/`Right` to move through the currently displayed result order, and `Space` or `Esc` to close it. Press `Shift+Space` to toggle the Inspector sidebar. Shortcuts are ignored while typing in a text field.
 
-> **v0.4.4 — Stable release.** Adds a searchable folder and collection tree, automatic folder navigation for selected images, and saved view settings. See the [v0.4.4 release notes](docs/releases/v0.4.4.md).
+> **v0.4.5 — Stable release.** Reduces startup work for large libraries and improves keyboard navigation, folder highlighting, and opening multiple images. See the [v0.4.5 release notes](docs/releases/v0.4.5.md).
 
 ## Current features (v0.4)
 
