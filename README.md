@@ -1,12 +1,38 @@
 # Windows Image Search
 
-A native, local-first image index and visual search application for Windows, written in Rust.
+<img src="assets/windows-image-search.png" alt="Windows Image Search app icon" width="104">
 
-Keyboard shortcuts: select an image and press `Space` for an in-app whole-image preview; use `Left`/`Right` to move through the currently displayed result order, and `Space` or `Esc` to close it. Press `Shift+Space` to toggle the Inspector sidebar. Shortcuts are ignored while typing in a text field.
+**Offline photo search and reverse image search for your own folders on Windows.**
+
+Windows Image Search is a free, open-source desktop app for finding photos and visually similar images on your PC or external drives. Search by filename, tags and EXIF/XMP metadata, describe an image in words, or paste a reference image with `Ctrl+V`. It can also filter by color, find faces and review duplicate photos.
+
+[Download for Windows x64](https://github.com/emadgh/windows-image-search/releases/latest) · [Quick start](#quick-start) · [فارسی](#فارسی)
 
 > **v0.4.5 — Stable release.** Reduces startup work for large libraries and improves keyboard navigation, folder highlighting, and opening multiple images. See the [v0.4.5 release notes](docs/releases/v0.4.5.md).
 
-## Current features (v0.4)
+## فارسی
+
+**Windows Image Search | نرم‌افزار جستجوی عکس و تصویر مشابه در ویندوز**
+
+Windows Image Search یک برنامهٔ رایگان و متن‌باز برای جستجوی عکس در پوشه‌های کامپیوتر و هارد اکسترنال است. می‌توانی عکس‌ها را با نام فایل، تگ، توضیحات، رنگ یا چهره پیدا کنی. برای جستجو بر اساس تصویر، یک عکس نمونه را کپی کن و داخل برنامه `Ctrl+V` بزن تا عکس‌های مشابه در آرشیو خودت نمایش داده شوند. می‌توانی با توصیف متنی هم دنبال تصویر بگردی یا عکس‌های تکراری را بررسی کنی.
+
+جستجو روی کامپیوتر خودت انجام می‌شود و عکس‌ها آپلود نمی‌شوند. بعضی قابلیت‌ها برای دریافت اولیهٔ مدل به اینترنت نیاز دارند و پس از دانلود مدل آفلاین کار می‌کنند.
+
+۱. از [صفحهٔ دانلود Windows Image Search](https://github.com/emadgh/windows-image-search/releases/latest)، فایل `*-win64.zip` را بگیر و همهٔ فایل‌هایش را استخراج کن.
+
+۲. `windows-image-search.exe` را از پوشهٔ استخراج‌شده اجرا کن. در **Collections** یک مجموعه بساز یا انتخاب کن و با **Add folder** پوشهٔ عکس‌ها را اضافه کن.
+
+۳. بعد از ایندکس‌شدن پوشه، با نام فایل یا توضیحات جستجو کن یا برای پیدا کردن عکس مشابه یک تصویر را داخل برنامه Paste کن.
+
+## Quick start
+
+1. [Download the latest Windows x64 ZIP](https://github.com/emadgh/windows-image-search/releases/latest) and extract the entire archive. The executable needs the bundled DLLs in the same directory.
+2. Run `windows-image-search.exe`. Open **Collections**, create or select a collection, and choose **Add folder** to index one or more image folders.
+3. Search by filename or metadata, or paste an image with `Ctrl+V` to find similar images in your library.
+
+Select a result and press `Space` to preview it. Use the arrow keys to navigate images and `Shift+Space` to toggle the Inspector.
+
+## Features
 
 - View preferences persist across restarts: Inspector visibility, thumbnail size and fit, Grid/Details, sorting, appearance, sidebar widths, window size and maximized state.
 - Browse indexed folders in the sidebar collection tree. Folder selection scopes every search mode; selecting a result can reveal and briefly highlight its folder. Configure these behaviors under **Settings → Folders & Collections**.
@@ -31,15 +57,11 @@ Keyboard shortcuts: select an image and press `Space` for an in-app whole-image 
 - Double-click to open an image; context menu can open its containing folder or copy its path.
 - When Everything is installed, the file context menu can search the selected filename in Everything; Ctrl+click searches its longest numeric segment.
 
-## First run and portable indexes
+## Portable indexes and offline use
 
-For the Windows beta, download and extract the complete `*-win64.zip` bundle before starting the app. Keep `windows-image-search.exe` beside the bundled libvips DLLs; an exe copied out of the archive (including the standalone exe asset from older beta releases) cannot start because Windows also needs `libvips-42.dll`, `libglib-2.0-0.dll` and `libgobject-2.0-0.dll`.
+Adding a new folder schedules indexing and creates a `.imagesearch` directory. If the folder already has a valid `.imagesearch/index.sqlite3`, the app reuses the portable index without rescanning the original images. Use **Rescan** when you need to reconcile an index manually.
 
-1. Start `windows-image-search.exe`.
-2. Open **Preferences → Collections**, create/select a Collection, and add folders. New roots are scheduled for indexing automatically.
-3. A new folder gets a `.imagesearch` directory and can then be populated with **Rescan**. If the folder already contains a valid `.imagesearch/index.sqlite3`, the existing portable index is attached and reused without decoding/rescanning the source images.
-4. Metadata, color/texture descriptors, cached thumbnail previews and CLIP embeddings are committed incrementally.
-5. The CLIP model is downloaded on its first use and cached under the Windows user's local application-data directory. After it is cached, similarity search can run offline.
+The CLIP model is downloaded on first use and cached under the Windows user's local application-data directory. After it is cached, similarity search can run offline.
 
 Each configured root owns its durable image-search data:
 
